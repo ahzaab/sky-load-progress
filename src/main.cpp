@@ -4,9 +4,28 @@
 
 namespace
 {
+#ifndef NDEBUG
+    bool OpenDebugConsole()
+    {
+        if (!GetConsoleWindow() && !AllocConsole()) {
+            return false;
+        }
+
+        FILE* stream = nullptr;
+        if (freopen_s(&stream, "CONOUT$", "w", stdout) != 0) {
+            return false;
+        }
+        SetConsoleTitleW(L"Skyrim Load Progress - Debug");
+        return true;
+    }
+#endif
+
     bool InitializeLog()
     {
 #ifndef NDEBUG
+        if (!OpenDebugConsole()) {
+            return false;
+        }
         auto msvc = std::make_shared<spdlog::sinks::msvc_sink_mt>();
         auto console = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
         auto log = std::make_shared<spdlog::logger>("multi_sink", spdlog::sinks_init_list{ msvc, console });
@@ -53,4 +72,3 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
         return false;
     }
 }
-

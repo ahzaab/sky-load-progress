@@ -13,3 +13,5 @@ The first runtime adapter hooks the exact atomic mutations of the three counters
 | distant references | ID 19159 + `0x4E` | ID 19160 + `0x69` |
 
 All six patched instructions are seven-byte `lock inc`/`lock dec` operations. The aggregator defines channels for the additional background-processing, task, and post-processing queues found in the engine diagnostic routine (Address Library ID 13065); those channels remain zero until their producer and completion mutations are identified with the same confidence.
+
+Debug builds allocate a Windows console during plugin initialization and route the stdout logging sink to it. Release builds remain file-only.
