@@ -2,7 +2,7 @@
 
 Skyrim Load Progress adds a progress meter to the loading screen. The meter uses the same artwork as the level progress bar and is placed directly below it.
 
-> **Experimental branch:** `codex/seamless-loading-experiment` keeps Skyrim's loading, fader, and mist update loops running but disables their presentation. This hides both Scaleform movies and suppresses MistMenu's native mist, background, and load-screen NIF rendering. It also disables form-backed image-space modifiers, including their cross-fades. This intentionally exposes whatever the world renderer produces while cells are loading. Expect missing geometry, frozen frames, pop-in, missing gameplay effects, and other visual problems.
+> **Experimental branch:** `codex/seamless-loading-experiment` keeps Skyrim's loading, fader, and mist update loops running but disables their presentation. This hides both Scaleform movies and suppresses MistMenu's native mist, background, and load-screen NIF rendering. It also disables form-backed image-space modifiers, including their cross-fades. The loading loop calls Skyrim's world renderer once per `LoadingMenu::AdvanceMovie` update. Expect missing geometry, frozen frames, pop-in, missing gameplay effects, and other visual problems.
 
 This is still a proof of concept. The plugin currently tracks the reference, critical reference, and distant reference queues used while cells are loading. It writes the queue activity and calculated progress to `SkyrimLoadProgress.log`.
 

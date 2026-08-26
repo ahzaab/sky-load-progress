@@ -25,6 +25,22 @@ namespace load_progress
         AdvanceMovie_t originalFaderAdvanceMovie{};
         AdvanceMovie_t originalMistAdvanceMovie{};
 
+        using RenderWorld_t = void (*)(bool);
+        REL::Relocation<RenderWorld_t> renderWorld{ REL::ID(69398) };
+        thread_local bool renderingWorldFromLoadingMenu = false;
+
+        void RenderWorldDuringLoad()
+        {
+            if (renderingWorldFromLoadingMenu || !RE::Main::WorldRootNode() || !RE::Main::WorldRootCamera()) {
+                return;
+            }
+
+            // The normal main-loop call is skipped while the loading loop owns the frame.
+            renderingWorldFromLoadingMenu = true;
+            renderWorld(false);
+            renderingWorldFromLoadingMenu = false;
+        }
+
         void SetNumber(RE::GFxValue& a_object, const char* a_name, double a_value)
         {
             RE::GFxValue value;
@@ -146,6 +162,7 @@ namespace load_progress
         void LoadingMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
         {
             originalAdvanceMovie(a_menu, a_interval, a_currentTime);
+            RenderWorldDuringLoad();
             if (a_menu && a_menu->uiMovie) {
                 // Keep the loading loop alive, but do not render its movie.
                 a_menu->uiMovie->SetBackgroundAlpha(0.0F);
