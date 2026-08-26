@@ -18,6 +18,18 @@ namespace
         SetConsoleTitleW(L"Skyrim Load Progress - Debug");
         return true;
     }
+
+    bool AttachDebugConsoleSink()
+    {
+        auto log = spdlog::default_logger();
+        if (!log) {
+            return false;
+        }
+        log->sinks().push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
+        log->set_level(spdlog::level::trace);
+        log->flush_on(spdlog::level::trace);
+        return true;
+    }
 #endif
 
     bool InitializeLog()
@@ -60,6 +72,11 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
             return false;
         }
         SKSE::Init(a_skse);
+#ifndef NDEBUG
+        if (!AttachDebugConsoleSink()) {
+            return false;
+        }
+#endif
         logger::info("Skyrim Load Progress {} loading", Version::NAME);
         if (!SKSE::GetMessagingInterface()->RegisterListener("SKSE", MessageHandler)) {
             logger::critical("could not register SKSE message listener");
