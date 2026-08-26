@@ -23,6 +23,7 @@ namespace load_progress
         using AdvanceMovie_t = void (*)(RE::IMenu*, float, std::uint32_t);
         AdvanceMovie_t originalAdvanceMovie{};
         AdvanceMovie_t originalFaderAdvanceMovie{};
+        AdvanceMovie_t originalMistAdvanceMovie{};
 
         void SetNumber(RE::GFxValue& a_object, const char* a_name, double a_value)
         {
@@ -162,6 +163,18 @@ namespace load_progress
             }
         }
 
+        void MistMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
+        {
+            originalMistAdvanceMovie(a_menu, a_interval, a_currentTime);
+            auto* mistMenu = static_cast<RE::MistMenu*>(a_menu);
+            auto& runtimeData = mistMenu->GetRuntimeData();
+            runtimeData.showMist = false;
+            runtimeData.showLoadScreen = false;
+        }
+
+        void DisableMistMenuPostDisplay(RE::IMenu*)
+        {}
+
         void InstallLoadingMenuHook()
         {
             constexpr std::size_t advanceMovieIndex = 0x05;
@@ -178,6 +191,17 @@ namespace load_progress
             const auto original = vtable.write_vfunc(advanceMovieIndex, FaderMenuAdvanceMovie);
             originalFaderAdvanceMovie = reinterpret_cast<AdvanceMovie_t>(original);
             logger::info("installed hidden FaderMenu::AdvanceMovie experiment hook");
+        }
+
+        void InstallMistMenuHooks()
+        {
+            constexpr std::size_t advanceMovieIndex = 0x05;
+            constexpr std::size_t postDisplayIndex = 0x06;
+            REL::Relocation<std::uintptr_t> vtable{ RE::MistMenu::VTABLE[0] };
+            const auto original = vtable.write_vfunc(advanceMovieIndex, MistMenuAdvanceMovie);
+            originalMistAdvanceMovie = reinterpret_cast<AdvanceMovie_t>(original);
+            vtable.write_vfunc(postDisplayIndex, DisableMistMenuPostDisplay);
+            logger::info("disabled MistMenu mist, background, and load-screen model rendering");
         }
 
         void DisableImageSpaceModifier(RE::ImageSpaceModifierInstance*)
@@ -386,6 +410,7 @@ namespace load_progress
         InstallMutationHooks();
         InstallLoadingMenuHook();
         InstallFaderMenuHook();
+        InstallMistMenuHooks();
         InstallImageSpaceModifierHook();
         auto& events = Events::GetSingleton();
         RE::UI::GetSingleton()->AddEventSink<RE::MenuOpenCloseEvent>(&events);
