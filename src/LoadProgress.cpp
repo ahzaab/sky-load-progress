@@ -27,64 +27,82 @@ namespace load_progress
             a_object.SetMember(a_name, value);
         }
 
-        bool DrawRectangle(RE::GFxValue& a_clip, double a_width, double a_height,
-            std::uint32_t a_color, double a_alpha)
+        bool GetNumber(const RE::GFxValue& a_object, const char* a_name, double& a_value)
         {
-            RE::GFxValue ignored;
-            RE::GFxValue fillArgs[2];
-            fillArgs[0].SetNumber(a_color);
-            fillArgs[1].SetNumber(a_alpha);
-            if (!a_clip.Invoke("beginFill", &ignored, fillArgs, 2)) {
+            RE::GFxValue value;
+            if (!a_object.GetMember(a_name, &value) || !value.IsNumber()) {
                 return false;
             }
-
-            const std::array<std::pair<double, double>, 5> points{{
-                { 0.0, 0.0 }, { a_width, 0.0 }, { a_width, a_height }, { 0.0, a_height }, { 0.0, 0.0 }
-            }};
-            for (std::size_t i = 0; i < points.size(); ++i) {
-                RE::GFxValue args[2];
-                args[0].SetNumber(points[i].first);
-                args[1].SetNumber(points[i].second);
-                if (!a_clip.Invoke(i == 0 ? "moveTo" : "lineTo", &ignored, args, 2)) {
-                    return false;
-                }
-            }
-            return a_clip.Invoke("endFill", &ignored, nullptr, 0);
+            a_value = value.GetNumber();
+            return true;
         }
 
         bool CreateProgressBar(RE::GFxMovieView* a_view)
         {
-            RE::GFxValue container;
+            RE::GFxValue meterRect;
+            RE::GFxValue source;
+            if (!a_view->GetVariable(&meterRect, "_root.Menu_mc.LevelMeterRect") || !meterRect.IsObject() ||
+                !meterRect.GetMember("LevelProgressBar", &source) || !source.IsObject()) {
+                logger::warn("could not find _root.Menu_mc.LevelMeterRect.LevelProgressBar");
+                return false;
+            }
+
             RE::GFxValue args[2];
             args[0].SetString("SkyrimLoadProgress");
-            a_view->Invoke("_root.getNextHighestDepth", &args[1], nullptr, 0);
-            if (!a_view->Invoke("_root.createEmptyMovieClip", &container, args, 2) || !container.IsObject()) {
+            meterRect.Invoke("getNextHighestDepth", &args[1], nullptr, 0);
+            RE::GFxValue ignored;
+            if (!source.Invoke("duplicateMovieClip", &ignored, args, 2)) {
+                logger::warn("LevelProgressBar.duplicateMovieClip failed");
                 return false;
             }
 
-            constexpr double width = 600.0;
-            constexpr double height = 12.0;
-            SetNumber(container, "_x", 340.0);
-            SetNumber(container, "_y", 650.0);
-
-            RE::GFxValue background;
-            args[0].SetString("Background");
-            container.Invoke("getNextHighestDepth", &args[1], nullptr, 0);
-            if (!container.Invoke("createEmptyMovieClip", &background, args, 2) || !background.IsObject() ||
-                !DrawRectangle(background, width, height, 0x101010, 75.0)) {
+            RE::GFxValue progressBar;
+            if (!meterRect.GetMember("SkyrimLoadProgress", &progressBar) || !progressBar.IsObject()) {
+                logger::warn("duplicated level progress bar was not addressable");
                 return false;
             }
 
-            RE::GFxValue fill;
-            args[0].SetString("Fill");
-            container.Invoke("getNextHighestDepth", &args[1], nullptr, 0);
-            if (!container.Invoke("createEmptyMovieClip", &fill, args, 2) || !fill.IsObject() ||
-                !DrawRectangle(fill, width, height, 0x8BAF50, 100.0)) {
-                return false;
-            }
-            SetNumber(fill, "_xscale", 0.0);
-            logger::info("injected loading progress bar into Loading Menu");
+            double x = 0.0;
+            double y = 0.0;
+            double height = 0.0;
+            GetNumber(source, "_x", x);
+            GetNumber(source, "_y", y);
+            GetNumber(source, "_height", height);
+            SetNumber(progressBar, "_x", x);
+            SetNumber(progressBar, "_y", y + height + 6.0);
+
+            RE::GFxValue frameArgument;
+            frameArgument.SetString("Empty");
+            progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1);
+            double emptyFrame = 1.0;
+            GetNumber(progressBar, "_currentframe", emptyFrame);
+            frameArgument.SetString("Full");
+            progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1);
+            double fullFrame = emptyFrame;
+            GetNumber(progressBar, "_currentframe", fullFrame);
+            SetNumber(progressBar, "_slpEmptyFrame", emptyFrame);
+            SetNumber(progressBar, "_slpFullFrame", fullFrame);
+
+            logger::info("duplicated Loading Menu level meter at ({:.1f}, {:.1f}); height={:.1f}",
+                x, y + height + 6.0, height);
             return true;
+        }
+
+        bool SetMeterPercent(RE::GFxValue& a_meter, double a_percent)
+        {
+            double emptyFrame = 0.0;
+            double fullFrame = 0.0;
+            if (!GetNumber(a_meter, "_slpEmptyFrame", emptyFrame) ||
+                !GetNumber(a_meter, "_slpFullFrame", fullFrame) || fullFrame < emptyFrame) {
+                return false;
+            }
+
+            const auto percent = std::clamp(a_percent, 0.0, 100.0);
+            const auto frame = std::floor(emptyFrame + (fullFrame - emptyFrame) * percent / 100.0);
+            RE::GFxValue ignored;
+            RE::GFxValue argument;
+            argument.SetNumber(frame);
+            return a_meter.Invoke("gotoAndStop", &ignored, &argument, 1);
         }
 
         void UpdateProgressBar(RE::IMenu* a_menu)
@@ -93,20 +111,27 @@ namespace load_progress
                 return;
             }
 
-            RE::GFxValue container;
-            if (!a_menu->uiMovie->GetVariable(&container, "_root.SkyrimLoadProgress") || !container.IsObject()) {
+            RE::GFxValue progressBar;
+            if (!a_menu->uiMovie->GetVariable(
+                    &progressBar, "_root.Menu_mc.LevelMeterRect.SkyrimLoadProgress") ||
+                !progressBar.IsObject()) {
                 if (!CreateProgressBar(a_menu->uiMovie.get())) {
                     return;
                 }
-                if (!a_menu->uiMovie->GetVariable(&container, "_root.SkyrimLoadProgress") || !container.IsObject()) {
+                if (!a_menu->uiMovie->GetVariable(
+                        &progressBar, "_root.Menu_mc.LevelMeterRect.SkyrimLoadProgress") ||
+                    !progressBar.IsObject()) {
                     return;
                 }
             }
 
-            RE::GFxValue fill;
-            if (container.GetMember("Fill", &fill) && fill.IsObject()) {
-                const auto basisPoints = displayedBasisPoints.load(std::memory_order_acquire);
-                SetNumber(fill, "_xscale", static_cast<double>(basisPoints) / 100.0);
+            const auto basisPoints = displayedBasisPoints.load(std::memory_order_acquire);
+            if (!SetMeterPercent(progressBar, static_cast<double>(basisPoints) / 100.0)) {
+                static bool warned = false;
+                if (!warned) {
+                    logger::warn("duplicated level meter has invalid Empty/Full frame labels");
+                    warned = true;
+                }
             }
         }
 
