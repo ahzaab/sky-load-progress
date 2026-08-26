@@ -13,11 +13,124 @@ namespace load_progress
         std::array<std::atomic_uint64_t, queueCount> liveRemaining{};
         Aggregator aggregator;
         std::atomic_bool epochActive{ false };
+        std::atomic_uint32_t displayedPercent{};
+        std::atomic_uint64_t progressRevision{};
         std::mutex stateLock;
         Progress lastLogged{};
 
+        using AdvanceMovie_t = void (*)(RE::IMenu*, float, std::uint32_t);
+        AdvanceMovie_t originalAdvanceMovie{};
+
+        void SetNumber(RE::GFxValue& a_object, const char* a_name, double a_value)
+        {
+            RE::GFxValue value;
+            value.SetNumber(a_value);
+            a_object.SetMember(a_name, value);
+        }
+
+        bool DrawRectangle(RE::GFxValue& a_clip, double a_width, double a_height,
+            std::uint32_t a_color, double a_alpha)
+        {
+            RE::GFxValue ignored;
+            RE::GFxValue fillArgs[2];
+            fillArgs[0].SetNumber(a_color);
+            fillArgs[1].SetNumber(a_alpha);
+            if (!a_clip.Invoke("beginFill", &ignored, fillArgs, 2)) {
+                return false;
+            }
+
+            const std::array<std::pair<double, double>, 5> points{{
+                { 0.0, 0.0 }, { a_width, 0.0 }, { a_width, a_height }, { 0.0, a_height }, { 0.0, 0.0 }
+            }};
+            for (std::size_t i = 0; i < points.size(); ++i) {
+                RE::GFxValue args[2];
+                args[0].SetNumber(points[i].first);
+                args[1].SetNumber(points[i].second);
+                if (!a_clip.Invoke(i == 0 ? "moveTo" : "lineTo", &ignored, args, 2)) {
+                    return false;
+                }
+            }
+            return a_clip.Invoke("endFill", &ignored, nullptr, 0);
+        }
+
+        bool CreateProgressBar(RE::GFxMovieView* a_view)
+        {
+            RE::GFxValue container;
+            RE::GFxValue args[2];
+            args[0].SetString("SkyrimLoadProgress");
+            a_view->Invoke("_root.getNextHighestDepth", &args[1], nullptr, 0);
+            if (!a_view->Invoke("_root.createEmptyMovieClip", &container, args, 2) || !container.IsObject()) {
+                return false;
+            }
+
+            constexpr double width = 600.0;
+            constexpr double height = 12.0;
+            SetNumber(container, "_x", 340.0);
+            SetNumber(container, "_y", 650.0);
+
+            RE::GFxValue background;
+            args[0].SetString("Background");
+            container.Invoke("getNextHighestDepth", &args[1], nullptr, 0);
+            if (!container.Invoke("createEmptyMovieClip", &background, args, 2) || !background.IsObject() ||
+                !DrawRectangle(background, width, height, 0x101010, 75.0)) {
+                return false;
+            }
+
+            RE::GFxValue fill;
+            args[0].SetString("Fill");
+            container.Invoke("getNextHighestDepth", &args[1], nullptr, 0);
+            if (!container.Invoke("createEmptyMovieClip", &fill, args, 2) || !fill.IsObject() ||
+                !DrawRectangle(fill, width, height, 0x8BAF50, 100.0)) {
+                return false;
+            }
+            SetNumber(fill, "_xscale", 0.0);
+            logger::info("injected loading progress bar into Loading Menu");
+            return true;
+        }
+
+        void UpdateProgressBar(RE::IMenu* a_menu)
+        {
+            if (!a_menu || !a_menu->uiMovie) {
+                return;
+            }
+
+            RE::GFxValue container;
+            if (!a_menu->uiMovie->GetVariable(&container, "_root.SkyrimLoadProgress") || !container.IsObject()) {
+                if (!CreateProgressBar(a_menu->uiMovie.get())) {
+                    return;
+                }
+                if (!a_menu->uiMovie->GetVariable(&container, "_root.SkyrimLoadProgress") || !container.IsObject()) {
+                    return;
+                }
+            }
+
+            RE::GFxValue fill;
+            if (container.GetMember("Fill", &fill) && fill.IsObject()) {
+                SetNumber(fill, "_xscale", displayedPercent.load(std::memory_order_relaxed));
+            }
+        }
+
+        void LoadingMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
+        {
+            originalAdvanceMovie(a_menu, a_interval, a_currentTime);
+            UpdateProgressBar(a_menu);
+        }
+
+        void InstallLoadingMenuHook()
+        {
+            constexpr std::size_t advanceMovieIndex = 0x05;
+            REL::Relocation<std::uintptr_t> vtable{ RE::LoadingMenu::VTABLE[0] };
+            const auto original = vtable.write_vfunc(advanceMovieIndex, LoadingMenuAdvanceMovie);
+            originalAdvanceMovie = reinterpret_cast<AdvanceMovie_t>(original);
+            logger::info("installed LoadingMenu::AdvanceMovie presentation hook");
+        }
+
         void LogProgress(const Progress& a_progress)
         {
+            const auto percent = a_progress.total ?
+                static_cast<std::uint32_t>(std::clamp(a_progress.fraction * 100.0, 0.0, 100.0)) : 0u;
+            displayedPercent.store(percent, std::memory_order_relaxed);
+            progressRevision.fetch_add(1, std::memory_order_release);
             if (a_progress.total == lastLogged.total && a_progress.completed == lastLogged.completed &&
                 a_progress.remaining == lastLogged.remaining) {
                 return;
@@ -199,6 +312,7 @@ namespace load_progress
     void Install()
     {
         InstallMutationHooks();
+        InstallLoadingMenuHook();
         auto& events = Events::GetSingleton();
         RE::UI::GetSingleton()->AddEventSink<RE::MenuOpenCloseEvent>(&events);
         RE::ScriptEventSourceHolder::GetSingleton()->AddEventSink<RE::TESCellFullyLoadedEvent>(&events);

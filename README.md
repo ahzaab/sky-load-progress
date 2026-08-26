@@ -15,3 +15,5 @@ The first runtime adapter hooks the exact atomic mutations of the three counters
 All six patched instructions are seven-byte `lock inc`/`lock dec` operations. The aggregator defines channels for the additional background-processing, task, and post-processing queues found in the engine diagnostic routine (Address Library ID 13065); those channels remain zero until their producer and completion mutations are identified with the same confidence.
 
 Debug builds allocate a Windows console during plugin initialization and attach the stdout sink to CommonLib's logger after `SKSE::Init`. Trace messages are flushed immediately to both the console and the normal SKSE log file. Release builds remain file-only.
+
+The proof of concept also hooks `LoadingMenu::AdvanceMovie` at vtable slot `0x05` for presentation only. The original engine update runs first; the post-update pass injects a native Scaleform movie clip named `_root.SkyrimLoadProgress` and scales its stamina-green fill from the event-driven aggregate. Queue state is never polled from this hook.
