@@ -13,8 +13,7 @@ namespace load_progress
         std::array<std::atomic_uint64_t, queueCount> liveRemaining{};
         Aggregator aggregator;
         std::atomic_bool epochActive{ false };
-        std::atomic_uint32_t displayedPercent{};
-        std::atomic_uint64_t progressRevision{};
+        std::atomic_uint32_t displayedBasisPoints{};
         std::mutex stateLock;
         Progress lastLogged{};
 
@@ -106,7 +105,8 @@ namespace load_progress
 
             RE::GFxValue fill;
             if (container.GetMember("Fill", &fill) && fill.IsObject()) {
-                SetNumber(fill, "_xscale", displayedPercent.load(std::memory_order_relaxed));
+                const auto basisPoints = displayedBasisPoints.load(std::memory_order_acquire);
+                SetNumber(fill, "_xscale", static_cast<double>(basisPoints) / 100.0);
             }
         }
 
@@ -127,10 +127,12 @@ namespace load_progress
 
         void LogProgress(const Progress& a_progress)
         {
-            const auto percent = a_progress.total ?
-                static_cast<std::uint32_t>(std::clamp(a_progress.fraction * 100.0, 0.0, 100.0)) : 0u;
-            displayedPercent.store(percent, std::memory_order_relaxed);
-            progressRevision.fetch_add(1, std::memory_order_release);
+            const auto candidate = a_progress.total ?
+                static_cast<std::uint32_t>(std::clamp(a_progress.fraction * 10000.0, 0.0, 10000.0)) : 0u;
+            auto displayed = displayedBasisPoints.load(std::memory_order_relaxed);
+            while (candidate > displayed &&
+                !displayedBasisPoints.compare_exchange_weak(
+                    displayed, candidate, std::memory_order_release, std::memory_order_relaxed)) {}
             if (a_progress.total == lastLogged.total && a_progress.completed == lastLogged.completed &&
                 a_progress.remaining == lastLogged.remaining) {
                 return;
@@ -221,6 +223,7 @@ namespace load_progress
 
                 if (a_event->opening) {
                     std::scoped_lock lock(stateLock);
+                    displayedBasisPoints.store(0, std::memory_order_release);
                     aggregator.Begin();
                     for (std::size_t i = 0; i < queueCount; ++i) {
                         const auto baseline = liveRemaining[i].load(std::memory_order_relaxed);

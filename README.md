@@ -17,3 +17,5 @@ All six patched instructions are seven-byte `lock inc`/`lock dec` operations. Th
 Debug builds allocate a Windows console during plugin initialization and attach the stdout sink to CommonLib's logger after `SKSE::Init`. Trace messages are flushed immediately to both the console and the normal SKSE log file. Release builds remain file-only.
 
 The proof of concept also hooks `LoadingMenu::AdvanceMovie` at vtable slot `0x05` for presentation only. The original engine update runs first; the post-update pass injects a native Scaleform movie clip named `_root.SkyrimLoadProgress` and scales its stamina-green fill from the event-driven aggregate. Queue state is never polled from this hook.
+
+Because newly discovered work can increase the denominator during a load, the raw diagnostic fraction may decrease. The displayed bar uses a per-epoch monotonic high-water mark, stored in basis points, so late enqueue events cannot move it backward.
