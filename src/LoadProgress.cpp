@@ -1,3 +1,6 @@
+// Skyrim Load Progress
+// Copyright (c) 2026 ahzaab
+
 #include "PCH.h"
 #include "LoadProgress.h"
 
@@ -47,6 +50,7 @@ namespace load_progress
                 return false;
             }
 
+            // Duplicate the active skin instead of supplying our own meter artwork.
             RE::GFxValue args[2];
             args[0].SetString("SkyrimLoadProgress");
             meterRect.Invoke("getNextHighestDepth", &args[1], nullptr, 0);
@@ -80,6 +84,7 @@ namespace load_progress
             progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1);
             double fullFrame = emptyFrame;
             GetNumber(progressBar, "_currentframe", fullFrame);
+            // Some loading menu skins place Full before Empty on the timeline.
             SetNumber(progressBar, "_slpEmptyFrame", emptyFrame);
             SetNumber(progressBar, "_slpFullFrame", fullFrame);
 
@@ -156,6 +161,7 @@ namespace load_progress
             const auto candidate = a_progress.total ?
                 static_cast<std::uint32_t>(std::clamp(a_progress.fraction * 10000.0, 0.0, 10000.0)) : 0u;
             auto displayed = displayedBasisPoints.load(std::memory_order_relaxed);
+            // Newly queued work can lower the raw fraction, but the meter should not move backward.
             while (candidate > displayed &&
                 !displayedBasisPoints.compare_exchange_weak(
                     displayed, candidate, std::memory_order_release, std::memory_order_relaxed)) {}
@@ -221,6 +227,7 @@ namespace load_progress
             SKSE::AllocTrampoline(4096);
             for (const auto& hook : mutationHooks) {
                 const auto address = REL::Relocation<std::uintptr_t>(hook.id).address() + hook.offset;
+                // Each target is a seven-byte lock inc/dec instruction.
                 if (!SKSE::stl::install_context_hook(address, 7, hook.callback, 7)) {
                     throw std::runtime_error(fmt::format("could not install {} hook at {:X}", hook.name, address));
                 }
@@ -251,6 +258,7 @@ namespace load_progress
                     std::scoped_lock lock(stateLock);
                     displayedBasisPoints.store(0, std::memory_order_release);
                     aggregator.Begin();
+                    // Work may already be queued before the Loading Menu opens.
                     for (std::size_t i = 0; i < queueCount; ++i) {
                         const auto baseline = liveRemaining[i].load(std::memory_order_relaxed);
                         for (std::uint64_t n = 0; n < baseline; ++n) {

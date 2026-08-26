@@ -21,7 +21,7 @@ configure_file(cmake/Version.h.in ${CMAKE_CURRENT_BINARY_DIR}/include/Version.h 
 
 add_commonlibsse_plugin(${PROJECT_NAME}
     NAME "Skyrim Load Progress"
-    AUTHOR "dgcoo"
+    AUTHOR "ahzaab"
     VERSION ${PROJECT_VERSION}
     USE_ADDRESS_LIBRARY
     SOURCES
