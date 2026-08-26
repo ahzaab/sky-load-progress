@@ -83,8 +83,9 @@ namespace load_progress
             SetNumber(progressBar, "_slpEmptyFrame", emptyFrame);
             SetNumber(progressBar, "_slpFullFrame", fullFrame);
 
-            logger::info("duplicated Loading Menu level meter at ({:.1f}, {:.1f}); height={:.1f}",
-                x, y + height + 6.0, height);
+            logger::info(
+                "duplicated Loading Menu level meter at ({:.1f}, {:.1f}); height={:.1f}, frames empty={:.0f} full={:.0f}",
+                x, y + height + 6.0, height, emptyFrame, fullFrame);
             return true;
         }
 
@@ -93,7 +94,7 @@ namespace load_progress
             double emptyFrame = 0.0;
             double fullFrame = 0.0;
             if (!GetNumber(a_meter, "_slpEmptyFrame", emptyFrame) ||
-                !GetNumber(a_meter, "_slpFullFrame", fullFrame) || fullFrame < emptyFrame) {
+                !GetNumber(a_meter, "_slpFullFrame", fullFrame) || fullFrame == emptyFrame) {
                 return false;
             }
 
