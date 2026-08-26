@@ -13,6 +13,7 @@ set(ENABLE_SKYRIM_SE ON CACHE BOOL "Enable Skyrim SE support" FORCE)
 set(ENABLE_SKYRIM_AE ON CACHE BOOL "Enable Skyrim AE support" FORCE)
 set(ENABLE_SKYRIM_VR ON CACHE BOOL "Enable Skyrim VR support" FORCE)
 set(BUILD_TESTS OFF CACHE BOOL "Build dependency tests" FORCE)
+set(SKSE_SUPPORT_XBYAK ON CACHE BOOL "Enable instruction-context hooks" FORCE)
 add_subdirectory(external/CommonLibSSE-NG)
 include(external/CommonLibSSE-NG/cmake/CommonLibSSE.cmake)
 
@@ -32,4 +33,3 @@ add_commonlibsse_plugin(${PROJECT_NAME}
 
 target_include_directories(${PROJECT_NAME} PRIVATE include ${CMAKE_CURRENT_BINARY_DIR}/include)
 target_precompile_headers(${PROJECT_NAME} PRIVATE include/PCH.h)
-

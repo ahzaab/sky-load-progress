@@ -9,57 +9,81 @@ namespace load_progress
             "critical-refs", "refs", "distant-refs", "background", "tasks", "post-processing"
         });
 
+        constexpr std::size_t queueCount = static_cast<std::size_t>(Queue::count);
+        std::array<std::atomic_uint64_t, queueCount> liveRemaining{};
         Aggregator aggregator;
         std::atomic_bool epochActive{ false };
-        std::atomic_bool pumpScheduled{ false };
         std::mutex stateLock;
         Progress lastLogged{};
 
-        Snapshot ReadSnapshot()
+        void LogProgress(const Progress& a_progress)
         {
-            Snapshot result;
-            const auto* player = RE::PlayerCharacter::GetSingleton();
-            const auto* cell = player ? player->GetParentCell() : nullptr;
-            if (!cell) {
-                return result;
-            }
-
-            const auto* loaded = cell->GetRuntimeData().loadedData;
-            if (!loaded) {
-                return result;
-            }
-
-            const auto nonnegative = [](std::int32_t a_value) {
-                return static_cast<std::uint64_t>(std::max(a_value, 0));
-            };
-            result.remaining[static_cast<std::size_t>(Queue::criticalReferences)] = nonnegative(loaded->criticalQueuedRefCount);
-            result.remaining[static_cast<std::size_t>(Queue::references)] = nonnegative(loaded->queuedRefCount);
-            result.remaining[static_cast<std::size_t>(Queue::distantReferences)] = nonnegative(loaded->queuedDistantRefCount);
-            return result;
-        }
-
-        void Pump()
-        {
-            pumpScheduled.store(false);
-            if (!epochActive.load()) {
+            if (a_progress.total == lastLogged.total && a_progress.completed == lastLogged.completed &&
+                a_progress.remaining == lastLogged.remaining) {
                 return;
             }
+            logger::info("load progress completed={} remaining={} total={} percent={:.1f}",
+                a_progress.completed, a_progress.remaining, a_progress.total, a_progress.fraction * 100.0);
+            lastLogged = a_progress;
+        }
 
-            const auto snapshot = ReadSnapshot();
-            Progress progress;
-            {
-                std::scoped_lock lock(stateLock);
-                progress = aggregator.Observe(snapshot);
-                if (progress.total != lastLogged.total || progress.completed != lastLogged.completed ||
-                    progress.remaining != lastLogged.remaining) {
-                    logger::info("load progress completed={} remaining={} total={} percent={:.1f}",
-                        progress.completed, progress.remaining, progress.total, progress.fraction * 100.0);
-                    lastLogged = progress;
-                }
+        void OnEnqueue(Queue a_queue)
+        {
+            liveRemaining[static_cast<std::size_t>(a_queue)].fetch_add(1, std::memory_order_relaxed);
+            if (!epochActive.load(std::memory_order_acquire)) {
+                return;
             }
+            std::scoped_lock lock(stateLock);
+            aggregator.Enqueue(a_queue);
+            LogProgress(aggregator.Current());
+        }
 
-            if (!pumpScheduled.exchange(true)) {
-                SKSE::GetTaskInterface()->AddTask(Pump);
+        void OnComplete(Queue a_queue)
+        {
+            auto& live = liveRemaining[static_cast<std::size_t>(a_queue)];
+            auto value = live.load(std::memory_order_relaxed);
+            while (value != 0 && !live.compare_exchange_weak(value, value - 1, std::memory_order_relaxed)) {}
+            if (!epochActive.load(std::memory_order_acquire)) {
+                return;
+            }
+            std::scoped_lock lock(stateLock);
+            aggregator.Complete(a_queue);
+            LogProgress(aggregator.Current());
+        }
+
+        void CriticalEnqueue(CONTEXT&) { OnEnqueue(Queue::criticalReferences); }
+        void CriticalComplete(CONTEXT&) { OnComplete(Queue::criticalReferences); }
+        void ReferenceEnqueue(CONTEXT&) { OnEnqueue(Queue::references); }
+        void ReferenceComplete(CONTEXT&) { OnComplete(Queue::references); }
+        void DistantEnqueue(CONTEXT&) { OnEnqueue(Queue::distantReferences); }
+        void DistantComplete(CONTEXT&) { OnComplete(Queue::distantReferences); }
+
+        struct MutationHook
+        {
+            REL::ID id;
+            std::ptrdiff_t offset;
+            void (*callback)(CONTEXT&);
+            std::string_view name;
+        };
+
+        const auto mutationHooks = std::to_array<MutationHook>({
+            { REL::ID(19155), 0x07, CriticalEnqueue, "critical enqueue" },
+            { REL::ID(19156), 0x0C, CriticalComplete, "critical completion" },
+            { REL::ID(19151), 0x07, ReferenceEnqueue, "reference enqueue" },
+            { REL::ID(19152), 0x0C, ReferenceComplete, "reference completion" },
+            { REL::ID(19159), 0x4E, DistantEnqueue, "distant enqueue" },
+            { REL::ID(19160), 0x69, DistantComplete, "distant completion" }
+        });
+
+        void InstallMutationHooks()
+        {
+            SKSE::AllocTrampoline(4096);
+            for (const auto& hook : mutationHooks) {
+                const auto address = REL::Relocation<std::uintptr_t>(hook.id).address() + hook.offset;
+                if (!SKSE::stl::install_context_hook(address, 7, hook.callback, 7)) {
+                    throw std::runtime_error(fmt::format("could not install {} hook at {:X}", hook.name, address));
+                }
+                logger::info("installed direct {} hook at {:X}", hook.name, address);
             }
         }
 
@@ -83,19 +107,22 @@ namespace load_progress
                 }
 
                 if (a_event->opening) {
-                    {
-                        std::scoped_lock lock(stateLock);
-                        aggregator.Begin();
-                        lastLogged = {};
-                    }
-                    epochActive.store(true);
-                    logger::info("loading epoch began: Loading Menu opened");
-                    if (!pumpScheduled.exchange(true)) {
-                        SKSE::GetTaskInterface()->AddTask(Pump);
-                    }
-                } else {
-                    epochActive.store(false);
                     std::scoped_lock lock(stateLock);
+                    aggregator.Begin();
+                    for (std::size_t i = 0; i < queueCount; ++i) {
+                        const auto baseline = liveRemaining[i].load(std::memory_order_relaxed);
+                        for (std::uint64_t n = 0; n < baseline; ++n) {
+                            aggregator.Enqueue(static_cast<Queue>(i));
+                        }
+                    }
+                    lastLogged = {};
+                    epochActive.store(true, std::memory_order_release);
+                    logger::info("loading epoch began: Loading Menu opened; baseline remaining={}",
+                        aggregator.Current().remaining);
+                    LogProgress(aggregator.Current());
+                } else {
+                    std::scoped_lock lock(stateLock);
+                    epochActive.store(false, std::memory_order_release);
                     const auto final = aggregator.Current();
                     logger::info("loading epoch ended: Loading Menu closed; completed={} remaining={} total={}",
                         final.completed, final.remaining, final.total);
@@ -108,7 +135,7 @@ namespace load_progress
                 const RE::TESCellFullyLoadedEvent* a_event,
                 RE::BSTEventSource<RE::TESCellFullyLoadedEvent>*) override
             {
-                if (epochActive.load() && a_event && a_event->cell) {
+                if (epochActive.load(std::memory_order_acquire) && a_event && a_event->cell) {
                     logger::info("cell fully loaded: formID={:08X} editorID='{}'",
                         a_event->cell->GetFormID(), a_event->cell->GetFormEditorID());
                 }
@@ -119,37 +146,51 @@ namespace load_progress
 
     void Aggregator::Begin()
     {
-        previous_.fill(0);
-        discovered_.fill(0);
+        remaining_.fill(0);
+        total_.fill(0);
         progress_ = {};
         active_ = true;
     }
 
-    Progress Aggregator::Observe(const Snapshot& a_snapshot)
+    void Aggregator::Enqueue(Queue a_queue)
     {
         if (!active_) {
-            return progress_;
+            return;
         }
+        const auto index = static_cast<std::size_t>(a_queue);
+        ++remaining_[index];
+        ++total_[index];
+        logger::debug("queue '{}' enqueued one item", queueNames[index]);
+        Recalculate();
+    }
 
-        std::uint64_t remaining = 0;
-        std::uint64_t total = 0;
-        for (std::size_t i = 0; i < a_snapshot.remaining.size(); ++i) {
-            const auto current = a_snapshot.remaining[i];
-            if (current > previous_[i]) {
-                const auto added = current - previous_[i];
-                discovered_[i] += added;
-                logger::debug("queue '{}' discovered {} work items", queueNames[i], added);
-            }
-            previous_[i] = current;
-            remaining += current;
-            total += discovered_[i];
+    void Aggregator::Complete(Queue a_queue)
+    {
+        if (!active_) {
+            return;
         }
+        const auto index = static_cast<std::size_t>(a_queue);
+        if (remaining_[index] == 0) {
+            ++total_[index];
+            logger::debug("queue '{}' completed an unobserved item", queueNames[index]);
+        } else {
+            --remaining_[index];
+            logger::debug("queue '{}' completed one item", queueNames[index]);
+        }
+        Recalculate();
+    }
 
-        progress_.total = total;
-        progress_.remaining = std::min(remaining, total);
-        progress_.completed = total - progress_.remaining;
-        progress_.fraction = total ? static_cast<double>(progress_.completed) / static_cast<double>(total) : 0.0;
-        return progress_;
+    void Aggregator::Recalculate()
+    {
+        progress_.total = 0;
+        progress_.remaining = 0;
+        for (std::size_t i = 0; i < queueCount; ++i) {
+            progress_.total += total_[i];
+            progress_.remaining += remaining_[i];
+        }
+        progress_.completed = progress_.total - progress_.remaining;
+        progress_.fraction = progress_.total ?
+            static_cast<double>(progress_.completed) / static_cast<double>(progress_.total) : 0.0;
     }
 
     Progress Aggregator::Current() const { return progress_; }
@@ -157,10 +198,10 @@ namespace load_progress
 
     void Install()
     {
+        InstallMutationHooks();
         auto& events = Events::GetSingleton();
         RE::UI::GetSingleton()->AddEventSink<RE::MenuOpenCloseEvent>(&events);
         RE::ScriptEventSourceHolder::GetSingleton()->AddEventSink<RE::TESCellFullyLoadedEvent>(&events);
         logger::info("installed loading-menu and cell-fully-loaded event sinks");
     }
 }
-

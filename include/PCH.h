@@ -11,6 +11,7 @@
 
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>
+#include <SKSE/ContextHook.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #ifndef NDEBUG
 #    include <spdlog/sinks/msvc_sink.h>
@@ -19,4 +20,3 @@
 
 using namespace std::literals;
 namespace logger = SKSE::log;
-

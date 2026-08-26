@@ -13,11 +13,6 @@ namespace load_progress
         count
     };
 
-    struct Snapshot
-    {
-        std::array<std::uint64_t, static_cast<std::size_t>(Queue::count)> remaining{};
-    };
-
     struct Progress
     {
         std::uint64_t total{};
@@ -30,17 +25,19 @@ namespace load_progress
     {
     public:
         void Begin();
-        [[nodiscard]] Progress Observe(const Snapshot& a_snapshot);
+        void Enqueue(Queue a_queue);
+        void Complete(Queue a_queue);
         [[nodiscard]] Progress Current() const;
         void End();
 
     private:
-        std::array<std::uint64_t, static_cast<std::size_t>(Queue::count)> previous_{};
-        std::array<std::uint64_t, static_cast<std::size_t>(Queue::count)> discovered_{};
+        void Recalculate();
+
+        std::array<std::uint64_t, static_cast<std::size_t>(Queue::count)> remaining_{};
+        std::array<std::uint64_t, static_cast<std::size_t>(Queue::count)> total_{};
         Progress progress_{};
         bool active_{};
     };
 
     void Install();
 }
-
