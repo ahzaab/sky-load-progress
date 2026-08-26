@@ -1,0 +1,6 @@
+#pragma once
+namespace Version
+{
+    inline constexpr auto NAME = "@PROJECT_VERSION@"sv;
+}
+
