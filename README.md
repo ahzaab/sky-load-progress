@@ -2,6 +2,8 @@
 
 Skyrim Load Progress adds a progress meter to the loading screen. The meter uses the same artwork as the level progress bar and is placed directly below it.
 
+> **Experimental branch:** `codex/seamless-loading-experiment` keeps Skyrim's loading and fader update loops running but hides both movies. It also disables form-backed image-space modifiers, including their cross-fades. This intentionally exposes whatever the renderer produces while cells are loading. Expect missing geometry, frozen frames, pop-in, missing gameplay effects, and other visual problems.
+
 This is still a proof of concept. The plugin currently tracks the reference, critical reference, and distant reference queues used while cells are loading. It writes the queue activity and calculated progress to `SkyrimLoadProgress.log`.
 
 ## How it Works

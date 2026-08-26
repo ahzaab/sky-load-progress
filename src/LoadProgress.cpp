@@ -22,6 +22,7 @@ namespace load_progress
 
         using AdvanceMovie_t = void (*)(RE::IMenu*, float, std::uint32_t);
         AdvanceMovie_t originalAdvanceMovie{};
+        AdvanceMovie_t originalFaderAdvanceMovie{};
 
         void SetNumber(RE::GFxValue& a_object, const char* a_name, double a_value)
         {
@@ -144,7 +145,21 @@ namespace load_progress
         void LoadingMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
         {
             originalAdvanceMovie(a_menu, a_interval, a_currentTime);
-            UpdateProgressBar(a_menu);
+            if (a_menu && a_menu->uiMovie) {
+                // Keep the loading loop alive, but do not render its movie.
+                a_menu->uiMovie->SetBackgroundAlpha(0.0F);
+                a_menu->uiMovie->SetVisible(false);
+            }
+        }
+
+        void FaderMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
+        {
+            originalFaderAdvanceMovie(a_menu, a_interval, a_currentTime);
+            if (a_menu && a_menu->uiMovie) {
+                // FaderMenu supplies the black or white transition over the world.
+                a_menu->uiMovie->SetBackgroundAlpha(0.0F);
+                a_menu->uiMovie->SetVisible(false);
+            }
         }
 
         void InstallLoadingMenuHook()
@@ -153,7 +168,27 @@ namespace load_progress
             REL::Relocation<std::uintptr_t> vtable{ RE::LoadingMenu::VTABLE[0] };
             const auto original = vtable.write_vfunc(advanceMovieIndex, LoadingMenuAdvanceMovie);
             originalAdvanceMovie = reinterpret_cast<AdvanceMovie_t>(original);
-            logger::info("installed LoadingMenu::AdvanceMovie presentation hook");
+            logger::info("installed hidden LoadingMenu::AdvanceMovie experiment hook");
+        }
+
+        void InstallFaderMenuHook()
+        {
+            constexpr std::size_t advanceMovieIndex = 0x05;
+            REL::Relocation<std::uintptr_t> vtable{ RE::FaderMenu::VTABLE[0] };
+            const auto original = vtable.write_vfunc(advanceMovieIndex, FaderMenuAdvanceMovie);
+            originalFaderAdvanceMovie = reinterpret_cast<AdvanceMovie_t>(original);
+            logger::info("installed hidden FaderMenu::AdvanceMovie experiment hook");
+        }
+
+        void DisableImageSpaceModifier(RE::ImageSpaceModifierInstance*)
+        {}
+
+        void InstallImageSpaceModifierHook()
+        {
+            constexpr std::size_t applyIndex = 0x26;
+            REL::Relocation<std::uintptr_t> vtable{ RE::ImageSpaceModifierInstanceForm::VTABLE[0] };
+            vtable.write_vfunc(applyIndex, DisableImageSpaceModifier);
+            logger::info("disabled form-backed image-space modifiers for the experiment");
         }
 
         void LogProgress(const Progress& a_progress)
@@ -350,6 +385,8 @@ namespace load_progress
     {
         InstallMutationHooks();
         InstallLoadingMenuHook();
+        InstallFaderMenuHook();
+        InstallImageSpaceModifierHook();
         auto& events = Events::GetSingleton();
         RE::UI::GetSingleton()->AddEventSink<RE::MenuOpenCloseEvent>(&events);
         RE::ScriptEventSourceHolder::GetSingleton()->AddEventSink<RE::TESCellFullyLoadedEvent>(&events);
