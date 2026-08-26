@@ -17,6 +17,7 @@ namespace load_progress
         Aggregator aggregator;
         std::atomic_bool epochActive{ false };
         std::atomic_uint32_t displayedBasisPoints{};
+        std::atomic_uint8_t renderObservationState{};
         std::mutex stateLock;
         Progress lastLogged{};
 
@@ -24,6 +25,39 @@ namespace load_progress
         AdvanceMovie_t originalAdvanceMovie{};
         AdvanceMovie_t originalFaderAdvanceMovie{};
         AdvanceMovie_t originalMistAdvanceMovie{};
+
+        using RenderWorld_t = void (*)(bool);
+        REL::Relocation<RenderWorld_t> originalRenderWorld;
+
+        std::uint64_t GetLiveRemaining()
+        {
+            std::uint64_t remaining = 0;
+            for (const auto& queue : liveRemaining) {
+                remaining += queue.load(std::memory_order_relaxed);
+            }
+            return remaining;
+        }
+
+        void LogRenderState(std::string_view a_timing)
+        {
+            const auto* player = RE::PlayerCharacter::GetSingleton();
+            const auto* cell = player ? player->GetParentCell() : nullptr;
+            logger::info(
+                "normal world render {}: cell={:08X} worldRoot={} camera={} player3D={} liveRemaining={}",
+                a_timing, cell ? cell->GetFormID() : 0, RE::Main::WorldRootNode() != nullptr,
+                RE::Main::WorldRootCamera() != nullptr, player && player->Get3D() != nullptr, GetLiveRemaining());
+        }
+
+        void ObserveRenderWorld(bool a_firstPerson)
+        {
+            auto state = renderObservationState.load(std::memory_order_acquire);
+            if (state == 1 && renderObservationState.compare_exchange_strong(state, 2)) {
+                LogRenderState("while Loading Menu is open");
+            } else if (state == 3 && renderObservationState.compare_exchange_strong(state, 0)) {
+                LogRenderState("for the first time after Loading Menu closed");
+            }
+            originalRenderWorld(a_firstPerson);
+        }
 
         void SetNumber(RE::GFxValue& a_object, const char* a_name, double a_value)
         {
@@ -294,6 +328,17 @@ namespace load_progress
             }
         }
 
+        void InstallRenderObservationHook()
+        {
+            constexpr std::ptrdiff_t renderWorldCallOffset = 0x85E;
+            const auto callSite = REL::Relocation<std::uintptr_t>(REL::ID(36559)).address() + renderWorldCallOffset;
+            if (*reinterpret_cast<const std::uint8_t*>(callSite) != 0xE8) {
+                throw std::runtime_error("normal-world-render call site did not match Skyrim 1.7.99");
+            }
+            originalRenderWorld = SKSE::GetTrampoline().write_call<5>(callSite, ObserveRenderWorld);
+            logger::info("installed passive normal-world-render observation hook at {:X}", callSite);
+        }
+
         class Events final :
             public RE::BSTEventSink<RE::MenuOpenCloseEvent>,
             public RE::BSTEventSink<RE::TESCellFullyLoadedEvent>
@@ -315,6 +360,7 @@ namespace load_progress
 
                 if (a_event->opening) {
                     std::scoped_lock lock(stateLock);
+                    renderObservationState.store(1, std::memory_order_release);
                     displayedBasisPoints.store(0, std::memory_order_release);
                     aggregator.Begin();
                     // Work may already be queued before the Loading Menu opens.
@@ -336,6 +382,10 @@ namespace load_progress
                     logger::info("loading epoch ended: Loading Menu closed; completed={} remaining={} total={}",
                         final.completed, final.remaining, final.total);
                     aggregator.End();
+                    const auto renderState = renderObservationState.load(std::memory_order_acquire);
+                    if (renderState == 1 || renderState == 2) {
+                        renderObservationState.store(3, std::memory_order_release);
+                    }
                 }
                 return RE::BSEventNotifyControl::kContinue;
             }
@@ -344,9 +394,10 @@ namespace load_progress
                 const RE::TESCellFullyLoadedEvent* a_event,
                 RE::BSTEventSource<RE::TESCellFullyLoadedEvent>*) override
             {
-                if (epochActive.load(std::memory_order_acquire) && a_event && a_event->cell) {
-                    logger::info("cell fully loaded: formID={:08X} editorID='{}'",
-                        a_event->cell->GetFormID(), a_event->cell->GetFormEditorID());
+                if (renderObservationState.load(std::memory_order_acquire) != 0 && a_event && a_event->cell) {
+                    logger::info("cell fully loaded: formID={:08X} editorID='{}' menuOpen={} liveRemaining={}",
+                        a_event->cell->GetFormID(), a_event->cell->GetFormEditorID(),
+                        epochActive.load(std::memory_order_acquire), GetLiveRemaining());
                 }
                 return RE::BSEventNotifyControl::kContinue;
             }
@@ -408,6 +459,7 @@ namespace load_progress
     void Install()
     {
         InstallMutationHooks();
+        InstallRenderObservationHook();
         InstallLoadingMenuHook();
         InstallFaderMenuHook();
         InstallMistMenuHooks();
