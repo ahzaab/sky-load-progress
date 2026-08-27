@@ -37,6 +37,8 @@ namespace load_progress
 
         using RenderWorld_t = void (*)(bool);
         REL::Relocation<RenderWorld_t> originalRenderWorld;
+        using RenderUI_t = void (*)(RE::UI*);
+        REL::Relocation<RenderUI_t> originalRenderUI;
 
         using Present_t = REX::W32::HRESULT (*)(
             REX::W32::IDXGISwapChain*, std::uint32_t, std::uint32_t);
@@ -270,6 +272,40 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return true;
         }
 
+        void CaptureWorldFrame()
+        {
+            if (epochActive.load(std::memory_order_acquire)) {
+                return;
+            }
+
+            auto* window = RE::BSGraphics::Renderer::GetCurrentRenderWindow();
+            auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+            auto* device = RE::BSGraphics::Renderer::GetDevice();
+            auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
+            if (!window || !window->swapChain || !device || !context) {
+                return;
+            }
+
+            REX::W32::ID3D11Texture2D* backBuffer = nullptr;
+            if (window->swapChain->GetBuffer(
+                    0, REX::W32::IID_ID3D11Texture2D, reinterpret_cast<void**>(&backBuffer)) < 0 ||
+                !backBuffer) {
+                return;
+            }
+
+            REX::W32::D3D11_TEXTURE2D_DESC desc{};
+            backBuffer->GetDesc(&desc);
+            if (PrepareFrozenFrame(device, desc)) {
+                context->CopyResource(frozenFrame, backBuffer);
+                if (!loggedFrozenFrame) {
+                    logger::info("captured a {}x{} world-only pre-load frame", desc.width, desc.height);
+                    loggedFrozenFrame = true;
+                }
+                loggedFrozenPresentation = false;
+            }
+            backBuffer->Release();
+        }
+
         REX::W32::HRESULT PresentFrozenFrame(
             REX::W32::IDXGISwapChain* a_swapChain, std::uint32_t a_syncInterval, std::uint32_t a_flags)
         {
@@ -349,38 +385,12 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 LogRenderState("for the first time after Loading Menu closed");
             }
             originalRenderWorld(a_firstPerson);
+        }
 
-            if (epochActive.load(std::memory_order_acquire)) {
-                return;
-            }
-
-            // This call returns before Skyrim composites Scaleform onto the backbuffer.
-            auto* window = RE::BSGraphics::Renderer::GetCurrentRenderWindow();
-            auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
-            auto* device = RE::BSGraphics::Renderer::GetDevice();
-            auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
-            if (!window || !window->swapChain || !device || !context) {
-                return;
-            }
-
-            REX::W32::ID3D11Texture2D* backBuffer = nullptr;
-            if (window->swapChain->GetBuffer(
-                    0, REX::W32::IID_ID3D11Texture2D, reinterpret_cast<void**>(&backBuffer)) < 0 ||
-                !backBuffer) {
-                return;
-            }
-
-            REX::W32::D3D11_TEXTURE2D_DESC desc{};
-            backBuffer->GetDesc(&desc);
-            if (PrepareFrozenFrame(device, desc)) {
-                context->CopyResource(frozenFrame, backBuffer);
-                if (!loggedFrozenFrame) {
-                    logger::info("captured a {}x{} world-only pre-load frame", desc.width, desc.height);
-                    loggedFrozenFrame = true;
-                }
-                loggedFrozenPresentation = false;
-            }
-            backBuffer->Release();
+        void CaptureBeforeUIRender(RE::UI* a_ui)
+        {
+            CaptureWorldFrame();
+            originalRenderUI(a_ui);
         }
 
         void SetNumber(RE::GFxValue& a_object, const char* a_name, double a_value)
@@ -688,6 +698,17 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             logger::info("installed passive normal-world-render observation hook at {:X}", callSite);
         }
 
+        void InstallWorldCaptureHook()
+        {
+            constexpr std::ptrdiff_t renderUICallOffset = 0x36A;
+            const auto callSite = REL::Relocation<std::uintptr_t>(REL::ID(36555)).address() + renderUICallOffset;
+            if (*reinterpret_cast<const std::uint8_t*>(callSite) != 0xE8) {
+                throw std::runtime_error("UI-render call site did not match Skyrim 1.7.99");
+            }
+            originalRenderUI = SKSE::GetTrampoline().write_call<5>(callSite, CaptureBeforeUIRender);
+            logger::info("installed world-only capture hook before UI rendering at {:X}", callSite);
+        }
+
         void InstallFrozenFrameHook()
         {
             constexpr std::size_t presentIndex = 0x08;
@@ -852,6 +873,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     {
         InstallMutationHooks();
         InstallRenderObservationHook();
+        InstallWorldCaptureHook();
         InstallFrozenFrameHook();
         InstallLoadingMenuHook();
         InstallFaderMenuHook();
