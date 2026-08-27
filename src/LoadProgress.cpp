@@ -16,7 +16,7 @@ namespace load_progress
         std::array<std::atomic_uint64_t, queueCount> liveRemaining{};
         Aggregator aggregator;
         std::atomic_bool epochActive{ false };
-        std::atomic_bool captureWorldAtUIBoundary{ false };
+        std::atomic_bool frozenFrameLocked{ false };
         enum class Presentation : std::uint8_t
         {
             loadingMenu,
@@ -356,7 +356,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
         void CaptureBeforeUIRender(RE::UI* a_ui)
         {
-            if (captureWorldAtUIBoundary.exchange(false, std::memory_order_acq_rel)) {
+            if (!frozenFrameLocked.load(std::memory_order_acquire)) {
                 auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
                 auto* device = RE::BSGraphics::Renderer::GetDevice();
                 auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
@@ -375,8 +375,11 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         renderTarget->GetDesc(&desc);
                         if (PrepareFrozenFrame(device, desc)) {
                             context->CopyResource(frozenFrame, renderTarget);
-                            logger::info("captured bound {}x{} world render target before Scaleform", desc.width,
-                                desc.height);
+                            if (!loggedFrozenFrame) {
+                                logger::info("capturing rolling {}x{} world frames before Scaleform", desc.width,
+                                    desc.height);
+                                loggedFrozenFrame = true;
+                            }
                             loggedFrozenPresentation = false;
                         }
                         renderTarget->Release();
@@ -530,7 +533,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             if (a_message.type == RE::UI_MESSAGE_TYPE::kShow) {
                 const auto selected = ChoosePresentation();
                 presentation.store(selected, std::memory_order_release);
-                captureWorldAtUIBoundary.store(true, std::memory_order_release);
+                // Keep the last normal world frame; the loading render path is already underway.
+                frozenFrameLocked.store(true, std::memory_order_release);
                 if (selected == Presentation::loadingMenu) {
                     // UI captures the current frame before presenting a freeze-background menu.
                     a_menu->menuFlags.set(
@@ -790,6 +794,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 } else {
                     std::scoped_lock lock(stateLock);
                     epochActive.store(false, std::memory_order_release);
+                    frozenFrameLocked.store(false, std::memory_order_release);
                     const auto final = aggregator.Current();
                     logger::info("loading epoch ended: Loading Menu closed; completed={} remaining={} total={}",
                         final.completed, final.remaining, final.total);
