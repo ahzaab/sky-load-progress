@@ -46,6 +46,8 @@ namespace load_progress
         REX::W32::D3D11_TEXTURE2D_DESC frozenFrameDesc{};
         bool loggedFrozenFrame{};
         bool loggedFrozenPresentation{};
+        bool loggedLoadingMenuFrameRestore{};
+        bool loggedLoadingMenuFrameMiss{};
 
         RE::TESObjectCELL* GetQueuedDestinationCell()
         {
@@ -212,17 +214,33 @@ namespace load_progress
             REX::W32::ID3D11Resource* resource = nullptr;
             a_view->GetResource(&resource);
             REX::W32::ID3D11Texture2D* backBuffer = nullptr;
+            REX::W32::ID3D11Resource* backBufferResource = nullptr;
             auto* window = RE::BSGraphics::Renderer::GetCurrentRenderWindow();
             if (window && window->swapChain) {
                 window->swapChain->GetBuffer(
                     0, REX::W32::IID_ID3D11Texture2D, reinterpret_cast<void**>(&backBuffer));
+                if (backBuffer) {
+                    backBuffer->QueryInterface(
+                        REX::W32::IID_ID3D11Resource, reinterpret_cast<void**>(&backBufferResource));
+                }
             }
 
-            if (resource && backBuffer && resource == backBuffer) {
+            if (resource && backBufferResource && resource == backBufferResource) {
                 // Replace the loading-loop clear, then let Scaleform draw over the captured frame.
                 a_context->CopyResource(backBuffer, frozenFrame);
+                if (!loggedLoadingMenuFrameRestore) {
+                    logger::info("restored the frozen frame before Loading Menu rendering");
+                    loggedLoadingMenuFrameRestore = true;
+                }
             } else {
                 originalClearRenderTargetView(a_context, a_view, a_color);
+                if (!loggedLoadingMenuFrameMiss) {
+                    logger::info("loading render-target clear did not target the swap-chain buffer");
+                    loggedLoadingMenuFrameMiss = true;
+                }
+            }
+            if (backBufferResource) {
+                backBufferResource->Release();
             }
             if (backBuffer) {
                 backBuffer->Release();
@@ -602,6 +620,8 @@ namespace load_progress
                 if (a_event->opening) {
                     std::scoped_lock lock(stateLock);
                     presentation.store(ChoosePresentation(), std::memory_order_release);
+                    loggedLoadingMenuFrameRestore = false;
+                    loggedLoadingMenuFrameMiss = false;
                     renderObservationState.store(1, std::memory_order_release);
                     displayedBasisPoints.store(0, std::memory_order_release);
                     aggregator.Begin();
