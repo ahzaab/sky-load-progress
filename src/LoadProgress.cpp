@@ -42,7 +42,11 @@ namespace load_progress
             REX::W32::IDXGISwapChain*, std::uint32_t, std::uint32_t);
         Present_t originalPresent{};
         REX::W32::ID3D11Texture2D* frozenFrame{};
+        REX::W32::ID3D11Texture2D* loadingOverlay{};
+        REX::W32::ID3D11ShaderResourceView* loadingOverlayView{};
         REX::W32::D3D11_TEXTURE2D_DESC frozenFrameDesc{};
+        std::unique_ptr<DirectX::SpriteBatch> spriteBatch;
+        std::unique_ptr<DirectX::CommonStates> commonStates;
         bool loggedFrozenFrame{};
         bool loggedFrozenPresentation{};
 
@@ -146,6 +150,14 @@ namespace load_progress
                 frozenFrame->Release();
                 frozenFrame = nullptr;
             }
+            if (loadingOverlayView) {
+                loadingOverlayView->Release();
+                loadingOverlayView = nullptr;
+            }
+            if (loadingOverlay) {
+                loadingOverlay->Release();
+                loadingOverlay = nullptr;
+            }
 
             auto desc = a_backBufferDesc;
             desc.usage = REX::W32::D3D11_USAGE_DEFAULT;
@@ -154,6 +166,12 @@ namespace load_progress
             desc.miscFlags = 0;
             if (a_device->CreateTexture2D(&desc, nullptr, &frozenFrame) < 0) {
                 logger::error("could not allocate the frozen loading frame texture");
+                return false;
+            }
+            desc.bindFlags = REX::W32::D3D11_BIND_SHADER_RESOURCE;
+            if (a_device->CreateTexture2D(&desc, nullptr, &loadingOverlay) < 0 ||
+                a_device->CreateShaderResourceView(loadingOverlay, nullptr, &loadingOverlayView) < 0) {
+                logger::error("could not allocate the loading-menu overlay texture");
                 return false;
             }
             frozenFrameDesc = a_backBufferDesc;
@@ -184,6 +202,17 @@ namespace load_progress
                                 loggedFrozenPresentation = true;
                             }
                         }
+                    } else if (epochActive.load(std::memory_order_acquire) &&
+                        presentation.load(std::memory_order_acquire) == Presentation::loadingMenu &&
+                        MatchesFrozenFrame(desc) && loadingOverlay && loadingOverlayView) {
+                        // Preserve Scaleform, restore the world snapshot, then add the UI over it.
+                        context->CopyResource(loadingOverlay, backBuffer);
+                        context->CopyResource(backBuffer, frozenFrame);
+                        RECT destination{ 0, 0, static_cast<LONG>(desc.width), static_cast<LONG>(desc.height) };
+                        spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, commonStates->Additive());
+                        spriteBatch->Draw(
+                            reinterpret_cast<::ID3D11ShaderResourceView*>(loadingOverlayView), destination);
+                        spriteBatch->End();
                     } else if (PrepareFrozenFrame(device, desc)) {
                         context->CopyResource(frozenFrame, backBuffer);
                         if (!loggedFrozenFrame) {
@@ -361,7 +390,7 @@ namespace load_progress
 
         RE::UI_MESSAGE_RESULTS LoadingMenuProcessMessage(RE::IMenu* a_menu, RE::UIMessage& a_message)
         {
-            if (a_message.type.any(RE::UI_MESSAGE_TYPE::kShow, RE::UI_MESSAGE_TYPE::kReshow)) {
+            if (a_message.type == RE::UI_MESSAGE_TYPE::kShow) {
                 const auto selected = ChoosePresentation();
                 presentation.store(selected, std::memory_order_release);
                 if (selected == Presentation::loadingMenu) {
@@ -544,6 +573,10 @@ namespace load_progress
             REL::Relocation<std::uintptr_t> vtable{ vtableAddress };
             const auto original = vtable.write_vfunc(presentIndex, PresentFrozenFrame);
             originalPresent = reinterpret_cast<Present_t>(original);
+            spriteBatch = std::make_unique<DirectX::SpriteBatch>(
+                reinterpret_cast<::ID3D11DeviceContext*>(RE::BSGraphics::Renderer::GetSingleton()->GetRuntimeData().context));
+            commonStates = std::make_unique<DirectX::CommonStates>(
+                reinterpret_cast<::ID3D11Device*>(RE::BSGraphics::Renderer::GetDevice()));
             logger::info("installed frozen-frame swap-chain Present hook");
 
         }
