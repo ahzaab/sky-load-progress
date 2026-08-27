@@ -18,6 +18,7 @@ namespace load_progress
         std::atomic_bool epochActive{ false };
         std::atomic_uint32_t displayedBasisPoints{};
         std::atomic_uint8_t renderObservationState{};
+        std::atomic_bool awaitingControlRestore{ false };
         std::mutex stateLock;
         Progress lastLogged{};
 
@@ -36,6 +37,54 @@ namespace load_progress
         REX::W32::D3D11_TEXTURE2D_DESC frozenFrameDesc{};
         bool loggedFrozenFrame{};
         bool loggedFrozenPresentation{};
+        struct ControlState
+        {
+            std::uint32_t enabled;
+            std::uint32_t stored;
+            bool blockInput;
+            bool paused;
+            bool faderOpen;
+            bool mistOpen;
+
+            bool operator==(const ControlState&) const = default;
+        };
+
+        std::optional<ControlState> lastControlState;
+
+        ControlState GetControlState()
+        {
+            auto* controls = RE::ControlMap::GetSingleton();
+            auto* playerControls = RE::PlayerControls::GetSingleton();
+            auto* ui = RE::UI::GetSingleton();
+            std::uint32_t enabled = 0;
+            std::uint32_t stored = 0;
+            controls->GetControlsState(enabled, stored);
+            return { enabled, stored, playerControls->blockPlayerInput, ui->GameIsPaused(),
+                ui->IsMenuOpen(RE::FaderMenu::MENU_NAME), ui->IsMenuOpen(RE::MistMenu::MENU_NAME) };
+        }
+
+        void ObserveControlRestore()
+        {
+            if (!awaitingControlRestore.load(std::memory_order_acquire)) {
+                return;
+            }
+
+            const auto state = GetControlState();
+            if (!lastControlState || state != *lastControlState) {
+                logger::info(
+                    "post-load controls: enabled={:08X} stored={:08X} blockInput={} paused={} fader={} mist={}",
+                    state.enabled, state.stored, state.blockInput, state.paused, state.faderOpen, state.mistOpen);
+                lastControlState = state;
+            }
+
+            auto* controls = RE::ControlMap::GetSingleton();
+            const bool gameplayReady = controls->IsMovementControlsEnabled() && controls->IsLookingControlsEnabled() &&
+                                       controls->IsActivateControlsEnabled() && !state.blockInput && !state.paused;
+            if (gameplayReady) {
+                logger::info("post-load gameplay controls are ready");
+                awaitingControlRestore.store(false, std::memory_order_release);
+            }
+        }
 
         bool MatchesFrozenFrame(const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
         {
@@ -72,6 +121,7 @@ namespace load_progress
         REX::W32::HRESULT PresentFrozenFrame(
             REX::W32::IDXGISwapChain* a_swapChain, std::uint32_t a_syncInterval, std::uint32_t a_flags)
         {
+            ObserveControlRestore();
             REX::W32::ID3D11Texture2D* backBuffer = nullptr;
             const auto getBufferResult = a_swapChain->GetBuffer(
                 0, REX::W32::IID_ID3D11Texture2D, reinterpret_cast<void**>(&backBuffer));
@@ -475,6 +525,8 @@ namespace load_progress
                     if (renderState == 1 || renderState == 2) {
                         renderObservationState.store(3, std::memory_order_release);
                     }
+                    lastControlState.reset();
+                    awaitingControlRestore.store(true, std::memory_order_release);
                 }
                 return RE::BSEventNotifyControl::kContinue;
             }
