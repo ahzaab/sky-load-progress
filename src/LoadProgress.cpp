@@ -478,6 +478,19 @@ namespace load_progress
             logger::info("installed frozen-frame swap-chain Present hook");
         }
 
+        void CloseResidualLoadingMenus()
+        {
+            auto* ui = RE::UI::GetSingleton();
+            auto* messages = RE::UIMessageQueue::GetSingleton();
+            if (ui->IsMenuOpen(RE::FaderMenu::MENU_NAME)) {
+                messages->AddMessage(RE::FaderMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
+            }
+            if (ui->IsMenuOpen(RE::MistMenu::MENU_NAME)) {
+                messages->AddMessage(RE::MistMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
+            }
+            logger::info("queued immediate closure of residual loading menus");
+        }
+
         class Events final :
             public RE::BSTEventSink<RE::MenuOpenCloseEvent>,
             public RE::BSTEventSink<RE::TESCellFullyLoadedEvent>
@@ -527,6 +540,7 @@ namespace load_progress
                     }
                     lastControlState.reset();
                     awaitingControlRestore.store(true, std::memory_order_release);
+                    CloseResidualLoadingMenus();
                 }
                 return RE::BSEventNotifyControl::kContinue;
             }
