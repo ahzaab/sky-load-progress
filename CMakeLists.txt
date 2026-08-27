@@ -25,9 +25,12 @@ add_commonlibsse_plugin(${PROJECT_NAME}
     VERSION ${PROJECT_VERSION}
     USE_ADDRESS_LIBRARY
     SOURCES
-        include/LoadProgress.h
+        include/CellTransitioner.h
+        include/IdsAndOffsets.h
+        include/LoadingProgress.h
         include/PCH.h
-        src/LoadProgress.cpp
+        src/CellTransitioner.cpp
+        src/LoadingProgress.cpp
         src/PCH.cpp
         src/main.cpp)
 
