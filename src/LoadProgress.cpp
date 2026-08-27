@@ -314,13 +314,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         spriteBatch->Draw(
                             reinterpret_cast<::ID3D11ShaderResourceView*>(loadingOverlayView), destination);
                         spriteBatch->End();
-                    } else if (PrepareFrozenFrame(device, desc)) {
-                        context->CopyResource(frozenFrame, backBuffer);
-                        if (!loggedFrozenFrame) {
-                            logger::info("captured a {}x{} pre-load frame", desc.width, desc.height);
-                            loggedFrozenFrame = true;
-                        }
-                        loggedFrozenPresentation = false;
                     }
                 }
                 backBuffer->Release();
@@ -356,6 +349,38 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 LogRenderState("for the first time after Loading Menu closed");
             }
             originalRenderWorld(a_firstPerson);
+
+            if (epochActive.load(std::memory_order_acquire)) {
+                return;
+            }
+
+            // This call returns before Skyrim composites Scaleform onto the backbuffer.
+            auto* window = RE::BSGraphics::Renderer::GetCurrentRenderWindow();
+            auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+            auto* device = RE::BSGraphics::Renderer::GetDevice();
+            auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
+            if (!window || !window->swapChain || !device || !context) {
+                return;
+            }
+
+            REX::W32::ID3D11Texture2D* backBuffer = nullptr;
+            if (window->swapChain->GetBuffer(
+                    0, REX::W32::IID_ID3D11Texture2D, reinterpret_cast<void**>(&backBuffer)) < 0 ||
+                !backBuffer) {
+                return;
+            }
+
+            REX::W32::D3D11_TEXTURE2D_DESC desc{};
+            backBuffer->GetDesc(&desc);
+            if (PrepareFrozenFrame(device, desc)) {
+                context->CopyResource(frozenFrame, backBuffer);
+                if (!loggedFrozenFrame) {
+                    logger::info("captured a {}x{} world-only pre-load frame", desc.width, desc.height);
+                    loggedFrozenFrame = true;
+                }
+                loggedFrozenPresentation = false;
+            }
+            backBuffer->Release();
         }
 
         void SetNumber(RE::GFxValue& a_object, const char* a_name, double a_value)
