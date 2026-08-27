@@ -34,6 +34,8 @@ namespace load_progress
         std::atomic<Presentation> presentation{ Presentation::loadingMenu };
         std::atomic<TransitionProfile> transitionProfile{ TransitionProfile::standard };
         std::atomic_int64_t loadingTransitionStart{};
+        std::atomic_bool dominantColorPending{ false };
+        std::atomic_uint32_t transitionColor{ 0xFFFFFF };
         std::atomic_uint32_t displayedBasisPoints{};
         std::atomic_uint8_t renderObservationState{};
         std::atomic_bool awaitingControlRestore{ false };
@@ -57,6 +59,7 @@ namespace load_progress
         Present_t originalPresent{};
         REX::W32::ID3D11Texture2D* frozenFrame{};
         REX::W32::ID3D11ShaderResourceView* frozenFrameView{};
+        REX::W32::ID3D11Texture2D* dominantColorReadback{};
         REX::W32::ID3D11Texture2D* loadingOverlay{};
         REX::W32::ID3D11ShaderResourceView* loadingOverlayView{};
         REX::W32::D3D11_TEXTURE2D_DESC frozenFrameDesc{};
@@ -300,6 +303,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 frozenFrameView->Release();
                 frozenFrameView = nullptr;
             }
+            if (dominantColorReadback) {
+                dominantColorReadback->Release();
+                dominantColorReadback = nullptr;
+            }
             if (loadingOverlayView) {
                 loadingOverlayView->Release();
                 loadingOverlayView = nullptr;
@@ -319,7 +326,15 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 logger::error("could not allocate the frozen loading frame texture");
                 return false;
             }
+            desc.usage = REX::W32::D3D11_USAGE_STAGING;
+            desc.bindFlags = 0;
+            desc.cpuAccessFlags = REX::W32::D3D11_CPU_ACCESS_READ;
+            if (a_device->CreateTexture2D(&desc, nullptr, &dominantColorReadback) < 0) {
+                logger::warn("could not allocate the dominant-color readback texture");
+            }
+            desc.usage = REX::W32::D3D11_USAGE_DEFAULT;
             desc.bindFlags = REX::W32::D3D11_BIND_SHADER_RESOURCE;
+            desc.cpuAccessFlags = 0;
             if (a_device->CreateTexture2D(&desc, nullptr, &loadingOverlay) < 0 ||
                 a_device->CreateShaderResourceView(loadingOverlay, nullptr, &loadingOverlayView) < 0) {
                 logger::error("could not allocate the loading-menu overlay texture");
@@ -328,6 +343,69 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             frozenFrameDesc = a_backBufferDesc;
             loggedFrozenFrame = false;
             return true;
+        }
+
+        void UpdateTransitionColor(REX::W32::ID3D11DeviceContext* a_context)
+        {
+            if (!frozenFrame || !dominantColorReadback) {
+                logger::warn("using the default transition color because no captured frame is readable");
+                return;
+            }
+
+            const bool bgra = frozenFrameDesc.format == REX::W32::DXGI_FORMAT_B8G8R8A8_UNORM ||
+                              frozenFrameDesc.format == REX::W32::DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+            const bool rgba = frozenFrameDesc.format == REX::W32::DXGI_FORMAT_R8G8B8A8_UNORM ||
+                              frozenFrameDesc.format == REX::W32::DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            if (!bgra && !rgba) {
+                logger::warn("using the default transition color for unsupported texture format {}",
+                    std::to_underlying(frozenFrameDesc.format));
+                return;
+            }
+
+            a_context->CopyResource(dominantColorReadback, frozenFrame);
+            REX::W32::D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (a_context->Map(dominantColorReadback, 0, REX::W32::D3D11_MAP_READ, 0, &mapped) < 0) {
+                logger::warn("could not read the captured frame for transition color selection");
+                return;
+            }
+
+            std::array<std::uint32_t, 4096> histogram{};
+            constexpr std::uint32_t sampleStep = 4;
+            for (std::uint32_t y = 0; y < frozenFrameDesc.height; y += sampleStep) {
+                const auto* row = static_cast<const std::uint8_t*>(mapped.data) + y * mapped.rowPitch;
+                for (std::uint32_t x = 0; x < frozenFrameDesc.width; x += sampleStep) {
+                    const auto* pixel = row + x * 4;
+                    const auto red = bgra ? pixel[2] : pixel[0];
+                    const auto green = pixel[1];
+                    const auto blue = bgra ? pixel[0] : pixel[2];
+                    if (pixel[3] < 128 || std::max({ red, green, blue }) < 16) {
+                        continue;
+                    }
+                    const auto bin = static_cast<std::size_t>((red >> 4) << 8 | (green >> 4) << 4 | (blue >> 4));
+                    ++histogram[bin];
+                }
+            }
+            a_context->Unmap(dominantColorReadback, 0);
+
+            const auto dominantBin = std::max_element(histogram.begin(), histogram.end());
+            if (*dominantBin == 0) {
+                logger::warn("using the default transition color because the captured frame had no usable pixels");
+                return;
+            }
+            const auto dominant = static_cast<std::uint32_t>(std::distance(histogram.begin(), dominantBin));
+            const auto red = ((dominant >> 8) & 0x0F) * 17;
+            const auto green = ((dominant >> 4) & 0x0F) * 17;
+            const auto blue = (dominant & 0x0F) * 17;
+            transitionColor.store((red << 16) | (green << 8) | blue, std::memory_order_release);
+            logger::info("selected captured-frame transition color #{:06X}", transitionColor.load());
+        }
+
+        DirectX::XMVECTOR TransitionColor(float a_alpha)
+        {
+            const auto color = transitionColor.load(std::memory_order_acquire);
+            return DirectX::XMVectorSet(static_cast<float>((color >> 16) & 0xFF) / 255.0F,
+                static_cast<float>((color >> 8) & 0xFF) / 255.0F,
+                static_cast<float>(color & 0xFF) / 255.0F, a_alpha);
         }
 
         REX::W32::HRESULT PresentFrozenFrame(
@@ -344,6 +422,11 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 REX::W32::D3D11_TEXTURE2D_DESC desc{};
                 backBuffer->GetDesc(&desc);
                 if (device && context) {
+                    if (epochActive.load(std::memory_order_acquire) &&
+                        transitionProfile.load(std::memory_order_acquire) == TransitionProfile::light &&
+                        dominantColorPending.exchange(false, std::memory_order_acq_rel)) {
+                        UpdateTransitionColor(context);
+                    }
                     if (epochActive.load(std::memory_order_acquire) &&
                         presentation.load(std::memory_order_acquire) == Presentation::seamless) {
                         if (MatchesFrozenFrame(desc)) {
@@ -370,7 +453,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         if (transitionProfile.load(std::memory_order_acquire) == TransitionProfile::light) {
                             const auto elapsed = CurrentTimeMilliseconds() -
                                                  loadingTransitionStart.load(std::memory_order_acquire);
-                            const auto whiteAlpha = std::clamp(static_cast<float>(elapsed) /
+                            const auto colorAlpha = std::clamp(static_cast<float>(elapsed) /
                                                                    static_cast<float>(
                                                                        lightTransitionDuration.count()),
                                 0.0F, 1.0F);
@@ -378,9 +461,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                 commonStates->NonPremultiplied(), nullptr, nullptr, nullptr,
                                 [thisContext = reinterpret_cast<::ID3D11DeviceContext*>(context)] {
                                     thisContext->PSSetShader(solidColorShader, nullptr, 0);
-                                });
+                            });
                             spriteBatch->Draw(reinterpret_cast<::ID3D11ShaderResourceView*>(frozenFrameView),
-                                destination, DirectX::XMVectorSet(1.0F, 1.0F, 1.0F, whiteAlpha));
+                                destination, TransitionColor(colorAlpha));
                             spriteBatch->End();
                         }
                         spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, commonStates->NonPremultiplied(),
@@ -415,9 +498,11 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                             solidColorShader :
                                             frozenFrameBlurShader,
                                         nullptr, 0);
-                                });
+                            });
                             spriteBatch->Draw(reinterpret_cast<::ID3D11ShaderResourceView*>(frozenFrameView),
-                                destination, DirectX::XMVectorSet(1.0F, 1.0F, 1.0F, alpha));
+                                destination, transitionProfile.load(std::memory_order_acquire) == TransitionProfile::light ?
+                                                 TransitionColor(alpha) :
+                                                 DirectX::XMVectorSet(1.0F, 1.0F, 1.0F, alpha));
                             spriteBatch->End();
                         }
                     }
@@ -640,6 +725,12 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 frozenFrameLocked.store(true, std::memory_order_release);
                 postLoadFadeStart.store(0, std::memory_order_release);
                 loadingTransitionStart.store(CurrentTimeMilliseconds(), std::memory_order_release);
+                const bool selectCapturedColor =
+                    transitionProfile.load(std::memory_order_acquire) == TransitionProfile::light;
+                dominantColorPending.store(selectCapturedColor, std::memory_order_release);
+                if (selectCapturedColor) {
+                    transitionColor.store(0xFFFFFF, std::memory_order_release);
+                }
                 if (selected == Presentation::loadingMenu) {
                     // UI captures the current frame before presenting a freeze-background menu.
                     a_menu->menuFlags.set(
