@@ -47,8 +47,45 @@ namespace load_progress
         REX::W32::D3D11_TEXTURE2D_DESC frozenFrameDesc{};
         std::unique_ptr<DirectX::SpriteBatch> spriteBatch;
         std::unique_ptr<DirectX::CommonStates> commonStates;
+        ::ID3D11PixelShader* loadingOverlayShader{};
         bool loggedFrozenFrame{};
         bool loggedFrozenPresentation{};
+
+        bool CreateLoadingOverlayShader(::ID3D11Device* a_device)
+        {
+            constexpr std::string_view source = R"(
+Texture2D overlayTexture : register(t0);
+SamplerState overlaySampler : register(s0);
+
+float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Target
+{
+    float4 pixel = overlayTexture.Sample(overlaySampler, textureCoordinate) * color;
+    float intensity = max(pixel.r, max(pixel.g, pixel.b));
+    pixel.a = smoothstep(0.005, 0.04, intensity);
+    return pixel;
+}
+)";
+
+            REX::W32::ID3DBlob* bytecode = nullptr;
+            REX::W32::ID3DBlob* errors = nullptr;
+            const auto result = REX::W32::D3DCompile(source.data(), source.size(), "LoadingOverlay", nullptr, nullptr,
+                "main", "ps_5_0", 0, 0, &bytecode, &errors);
+            if (FAILED(result)) {
+                logger::error("could not compile the loading overlay shader: {}",
+                    errors ? static_cast<const char*>(errors->GetBufferPointer()) : "unknown error");
+                if (errors) {
+                    errors->Release();
+                }
+                return false;
+            }
+            if (errors) {
+                errors->Release();
+            }
+            const auto createResult = a_device->CreatePixelShader(
+                bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &loadingOverlayShader);
+            bytecode->Release();
+            return SUCCEEDED(createResult);
+        }
 
         RE::TESObjectCELL* GetQueuedDestinationCell()
         {
@@ -209,7 +246,10 @@ namespace load_progress
                         context->CopyResource(loadingOverlay, backBuffer);
                         context->CopyResource(backBuffer, frozenFrame);
                         RECT destination{ 0, 0, static_cast<LONG>(desc.width), static_cast<LONG>(desc.height) };
-                        spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, commonStates->Additive());
+                        spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, commonStates->NonPremultiplied(),
+                            nullptr, nullptr, nullptr, [thisContext = reinterpret_cast<::ID3D11DeviceContext*>(context)] {
+                                thisContext->PSSetShader(loadingOverlayShader, nullptr, 0);
+                            });
                         spriteBatch->Draw(
                             reinterpret_cast<::ID3D11ShaderResourceView*>(loadingOverlayView), destination);
                         spriteBatch->End();
@@ -577,6 +617,10 @@ namespace load_progress
                 reinterpret_cast<::ID3D11DeviceContext*>(RE::BSGraphics::Renderer::GetSingleton()->GetRuntimeData().context));
             commonStates = std::make_unique<DirectX::CommonStates>(
                 reinterpret_cast<::ID3D11Device*>(RE::BSGraphics::Renderer::GetDevice()));
+            if (!CreateLoadingOverlayShader(
+                    reinterpret_cast<::ID3D11Device*>(RE::BSGraphics::Renderer::GetDevice()))) {
+                throw std::runtime_error("could not create the loading overlay shader");
+            }
             logger::info("installed frozen-frame swap-chain Present hook");
 
         }
