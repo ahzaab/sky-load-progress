@@ -16,6 +16,7 @@ namespace load_progress
         std::array<std::atomic_uint64_t, queueCount> liveRemaining{};
         Aggregator aggregator;
         std::atomic_bool epochActive{ false };
+        std::atomic_bool captureWorldAtUIBoundary{ false };
         enum class Presentation : std::uint8_t
         {
             loadingMenu,
@@ -272,40 +273,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return true;
         }
 
-        void CaptureWorldFrame()
-        {
-            if (epochActive.load(std::memory_order_acquire)) {
-                return;
-            }
-
-            auto* window = RE::BSGraphics::Renderer::GetCurrentRenderWindow();
-            auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
-            auto* device = RE::BSGraphics::Renderer::GetDevice();
-            auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
-            if (!window || !window->swapChain || !device || !context) {
-                return;
-            }
-
-            REX::W32::ID3D11Texture2D* backBuffer = nullptr;
-            if (window->swapChain->GetBuffer(
-                    0, REX::W32::IID_ID3D11Texture2D, reinterpret_cast<void**>(&backBuffer)) < 0 ||
-                !backBuffer) {
-                return;
-            }
-
-            REX::W32::D3D11_TEXTURE2D_DESC desc{};
-            backBuffer->GetDesc(&desc);
-            if (PrepareFrozenFrame(device, desc)) {
-                context->CopyResource(frozenFrame, backBuffer);
-                if (!loggedFrozenFrame) {
-                    logger::info("captured a {}x{} world-only pre-load frame", desc.width, desc.height);
-                    loggedFrozenFrame = true;
-                }
-                loggedFrozenPresentation = false;
-            }
-            backBuffer->Release();
-        }
-
         REX::W32::HRESULT PresentFrozenFrame(
             REX::W32::IDXGISwapChain* a_swapChain, std::uint32_t a_syncInterval, std::uint32_t a_flags)
         {
@@ -389,7 +356,41 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
         void CaptureBeforeUIRender(RE::UI* a_ui)
         {
-            CaptureWorldFrame();
+            if (captureWorldAtUIBoundary.exchange(false, std::memory_order_acq_rel)) {
+                auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+                auto* device = RE::BSGraphics::Renderer::GetDevice();
+                auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
+                REX::W32::ID3D11RenderTargetView* renderTargetView = nullptr;
+                if (device && context) {
+                    context->OMGetRenderTargets(1, &renderTargetView, nullptr);
+                }
+                if (renderTargetView) {
+                    REX::W32::ID3D11Resource* resource = nullptr;
+                    REX::W32::ID3D11Texture2D* renderTarget = nullptr;
+                    renderTargetView->GetResource(&resource);
+                    if (resource && resource->QueryInterface(REX::W32::IID_ID3D11Texture2D,
+                                        reinterpret_cast<void**>(&renderTarget)) >= 0 &&
+                        renderTarget) {
+                        REX::W32::D3D11_TEXTURE2D_DESC desc{};
+                        renderTarget->GetDesc(&desc);
+                        if (PrepareFrozenFrame(device, desc)) {
+                            context->CopyResource(frozenFrame, renderTarget);
+                            logger::info("captured bound {}x{} world render target before Scaleform", desc.width,
+                                desc.height);
+                            loggedFrozenPresentation = false;
+                        }
+                        renderTarget->Release();
+                    } else {
+                        logger::warn("bound UI render target was not a texture");
+                    }
+                    if (resource) {
+                        resource->Release();
+                    }
+                    renderTargetView->Release();
+                } else {
+                    logger::warn("no render target was bound before Scaleform rendering");
+                }
+            }
             originalRenderUI(a_ui);
         }
 
@@ -529,6 +530,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             if (a_message.type == RE::UI_MESSAGE_TYPE::kShow) {
                 const auto selected = ChoosePresentation();
                 presentation.store(selected, std::memory_order_release);
+                captureWorldAtUIBoundary.store(true, std::memory_order_release);
                 if (selected == Presentation::loadingMenu) {
                     // UI captures the current frame before presenting a freeze-background menu.
                     a_menu->menuFlags.set(
