@@ -16,6 +16,12 @@ namespace load_progress
         std::array<std::atomic_uint64_t, queueCount> liveRemaining{};
         Aggregator aggregator;
         std::atomic_bool epochActive{ false };
+        enum class Presentation : std::uint8_t
+        {
+            loadingMenu,
+            seamless
+        };
+        std::atomic<Presentation> presentation{ Presentation::loadingMenu };
         std::atomic_uint32_t displayedBasisPoints{};
         std::atomic_uint8_t renderObservationState{};
         std::atomic_bool awaitingControlRestore{ false };
@@ -33,10 +39,48 @@ namespace load_progress
         using Present_t = REX::W32::HRESULT (*)(
             REX::W32::IDXGISwapChain*, std::uint32_t, std::uint32_t);
         Present_t originalPresent{};
+        using ClearRenderTargetView_t = void (*)(
+            REX::W32::ID3D11DeviceContext*, REX::W32::ID3D11RenderTargetView*, const float[4]);
+        ClearRenderTargetView_t originalClearRenderTargetView{};
         REX::W32::ID3D11Texture2D* frozenFrame{};
         REX::W32::D3D11_TEXTURE2D_DESC frozenFrameDesc{};
         bool loggedFrozenFrame{};
         bool loggedFrozenPresentation{};
+
+        RE::TESObjectCELL* GetQueuedDestinationCell()
+        {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            if (!player) {
+                return nullptr;
+            }
+
+            const auto& target = player->GetPlayerRuntimeData().queuedTargetLoc;
+            if (!target.isValid) {
+                return nullptr;
+            }
+            if (target.interior) {
+                return target.interior;
+            }
+            if (!target.world) {
+                return nullptr;
+            }
+
+            // Exterior cells use signed 4096-unit grid coordinates.
+            const auto x = static_cast<std::int16_t>(std::floor(target.location.x / 4096.0F));
+            const auto y = static_cast<std::int16_t>(std::floor(target.location.y / 4096.0F));
+            const auto it = target.world->cellMap.find(RE::CellID(y, x));
+            return it != target.world->cellMap.end() ? it->second : nullptr;
+        }
+
+        Presentation ChoosePresentation()
+        {
+            auto* cell = GetQueuedDestinationCell();
+            const bool resident = cell && cell->GetRuntimeData().loadedData;
+            logger::info("loading destination: cell={:08X} editorID='{}' loadedData={} attached={} presentation={}",
+                cell ? cell->GetFormID() : 0, cell ? cell->GetFormEditorID() : "", resident,
+                cell && cell->IsAttached(), resident ? "seamless" : "loading-menu");
+            return resident ? Presentation::seamless : Presentation::loadingMenu;
+        }
         struct ControlState
         {
             std::uint32_t enabled;
@@ -132,7 +176,8 @@ namespace load_progress
                 REX::W32::D3D11_TEXTURE2D_DESC desc{};
                 backBuffer->GetDesc(&desc);
                 if (device && context) {
-                    if (epochActive.load(std::memory_order_acquire)) {
+                    if (epochActive.load(std::memory_order_acquire) &&
+                        presentation.load(std::memory_order_acquire) == Presentation::seamless) {
                         if (MatchesFrozenFrame(desc)) {
                             context->CopyResource(backBuffer, frozenFrame);
                             if (!loggedFrozenPresentation) {
@@ -152,6 +197,39 @@ namespace load_progress
                 backBuffer->Release();
             }
             return originalPresent(a_swapChain, a_syncInterval, a_flags);
+        }
+
+        void RestoreFrozenFrameBeforeUI(
+            REX::W32::ID3D11DeviceContext* a_context, REX::W32::ID3D11RenderTargetView* a_view,
+            const float a_color[4])
+        {
+            if (!epochActive.load(std::memory_order_acquire) ||
+                presentation.load(std::memory_order_acquire) != Presentation::loadingMenu || !frozenFrame) {
+                originalClearRenderTargetView(a_context, a_view, a_color);
+                return;
+            }
+
+            REX::W32::ID3D11Resource* resource = nullptr;
+            a_view->GetResource(&resource);
+            REX::W32::ID3D11Texture2D* backBuffer = nullptr;
+            auto* window = RE::BSGraphics::Renderer::GetCurrentRenderWindow();
+            if (window && window->swapChain) {
+                window->swapChain->GetBuffer(
+                    0, REX::W32::IID_ID3D11Texture2D, reinterpret_cast<void**>(&backBuffer));
+            }
+
+            if (resource && backBuffer && resource == backBuffer) {
+                // Replace the loading-loop clear, then let Scaleform draw over the captured frame.
+                a_context->CopyResource(backBuffer, frozenFrame);
+            } else {
+                originalClearRenderTargetView(a_context, a_view, a_color);
+            }
+            if (backBuffer) {
+                backBuffer->Release();
+            }
+            if (resource) {
+                resource->Release();
+            }
         }
 
         std::uint64_t GetLiveRemaining()
@@ -306,9 +384,12 @@ namespace load_progress
         {
             originalAdvanceMovie(a_menu, a_interval, a_currentTime);
             if (a_menu && a_menu->uiMovie) {
-                // Keep the loading loop alive, but do not render its movie.
+                const bool seamless = presentation.load(std::memory_order_acquire) == Presentation::seamless;
                 a_menu->uiMovie->SetBackgroundAlpha(0.0F);
-                a_menu->uiMovie->SetVisible(false);
+                a_menu->uiMovie->SetVisible(!seamless);
+                if (!seamless) {
+                    UpdateProgressBar(a_menu);
+                }
             }
         }
 
@@ -476,6 +557,14 @@ namespace load_progress
             const auto original = vtable.write_vfunc(presentIndex, PresentFrozenFrame);
             originalPresent = reinterpret_cast<Present_t>(original);
             logger::info("installed frozen-frame swap-chain Present hook");
+
+            constexpr std::size_t clearRenderTargetViewIndex = 0x32;
+            auto* context = RE::BSGraphics::Renderer::GetSingleton()->GetRuntimeData().context;
+            const auto contextVtableAddress = *reinterpret_cast<std::uintptr_t*>(context);
+            REL::Relocation<std::uintptr_t> contextVtable{ contextVtableAddress };
+            const auto originalClear = contextVtable.write_vfunc(clearRenderTargetViewIndex, RestoreFrozenFrameBeforeUI);
+            originalClearRenderTargetView = reinterpret_cast<ClearRenderTargetView_t>(originalClear);
+            logger::info("installed frozen-frame render-target clear hook");
         }
 
         void CloseResidualLoadingMenus()
@@ -512,6 +601,7 @@ namespace load_progress
 
                 if (a_event->opening) {
                     std::scoped_lock lock(stateLock);
+                    presentation.store(ChoosePresentation(), std::memory_order_release);
                     renderObservationState.store(1, std::memory_order_release);
                     displayedBasisPoints.store(0, std::memory_order_release);
                     aggregator.Begin();
