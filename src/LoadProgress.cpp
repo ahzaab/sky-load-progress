@@ -366,9 +366,13 @@ namespace load_progress
                 presentation.store(selected, std::memory_order_release);
                 if (selected == Presentation::loadingMenu) {
                     // UI captures the current frame before presenting a freeze-background menu.
-                    a_menu->menuFlags.set(RE::UI_MENU_FLAGS::kFreezeFrameBackground);
+                    a_menu->menuFlags.set(
+                        RE::UI_MENU_FLAGS::kFreezeFrameBackground,
+                        RE::UI_MENU_FLAGS::kUsesBlurredBackground);
                 } else {
-                    a_menu->menuFlags.reset(RE::UI_MENU_FLAGS::kFreezeFrameBackground);
+                    a_menu->menuFlags.reset(
+                        RE::UI_MENU_FLAGS::kFreezeFrameBackground,
+                        RE::UI_MENU_FLAGS::kUsesBlurredBackground);
                 }
             }
             return originalLoadingProcessMessage(a_menu, a_message);
