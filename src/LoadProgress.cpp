@@ -29,6 +29,8 @@ namespace load_progress
         Progress lastLogged{};
 
         using AdvanceMovie_t = void (*)(RE::IMenu*, float, std::uint32_t);
+        using ProcessMessage_t = RE::UI_MESSAGE_RESULTS (*)(RE::IMenu*, RE::UIMessage&);
+        ProcessMessage_t originalLoadingProcessMessage{};
         AdvanceMovie_t originalAdvanceMovie{};
         AdvanceMovie_t originalFaderAdvanceMovie{};
         AdvanceMovie_t originalMistAdvanceMovie{};
@@ -39,15 +41,10 @@ namespace load_progress
         using Present_t = REX::W32::HRESULT (*)(
             REX::W32::IDXGISwapChain*, std::uint32_t, std::uint32_t);
         Present_t originalPresent{};
-        using ClearRenderTargetView_t = void (*)(
-            REX::W32::ID3D11DeviceContext*, REX::W32::ID3D11RenderTargetView*, const float[4]);
-        ClearRenderTargetView_t originalClearRenderTargetView{};
         REX::W32::ID3D11Texture2D* frozenFrame{};
         REX::W32::D3D11_TEXTURE2D_DESC frozenFrameDesc{};
         bool loggedFrozenFrame{};
         bool loggedFrozenPresentation{};
-        bool loggedLoadingMenuFrameRestore{};
-        bool loggedLoadingMenuFrameMiss{};
 
         RE::TESObjectCELL* GetQueuedDestinationCell()
         {
@@ -199,55 +196,6 @@ namespace load_progress
                 backBuffer->Release();
             }
             return originalPresent(a_swapChain, a_syncInterval, a_flags);
-        }
-
-        void RestoreFrozenFrameBeforeUI(
-            REX::W32::ID3D11DeviceContext* a_context, REX::W32::ID3D11RenderTargetView* a_view,
-            const float a_color[4])
-        {
-            if (!epochActive.load(std::memory_order_acquire) ||
-                presentation.load(std::memory_order_acquire) != Presentation::loadingMenu || !frozenFrame) {
-                originalClearRenderTargetView(a_context, a_view, a_color);
-                return;
-            }
-
-            REX::W32::ID3D11Resource* resource = nullptr;
-            a_view->GetResource(&resource);
-            REX::W32::ID3D11Texture2D* backBuffer = nullptr;
-            REX::W32::ID3D11Resource* backBufferResource = nullptr;
-            auto* window = RE::BSGraphics::Renderer::GetCurrentRenderWindow();
-            if (window && window->swapChain) {
-                window->swapChain->GetBuffer(
-                    0, REX::W32::IID_ID3D11Texture2D, reinterpret_cast<void**>(&backBuffer));
-                if (backBuffer) {
-                    backBuffer->QueryInterface(
-                        REX::W32::IID_ID3D11Resource, reinterpret_cast<void**>(&backBufferResource));
-                }
-            }
-
-            if (resource && backBufferResource && resource == backBufferResource) {
-                // Replace the loading-loop clear, then let Scaleform draw over the captured frame.
-                a_context->CopyResource(backBuffer, frozenFrame);
-                if (!loggedLoadingMenuFrameRestore) {
-                    logger::info("restored the frozen frame before Loading Menu rendering");
-                    loggedLoadingMenuFrameRestore = true;
-                }
-            } else {
-                originalClearRenderTargetView(a_context, a_view, a_color);
-                if (!loggedLoadingMenuFrameMiss) {
-                    logger::info("loading render-target clear did not target the swap-chain buffer");
-                    loggedLoadingMenuFrameMiss = true;
-                }
-            }
-            if (backBufferResource) {
-                backBufferResource->Release();
-            }
-            if (backBuffer) {
-                backBuffer->Release();
-            }
-            if (resource) {
-                resource->Release();
-            }
         }
 
         std::uint64_t GetLiveRemaining()
@@ -411,6 +359,21 @@ namespace load_progress
             }
         }
 
+        RE::UI_MESSAGE_RESULTS LoadingMenuProcessMessage(RE::IMenu* a_menu, RE::UIMessage& a_message)
+        {
+            if (a_message.type.any(RE::UI_MESSAGE_TYPE::kShow, RE::UI_MESSAGE_TYPE::kReshow)) {
+                const auto selected = ChoosePresentation();
+                presentation.store(selected, std::memory_order_release);
+                if (selected == Presentation::loadingMenu) {
+                    // UI captures the current frame before presenting a freeze-background menu.
+                    a_menu->menuFlags.set(RE::UI_MENU_FLAGS::kFreezeFrameBackground);
+                } else {
+                    a_menu->menuFlags.reset(RE::UI_MENU_FLAGS::kFreezeFrameBackground);
+                }
+            }
+            return originalLoadingProcessMessage(a_menu, a_message);
+        }
+
         void FaderMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
         {
             originalFaderAdvanceMovie(a_menu, a_interval, a_currentTime);
@@ -435,8 +398,11 @@ namespace load_progress
 
         void InstallLoadingMenuHook()
         {
+            constexpr std::size_t processMessageIndex = 0x04;
             constexpr std::size_t advanceMovieIndex = 0x05;
             REL::Relocation<std::uintptr_t> vtable{ RE::LoadingMenu::VTABLE[0] };
+            const auto originalProcess = vtable.write_vfunc(processMessageIndex, LoadingMenuProcessMessage);
+            originalLoadingProcessMessage = reinterpret_cast<ProcessMessage_t>(originalProcess);
             const auto original = vtable.write_vfunc(advanceMovieIndex, LoadingMenuAdvanceMovie);
             originalAdvanceMovie = reinterpret_cast<AdvanceMovie_t>(original);
             logger::info("installed hidden LoadingMenu::AdvanceMovie experiment hook");
@@ -576,13 +542,6 @@ namespace load_progress
             originalPresent = reinterpret_cast<Present_t>(original);
             logger::info("installed frozen-frame swap-chain Present hook");
 
-            constexpr std::size_t clearRenderTargetViewIndex = 0x32;
-            auto* context = RE::BSGraphics::Renderer::GetSingleton()->GetRuntimeData().context;
-            const auto contextVtableAddress = *reinterpret_cast<std::uintptr_t*>(context);
-            REL::Relocation<std::uintptr_t> contextVtable{ contextVtableAddress };
-            const auto originalClear = contextVtable.write_vfunc(clearRenderTargetViewIndex, RestoreFrozenFrameBeforeUI);
-            originalClearRenderTargetView = reinterpret_cast<ClearRenderTargetView_t>(originalClear);
-            logger::info("installed frozen-frame render-target clear hook");
         }
 
         void CloseResidualLoadingMenus()
@@ -619,9 +578,6 @@ namespace load_progress
 
                 if (a_event->opening) {
                     std::scoped_lock lock(stateLock);
-                    presentation.store(ChoosePresentation(), std::memory_order_release);
-                    loggedLoadingMenuFrameRestore = false;
-                    loggedLoadingMenuFrameMiss = false;
                     renderObservationState.store(1, std::memory_order_release);
                     displayedBasisPoints.store(0, std::memory_order_release);
                     aggregator.Begin();
