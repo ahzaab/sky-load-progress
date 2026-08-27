@@ -15,6 +15,7 @@ namespace load_progress
         constexpr std::size_t queueCount = static_cast<std::size_t>(Queue::count);
         constexpr auto postLoadFadeDelay = std::chrono::milliseconds(250);
         constexpr auto postLoadFadeDuration = std::chrono::milliseconds(1000);
+        constexpr auto lightTransitionDuration = std::chrono::milliseconds(750);
         std::array<std::atomic_uint64_t, queueCount> liveRemaining{};
         Aggregator aggregator;
         std::atomic_bool epochActive{ false };
@@ -25,7 +26,14 @@ namespace load_progress
             loadingMenu,
             seamless
         };
+        enum class TransitionProfile : std::uint8_t
+        {
+            standard,
+            light
+        };
         std::atomic<Presentation> presentation{ Presentation::loadingMenu };
+        std::atomic<TransitionProfile> transitionProfile{ TransitionProfile::standard };
+        std::atomic_int64_t loadingTransitionStart{};
         std::atomic_uint32_t displayedBasisPoints{};
         std::atomic_uint8_t renderObservationState{};
         std::atomic_bool awaitingControlRestore{ false };
@@ -55,6 +63,7 @@ namespace load_progress
         std::unique_ptr<DirectX::SpriteBatch> spriteBatch;
         std::unique_ptr<DirectX::CommonStates> commonStates;
         ::ID3D11PixelShader* frozenFrameBlurShader{};
+        ::ID3D11PixelShader* solidColorShader{};
         ::ID3D11PixelShader* loadingOverlayShader{};
         bool loggedFrozenFrame{};
         bool loggedFrozenPresentation{};
@@ -91,6 +100,36 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             }
             const auto createResult = a_device->CreatePixelShader(
                 bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &loadingOverlayShader);
+            bytecode->Release();
+            return SUCCEEDED(createResult);
+        }
+
+        bool CreateSolidColorShader(::ID3D11Device* a_device)
+        {
+            constexpr std::string_view source = R"(
+float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Target
+{
+    return color;
+}
+)";
+
+            REX::W32::ID3DBlob* bytecode = nullptr;
+            REX::W32::ID3DBlob* errors = nullptr;
+            const auto result = REX::W32::D3DCompile(source.data(), source.size(), "SolidColor", nullptr, nullptr,
+                "main", "ps_5_0", 0, 0, &bytecode, &errors);
+            if (FAILED(result)) {
+                logger::error("could not compile the solid-color shader: {}",
+                    errors ? static_cast<const char*>(errors->GetBufferPointer()) : "unknown error");
+                if (errors) {
+                    errors->Release();
+                }
+                return false;
+            }
+            if (errors) {
+                errors->Release();
+            }
+            const auto createResult = a_device->CreatePixelShader(
+                bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &solidColorShader);
             bytecode->Release();
             return SUCCEEDED(createResult);
         }
@@ -178,10 +217,18 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         {
             auto* cell = GetQueuedDestinationCell();
             const bool resident = cell && cell->GetRuntimeData().loadedData;
-            logger::info("loading destination: cell={:08X} editorID='{}' loadedData={} attached={} presentation={}",
+            const std::string_view editorID = cell ? cell->GetFormEditorID() : "";
+            const bool usesLightTransition =
+                editorID.starts_with("DLC2Book") || editorID.starts_with("DLC2POIBook");
+            const auto profile = usesLightTransition ? TransitionProfile::light : TransitionProfile::standard;
+            const auto selected = usesLightTransition || !resident ? Presentation::loadingMenu : Presentation::seamless;
+            transitionProfile.store(profile, std::memory_order_release);
+            logger::info(
+                "loading destination: cell={:08X} editorID='{}' loadedData={} attached={} presentation={} transition={}",
                 cell ? cell->GetFormID() : 0, cell ? cell->GetFormEditorID() : "", resident,
-                cell && cell->IsAttached(), resident ? "seamless" : "loading-menu");
-            return resident ? Presentation::seamless : Presentation::loadingMenu;
+                cell && cell->IsAttached(), selected == Presentation::seamless ? "seamless" : "loading-menu",
+                profile == TransitionProfile::light ? "light" : "standard");
+            return selected;
         }
         struct ControlState
         {
@@ -320,6 +367,22 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         spriteBatch->Draw(
                             reinterpret_cast<::ID3D11ShaderResourceView*>(frozenFrameView), destination);
                         spriteBatch->End();
+                        if (transitionProfile.load(std::memory_order_acquire) == TransitionProfile::light) {
+                            const auto elapsed = CurrentTimeMilliseconds() -
+                                                 loadingTransitionStart.load(std::memory_order_acquire);
+                            const auto whiteAlpha = std::clamp(static_cast<float>(elapsed) /
+                                                                   static_cast<float>(
+                                                                       lightTransitionDuration.count()),
+                                0.0F, 1.0F);
+                            spriteBatch->Begin(DirectX::SpriteSortMode_Deferred,
+                                commonStates->NonPremultiplied(), nullptr, nullptr, nullptr,
+                                [thisContext = reinterpret_cast<::ID3D11DeviceContext*>(context)] {
+                                    thisContext->PSSetShader(solidColorShader, nullptr, 0);
+                                });
+                            spriteBatch->Draw(reinterpret_cast<::ID3D11ShaderResourceView*>(frozenFrameView),
+                                destination, DirectX::XMVectorSet(1.0F, 1.0F, 1.0F, whiteAlpha));
+                            spriteBatch->End();
+                        }
                         spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, commonStates->NonPremultiplied(),
                             nullptr, nullptr, nullptr, [thisContext = reinterpret_cast<::ID3D11DeviceContext*>(context)] {
                                 thisContext->PSSetShader(loadingOverlayShader, nullptr, 0);
@@ -347,7 +410,11 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                             spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, commonStates->NonPremultiplied(),
                                 commonStates->LinearClamp(), nullptr, nullptr,
                                 [thisContext = reinterpret_cast<::ID3D11DeviceContext*>(context)] {
-                                    thisContext->PSSetShader(frozenFrameBlurShader, nullptr, 0);
+                                    thisContext->PSSetShader(
+                                        transitionProfile.load(std::memory_order_acquire) == TransitionProfile::light ?
+                                            solidColorShader :
+                                            frozenFrameBlurShader,
+                                        nullptr, 0);
                                 });
                             spriteBatch->Draw(reinterpret_cast<::ID3D11ShaderResourceView*>(frozenFrameView),
                                 destination, DirectX::XMVectorSet(1.0F, 1.0F, 1.0F, alpha));
@@ -572,6 +639,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 // Keep the last normal world frame; the loading render path is already underway.
                 frozenFrameLocked.store(true, std::memory_order_release);
                 postLoadFadeStart.store(0, std::memory_order_release);
+                loadingTransitionStart.store(CurrentTimeMilliseconds(), std::memory_order_release);
                 if (selected == Presentation::loadingMenu) {
                     // UI captures the current frame before presenting a freeze-background menu.
                     a_menu->menuFlags.set(
@@ -771,6 +839,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             if (!CreateFrozenFrameBlurShader(
                     reinterpret_cast<::ID3D11Device*>(RE::BSGraphics::Renderer::GetDevice()))) {
                 throw std::runtime_error("could not create the frozen-frame blur shader");
+            }
+            if (!CreateSolidColorShader(
+                    reinterpret_cast<::ID3D11Device*>(RE::BSGraphics::Renderer::GetDevice()))) {
+                throw std::runtime_error("could not create the solid-color shader");
             }
             if (!CreateLoadingOverlayShader(
                     reinterpret_cast<::ID3D11Device*>(RE::BSGraphics::Renderer::GetDevice()))) {
