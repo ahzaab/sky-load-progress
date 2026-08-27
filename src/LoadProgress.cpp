@@ -29,6 +29,81 @@ namespace load_progress
         using RenderWorld_t = void (*)(bool);
         REL::Relocation<RenderWorld_t> originalRenderWorld;
 
+        using Present_t = REX::W32::HRESULT (*)(
+            REX::W32::IDXGISwapChain*, std::uint32_t, std::uint32_t);
+        Present_t originalPresent{};
+        REX::W32::ID3D11Texture2D* frozenFrame{};
+        REX::W32::D3D11_TEXTURE2D_DESC frozenFrameDesc{};
+        bool loggedFrozenFrame{};
+        bool loggedFrozenPresentation{};
+
+        bool MatchesFrozenFrame(const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
+        {
+            return frozenFrame && frozenFrameDesc.width == a_desc.width && frozenFrameDesc.height == a_desc.height &&
+                   frozenFrameDesc.format == a_desc.format && frozenFrameDesc.sampleDesc.count == a_desc.sampleDesc.count &&
+                   frozenFrameDesc.sampleDesc.quality == a_desc.sampleDesc.quality;
+        }
+
+        bool PrepareFrozenFrame(
+            REX::W32::ID3D11Device* a_device, const REX::W32::D3D11_TEXTURE2D_DESC& a_backBufferDesc)
+        {
+            if (MatchesFrozenFrame(a_backBufferDesc)) {
+                return true;
+            }
+            if (frozenFrame) {
+                frozenFrame->Release();
+                frozenFrame = nullptr;
+            }
+
+            auto desc = a_backBufferDesc;
+            desc.usage = REX::W32::D3D11_USAGE_DEFAULT;
+            desc.bindFlags = 0;
+            desc.cpuAccessFlags = 0;
+            desc.miscFlags = 0;
+            if (a_device->CreateTexture2D(&desc, nullptr, &frozenFrame) < 0) {
+                logger::error("could not allocate the frozen loading frame texture");
+                return false;
+            }
+            frozenFrameDesc = a_backBufferDesc;
+            loggedFrozenFrame = false;
+            return true;
+        }
+
+        REX::W32::HRESULT PresentFrozenFrame(
+            REX::W32::IDXGISwapChain* a_swapChain, std::uint32_t a_syncInterval, std::uint32_t a_flags)
+        {
+            REX::W32::ID3D11Texture2D* backBuffer = nullptr;
+            const auto getBufferResult = a_swapChain->GetBuffer(
+                0, REX::W32::IID_ID3D11Texture2D, reinterpret_cast<void**>(&backBuffer));
+            if (getBufferResult >= 0 && backBuffer) {
+                auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+                auto* device = RE::BSGraphics::Renderer::GetDevice();
+                auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
+                REX::W32::D3D11_TEXTURE2D_DESC desc{};
+                backBuffer->GetDesc(&desc);
+                if (device && context) {
+                    if (epochActive.load(std::memory_order_acquire)) {
+                        if (MatchesFrozenFrame(desc)) {
+                            context->CopyResource(backBuffer, frozenFrame);
+                            if (!loggedFrozenPresentation) {
+                                logger::info("presenting the frozen pre-load frame");
+                                loggedFrozenPresentation = true;
+                            }
+                        }
+                    } else if (PrepareFrozenFrame(device, desc)) {
+                        context->CopyResource(frozenFrame, backBuffer);
+                        if (!loggedFrozenFrame) {
+                            logger::info("captured a {}x{} pre-load frame", desc.width, desc.height);
+                            loggedFrozenFrame = true;
+                        }
+                        loggedFrozenPresentation = false;
+                    }
+                }
+                backBuffer->Release();
+            }
+            return originalPresent(a_swapChain, a_syncInterval, a_flags);
+        }
+
         std::uint64_t GetLiveRemaining()
         {
             std::uint64_t remaining = 0;
@@ -339,6 +414,20 @@ namespace load_progress
             logger::info("installed passive normal-world-render observation hook at {:X}", callSite);
         }
 
+        void InstallFrozenFrameHook()
+        {
+            constexpr std::size_t presentIndex = 0x08;
+            auto* window = RE::BSGraphics::Renderer::GetCurrentRenderWindow();
+            if (!window || !window->swapChain) {
+                throw std::runtime_error("could not find Skyrim's swap chain");
+            }
+            const auto vtableAddress = *reinterpret_cast<std::uintptr_t*>(window->swapChain);
+            REL::Relocation<std::uintptr_t> vtable{ vtableAddress };
+            const auto original = vtable.write_vfunc(presentIndex, PresentFrozenFrame);
+            originalPresent = reinterpret_cast<Present_t>(original);
+            logger::info("installed frozen-frame swap-chain Present hook");
+        }
+
         class Events final :
             public RE::BSTEventSink<RE::MenuOpenCloseEvent>,
             public RE::BSTEventSink<RE::TESCellFullyLoadedEvent>
@@ -460,6 +549,7 @@ namespace load_progress
     {
         InstallMutationHooks();
         InstallRenderObservationHook();
+        InstallFrozenFrameHook();
         InstallLoadingMenuHook();
         InstallFaderMenuHook();
         InstallMistMenuHooks();
