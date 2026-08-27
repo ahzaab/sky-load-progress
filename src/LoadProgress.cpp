@@ -700,7 +700,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
         void InstallWorldCaptureHook()
         {
-            constexpr std::ptrdiff_t renderUICallOffset = 0x36A;
+            constexpr std::ptrdiff_t renderUICallOffset = 0x371;
             const auto callSite = REL::Relocation<std::uintptr_t>(REL::ID(36555)).address() + renderUICallOffset;
             if (*reinterpret_cast<const std::uint8_t*>(callSite) != 0xE8) {
                 throw std::runtime_error("UI-render call site did not match Skyrim 1.7.99");
