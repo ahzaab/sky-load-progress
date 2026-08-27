@@ -41,8 +41,8 @@ namespace load_progress
 
         using RenderWorld_t = void (*)(bool);
         REL::Relocation<RenderWorld_t> originalRenderWorld;
-        using RenderUI_t = void (*)(RE::UI*);
-        REL::Relocation<RenderUI_t> originalRenderUI;
+        using BeginScaleform_t = void (*)(void*);
+        REL::Relocation<BeginScaleform_t> originalBeginScaleform;
 
         using Present_t = REX::W32::HRESULT (*)(
             REX::W32::IDXGISwapChain*, std::uint32_t, std::uint32_t);
@@ -328,7 +328,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                             reinterpret_cast<::ID3D11ShaderResourceView*>(loadingOverlayView), destination);
                         spriteBatch->End();
                     } else if (const auto fadeStart = postLoadFadeStart.load(std::memory_order_acquire);
-                               fadeStart > 0 && MatchesFrozenFrame(desc) && frozenFrameView) {
+                               fadeStart > 0) {
                         const auto elapsed = CurrentTimeMilliseconds() - fadeStart;
                         const auto delay = presentation.load(std::memory_order_acquire) == Presentation::loadingMenu ?
                                                postLoadFadeDelay.count() :
@@ -338,7 +338,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                             postLoadFadeStart.store(0, std::memory_order_release);
                             frozenFrameLocked.store(false, std::memory_order_release);
                             logger::info("post-load frozen-frame crossfade completed");
-                        } else {
+                        } else if (MatchesFrozenFrame(desc) && frozenFrameView) {
                             const auto fadeProgress = std::clamp(static_cast<float>(fadeElapsed) /
                                                                      static_cast<float>(postLoadFadeDuration.count()),
                                 0.0F, 1.0F);
@@ -390,8 +390,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             originalRenderWorld(a_firstPerson);
         }
 
-        void CaptureBeforeUIRender(RE::UI* a_ui)
+        void CaptureAfterScaleformBegin(void* a_renderer)
         {
+            originalBeginScaleform(a_renderer);
             if (!frozenFrameLocked.load(std::memory_order_acquire)) {
                 auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
                 auto* device = RE::BSGraphics::Renderer::GetDevice();
@@ -430,7 +431,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     logger::warn("no render target was bound before Scaleform rendering");
                 }
             }
-            originalRenderUI(a_ui);
         }
 
         void SetNumber(RE::GFxValue& a_object, const char* a_name, double a_value)
@@ -743,13 +743,14 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
         void InstallWorldCaptureHook()
         {
-            constexpr std::ptrdiff_t renderUICallOffset = 0x371;
-            const auto callSite = REL::Relocation<std::uintptr_t>(REL::ID(36555)).address() + renderUICallOffset;
+            constexpr std::ptrdiff_t beginScaleformCallOffset = 0x18A;
+            const auto callSite =
+                REL::Relocation<std::uintptr_t>(REL::ID(82084)).address() + beginScaleformCallOffset;
             if (*reinterpret_cast<const std::uint8_t*>(callSite) != 0xE8) {
-                throw std::runtime_error("UI-render call site did not match Skyrim 1.7.99");
+                throw std::runtime_error("Scaleform-begin call site did not match Skyrim 1.7.99");
             }
-            originalRenderUI = SKSE::GetTrampoline().write_call<5>(callSite, CaptureBeforeUIRender);
-            logger::info("installed world-only capture hook before UI rendering at {:X}", callSite);
+            originalBeginScaleform = SKSE::GetTrampoline().write_call<5>(callSite, CaptureAfterScaleformBegin);
+            logger::info("installed world-only capture hook after Scaleform target binding at {:X}", callSite);
         }
 
         void InstallFrozenFrameHook()
