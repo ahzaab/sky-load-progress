@@ -42,11 +42,13 @@ namespace load_progress
             REX::W32::IDXGISwapChain*, std::uint32_t, std::uint32_t);
         Present_t originalPresent{};
         REX::W32::ID3D11Texture2D* frozenFrame{};
+        REX::W32::ID3D11ShaderResourceView* frozenFrameView{};
         REX::W32::ID3D11Texture2D* loadingOverlay{};
         REX::W32::ID3D11ShaderResourceView* loadingOverlayView{};
         REX::W32::D3D11_TEXTURE2D_DESC frozenFrameDesc{};
         std::unique_ptr<DirectX::SpriteBatch> spriteBatch;
         std::unique_ptr<DirectX::CommonStates> commonStates;
+        ::ID3D11PixelShader* frozenFrameBlurShader{};
         ::ID3D11PixelShader* loadingOverlayShader{};
         bool loggedFrozenFrame{};
         bool loggedFrozenPresentation{};
@@ -83,6 +85,53 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             }
             const auto createResult = a_device->CreatePixelShader(
                 bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &loadingOverlayShader);
+            bytecode->Release();
+            return SUCCEEDED(createResult);
+        }
+
+        bool CreateFrozenFrameBlurShader(::ID3D11Device* a_device)
+        {
+            constexpr std::string_view source = R"(
+Texture2D frozenTexture : register(t0);
+SamplerState frozenSampler : register(s0);
+
+float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Target
+{
+    uint width;
+    uint height;
+    frozenTexture.GetDimensions(width, height);
+    float2 texel = float2(2.0 / width, 2.0 / height);
+
+    float4 pixel = frozenTexture.Sample(frozenSampler, textureCoordinate) * 0.227027;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate + float2(1.384615, 0.0) * texel) * 0.158108;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate - float2(1.384615, 0.0) * texel) * 0.158108;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate + float2(0.0, 1.384615) * texel) * 0.158108;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate - float2(0.0, 1.384615) * texel) * 0.158108;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate + float2(3.230769, 3.230769) * texel) * 0.035880;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate + float2(3.230769, -3.230769) * texel) * 0.035880;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate + float2(-3.230769, 3.230769) * texel) * 0.035880;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate - float2(3.230769, 3.230769) * texel) * 0.035880;
+    return pixel * color;
+}
+)";
+
+            REX::W32::ID3DBlob* bytecode = nullptr;
+            REX::W32::ID3DBlob* errors = nullptr;
+            const auto result = REX::W32::D3DCompile(source.data(), source.size(), "FrozenFrameBlur", nullptr, nullptr,
+                "main", "ps_5_0", 0, 0, &bytecode, &errors);
+            if (FAILED(result)) {
+                logger::error("could not compile the frozen-frame blur shader: {}",
+                    errors ? static_cast<const char*>(errors->GetBufferPointer()) : "unknown error");
+                if (errors) {
+                    errors->Release();
+                }
+                return false;
+            }
+            if (errors) {
+                errors->Release();
+            }
+            const auto createResult = a_device->CreatePixelShader(
+                bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &frozenFrameBlurShader);
             bytecode->Release();
             return SUCCEEDED(createResult);
         }
@@ -187,6 +236,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 frozenFrame->Release();
                 frozenFrame = nullptr;
             }
+            if (frozenFrameView) {
+                frozenFrameView->Release();
+                frozenFrameView = nullptr;
+            }
             if (loadingOverlayView) {
                 loadingOverlayView->Release();
                 loadingOverlayView = nullptr;
@@ -198,10 +251,11 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
             auto desc = a_backBufferDesc;
             desc.usage = REX::W32::D3D11_USAGE_DEFAULT;
-            desc.bindFlags = 0;
+            desc.bindFlags = REX::W32::D3D11_BIND_SHADER_RESOURCE;
             desc.cpuAccessFlags = 0;
             desc.miscFlags = 0;
-            if (a_device->CreateTexture2D(&desc, nullptr, &frozenFrame) < 0) {
+            if (a_device->CreateTexture2D(&desc, nullptr, &frozenFrame) < 0 ||
+                a_device->CreateShaderResourceView(frozenFrame, nullptr, &frozenFrameView) < 0) {
                 logger::error("could not allocate the frozen loading frame texture");
                 return false;
             }
@@ -241,11 +295,18 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         }
                     } else if (epochActive.load(std::memory_order_acquire) &&
                         presentation.load(std::memory_order_acquire) == Presentation::loadingMenu &&
-                        MatchesFrozenFrame(desc) && loadingOverlay && loadingOverlayView) {
-                        // Preserve Scaleform, restore the world snapshot, then add the UI over it.
+                        MatchesFrozenFrame(desc) && frozenFrameView && loadingOverlay && loadingOverlayView) {
+                        // Preserve Scaleform, blur the world snapshot, then add the UI over it.
                         context->CopyResource(loadingOverlay, backBuffer);
-                        context->CopyResource(backBuffer, frozenFrame);
                         RECT destination{ 0, 0, static_cast<LONG>(desc.width), static_cast<LONG>(desc.height) };
+                        spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, commonStates->Opaque(),
+                            commonStates->LinearClamp(), nullptr, nullptr,
+                            [thisContext = reinterpret_cast<::ID3D11DeviceContext*>(context)] {
+                                thisContext->PSSetShader(frozenFrameBlurShader, nullptr, 0);
+                            });
+                        spriteBatch->Draw(
+                            reinterpret_cast<::ID3D11ShaderResourceView*>(frozenFrameView), destination);
+                        spriteBatch->End();
                         spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, commonStates->NonPremultiplied(),
                             nullptr, nullptr, nullptr, [thisContext = reinterpret_cast<::ID3D11DeviceContext*>(context)] {
                                 thisContext->PSSetShader(loadingOverlayShader, nullptr, 0);
@@ -617,6 +678,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 reinterpret_cast<::ID3D11DeviceContext*>(RE::BSGraphics::Renderer::GetSingleton()->GetRuntimeData().context));
             commonStates = std::make_unique<DirectX::CommonStates>(
                 reinterpret_cast<::ID3D11Device*>(RE::BSGraphics::Renderer::GetDevice()));
+            if (!CreateFrozenFrameBlurShader(
+                    reinterpret_cast<::ID3D11Device*>(RE::BSGraphics::Renderer::GetDevice()))) {
+                throw std::runtime_error("could not create the frozen-frame blur shader");
+            }
             if (!CreateLoadingOverlayShader(
                     reinterpret_cast<::ID3D11Device*>(RE::BSGraphics::Renderer::GetDevice()))) {
                 throw std::runtime_error("could not create the loading overlay shader");
