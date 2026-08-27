@@ -13,10 +13,13 @@ namespace load_progress
         });
 
         constexpr std::size_t queueCount = static_cast<std::size_t>(Queue::count);
+        constexpr auto postLoadFadeDelay = std::chrono::milliseconds(250);
+        constexpr auto postLoadFadeDuration = std::chrono::milliseconds(1000);
         std::array<std::atomic_uint64_t, queueCount> liveRemaining{};
         Aggregator aggregator;
         std::atomic_bool epochActive{ false };
         std::atomic_bool frozenFrameLocked{ false };
+        std::atomic_int64_t postLoadFadeStart{};
         enum class Presentation : std::uint8_t
         {
             loadingMenu,
@@ -90,6 +93,13 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &loadingOverlayShader);
             bytecode->Release();
             return SUCCEEDED(createResult);
+        }
+
+        std::int64_t CurrentTimeMilliseconds()
+        {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count();
         }
 
         bool CreateFrozenFrameBlurShader(::ID3D11Device* a_device)
@@ -317,6 +327,32 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         spriteBatch->Draw(
                             reinterpret_cast<::ID3D11ShaderResourceView*>(loadingOverlayView), destination);
                         spriteBatch->End();
+                    } else if (const auto fadeStart = postLoadFadeStart.load(std::memory_order_acquire);
+                               fadeStart > 0 && MatchesFrozenFrame(desc) && frozenFrameView) {
+                        const auto elapsed = CurrentTimeMilliseconds() - fadeStart;
+                        const auto delay = presentation.load(std::memory_order_acquire) == Presentation::loadingMenu ?
+                                               postLoadFadeDelay.count() :
+                                               0;
+                        const auto fadeElapsed = elapsed - delay;
+                        if (fadeElapsed >= postLoadFadeDuration.count()) {
+                            postLoadFadeStart.store(0, std::memory_order_release);
+                            frozenFrameLocked.store(false, std::memory_order_release);
+                            logger::info("post-load frozen-frame crossfade completed");
+                        } else {
+                            const auto fadeProgress = std::clamp(static_cast<float>(fadeElapsed) /
+                                                                     static_cast<float>(postLoadFadeDuration.count()),
+                                0.0F, 1.0F);
+                            const auto alpha = 1.0F - fadeProgress;
+                            RECT destination{ 0, 0, static_cast<LONG>(desc.width), static_cast<LONG>(desc.height) };
+                            spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, commonStates->NonPremultiplied(),
+                                commonStates->LinearClamp(), nullptr, nullptr,
+                                [thisContext = reinterpret_cast<::ID3D11DeviceContext*>(context)] {
+                                    thisContext->PSSetShader(frozenFrameBlurShader, nullptr, 0);
+                                });
+                            spriteBatch->Draw(reinterpret_cast<::ID3D11ShaderResourceView*>(frozenFrameView),
+                                destination, DirectX::XMVectorSet(1.0F, 1.0F, 1.0F, alpha));
+                            spriteBatch->End();
+                        }
                     }
                 }
                 backBuffer->Release();
@@ -535,6 +571,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 presentation.store(selected, std::memory_order_release);
                 // Keep the last normal world frame; the loading render path is already underway.
                 frozenFrameLocked.store(true, std::memory_order_release);
+                postLoadFadeStart.store(0, std::memory_order_release);
                 if (selected == Presentation::loadingMenu) {
                     // UI captures the current frame before presenting a freeze-background menu.
                     a_menu->menuFlags.set(
@@ -794,7 +831,11 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 } else {
                     std::scoped_lock lock(stateLock);
                     epochActive.store(false, std::memory_order_release);
-                    frozenFrameLocked.store(false, std::memory_order_release);
+                    postLoadFadeStart.store(CurrentTimeMilliseconds(), std::memory_order_release);
+                    logger::info("post-load frozen-frame crossfade began with {} ms delay",
+                        presentation.load(std::memory_order_acquire) == Presentation::loadingMenu ?
+                            postLoadFadeDelay.count() :
+                            0);
                     const auto final = aggregator.Current();
                     logger::info("loading epoch ended: Loading Menu closed; completed={} remaining={} total={}",
                         final.completed, final.remaining, final.total);
