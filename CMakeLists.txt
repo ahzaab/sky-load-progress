@@ -30,10 +30,12 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         include/IdsAndOffsets.h
         include/LoadingProgress.h
         include/PCH.h
+        include/ProgressMeter.h
         include/Settings.h
         src/CellTransitioner.cpp
         src/LoadingProgress.cpp
         src/PCH.cpp
+        src/ProgressMeter.cpp
         src/Settings.cpp
         src/main.cpp)
 

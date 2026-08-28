@@ -5,6 +5,7 @@
 #include "CellTransitioner.h"
 #include "IdsAndOffsets.h"
 #include "LoadingProgress.h"
+#include "ProgressMeter.h"
 #include "Settings.h"
 
 namespace load_progress
@@ -24,441 +25,6 @@ namespace load_progress
             remaining += queue.load(std::memory_order_relaxed);
         }
         return remaining;
-    }
-
-    // Writes a numeric member to an ActionScript object.
-    void LoadingProgress::SetNumber(RE::GFxValue& a_object, const char* a_name, double a_value)
-    {
-        if (!a_name || !a_object.IsObject()) {
-            return;
-        }
-
-        RE::GFxValue value;
-        value.SetNumber(a_value);
-        a_object.SetMember(a_name, value);
-    }
-
-    // Reads a numeric member from an ActionScript object.
-    bool LoadingProgress::GetNumber(const RE::GFxValue& a_object, const char* a_name, double& a_value)
-    {
-        if (!a_name || !a_object.IsObject()) {
-            return false;
-        }
-
-        RE::GFxValue value;
-        if (!a_object.GetMember(a_name, &value) || !value.IsNumber()) {
-            return false;
-        }
-        a_value = value.GetNumber();
-        return true;
-    }
-
-    // Converts one root-movie point into the meter container's local coordinate space.
-    bool LoadingProgress::ConvertGlobalPointToLocal(
-        RE::GFxMovieView* a_view, RE::GFxValue& a_parent, double& a_x, double& a_y)
-    {
-        if (!a_view || !a_parent.IsObject()) {
-            return false;
-        }
-
-        RE::GFxValue point;
-        a_view->CreateObject(&point);
-        if (!point.IsObject()) {
-            return false;
-        }
-        SetNumber(point, "x", a_x);
-        SetNumber(point, "y", a_y);
-
-        RE::GFxValue ignored;
-        if (!a_parent.Invoke("globalToLocal", &ignored, &point, 1) ||
-            !GetNumber(point, "x", a_x) || !GetNumber(point, "y", a_y)) {
-            return false;
-        }
-
-        return true;
-    }
-
-    // Converts one coordinate-space point into Stage-global coordinates.
-    bool LoadingProgress::ConvertLocalPointToGlobal(
-        RE::GFxMovieView* a_view, RE::GFxValue& a_coordinateSpace, double& a_x, double& a_y)
-    {
-        if (!a_view || !a_coordinateSpace.IsObject()) {
-            return false;
-        }
-
-        RE::GFxValue point;
-        a_view->CreateObject(&point);
-        if (!point.IsObject()) {
-            return false;
-        }
-        SetNumber(point, "x", a_x);
-        SetNumber(point, "y", a_y);
-
-        RE::GFxValue ignored;
-        if (!a_coordinateSpace.Invoke("localToGlobal", &ignored, &point, 1) ||
-            !GetNumber(point, "x", a_x) || !GetNumber(point, "y", a_y)) {
-            return false;
-        }
-
-        return true;
-    }
-
-    // Reads a movie clip's visual bounds in the requested coordinate space.
-    bool LoadingProgress::GetClipBounds(
-        RE::GFxValue& a_clip, RE::GFxValue& a_coordinateSpace, std::array<double, 4>& a_bounds)
-    {
-        if (!a_clip.IsObject() || !a_coordinateSpace.IsObject()) {
-            return false;
-        }
-
-        RE::GFxValue bounds;
-        if (!a_clip.Invoke("getBounds", &bounds, &a_coordinateSpace, 1) || !bounds.IsObject()) {
-            return false;
-        }
-
-        return GetNumber(bounds, "xMin", a_bounds[0]) && GetNumber(bounds, "yMin", a_bounds[1]) &&
-               GetNumber(bounds, "xMax", a_bounds[2]) && GetNumber(bounds, "yMax", a_bounds[3]);
-    }
-
-    // Reads a clip's bounds and explicitly converts the result from root-local to Stage-global space.
-    bool LoadingProgress::GetGlobalClipBounds(
-        RE::GFxMovieView*      a_view,
-        RE::GFxValue&          a_clip,
-        RE::GFxValue&          a_root,
-        std::array<double, 4>& a_bounds)
-    {
-        if (!a_view || !a_clip.IsObject() || !a_root.IsObject()) {
-            return false;
-        }
-
-        if (!GetClipBounds(a_clip, a_root, a_bounds)) {
-            return false;
-        }
-
-        double left = a_bounds[0];
-        double top = a_bounds[1];
-        double right = a_bounds[2];
-        double bottom = a_bounds[3];
-        if (!ConvertLocalPointToGlobal(a_view, a_root, left, top) ||
-            !ConvertLocalPointToGlobal(a_view, a_root, right, bottom)) {
-            return false;
-        }
-
-        a_bounds = { std::min(left, right), std::min(top, bottom),
-            std::max(left, right), std::max(top, bottom) };
-        return true;
-    }
-
-    // Converts the frame's target width into the scale needed by the animated center section.
-    double LoadingProgress::CalculateMeterXScale(
-        double a_originalXScale, double a_originalFrameWidth, double a_targetFrameWidth)
-    {
-        // Character 5 spans -2200 through 2209 twips. Its scaling grid spans -1800 through 1800,
-        // leaving 809 twips across the two fixed end-cap regions.
-        constexpr double authoredFrameWidth = 4409.0;
-        constexpr double authoredStretchWidth = 3600.0;
-        constexpr double minimumStretchWidth = 1.0;
-
-        const auto fixedWidthRatio = (authoredFrameWidth - authoredStretchWidth) / authoredFrameWidth;
-        const auto fixedCapWidth = a_originalFrameWidth * fixedWidthRatio;
-        const auto originalStretchWidth = a_originalFrameWidth - fixedCapWidth;
-        const auto targetStretchWidth = std::max(minimumStretchWidth, a_targetFrameWidth - fixedCapWidth);
-
-        return a_originalXScale * targetStretchWidth / originalStretchWidth;
-    }
-
-    // Sizes and positions the standalone meter inside LoadingMenu's safe rectangle.
-    bool LoadingProgress::ApplyProgressBarLayout(
-        RE::GFxMovieView* a_view,
-        RE::GFxValue&     a_parent,
-        RE::GFxValue&     a_layoutClip,
-        RE::GFxValue&     a_meter,
-        RE::GFxValue&     a_frame,
-        RE::GFxValue&     a_boundsClip)
-    {
-        if (!a_view || !a_parent.IsObject() || !a_layoutClip.IsObject() || !a_meter.IsObject() ||
-            !a_frame.IsObject() || !a_boundsClip.IsObject()) {
-            return false;
-        }
-
-        RE::GFxValue root;
-        if (!a_view->GetVariable(&root, "_root") || !root.IsObject()) {
-            return false;
-        }
-
-        // GFx reports the safe rectangle in root-movie coordinates, not Stage-global coordinates.
-        const auto safeRect = a_view->GetSafeRect();
-        double     safeLeft = safeRect.left;
-        double     safeTop = safeRect.top;
-        double     safeRight = safeRect.right;
-        double     safeBottom = safeRect.bottom;
-        if (!ConvertLocalPointToGlobal(a_view, root, safeLeft, safeTop) ||
-            !ConvertLocalPointToGlobal(a_view, root, safeRight, safeBottom)) {
-            return false;
-        }
-
-        const auto safeMinimumX = std::min(safeLeft, safeRight);
-        const auto safeMinimumY = std::min(safeTop, safeBottom);
-        const auto safeMaximumX = std::max(safeLeft, safeRight);
-        const auto safeMaximumY = std::max(safeTop, safeBottom);
-        const auto safeWidth = safeMaximumX - safeMinimumX;
-        const auto safeHeight = safeMaximumY - safeMinimumY;
-        double     originalMeterXScale = 100.0;
-        double     originalFrameWidth = 0.0;
-        double     originalBoundsWidth = 0.0;
-        if (safeWidth <= 0.0 || safeHeight <= 0.0 ||
-            !GetNumber(a_meter, "_xscale", originalMeterXScale) ||
-            !GetNumber(a_frame, "_width", originalFrameWidth) ||
-            !GetNumber(a_boundsClip, "_width", originalBoundsWidth) || originalMeterXScale <= 0.0 ||
-            originalFrameWidth <= 0.0 || originalBoundsWidth <= 0.0) {
-            return false;
-        }
-
-        const auto& layout = Settings::GetSingleton().GetProgressBar();
-        auto        frameWidth = originalFrameWidth * layout.widthPercent / 100.0;
-        auto        boundsWidth = originalBoundsWidth * layout.widthPercent / 100.0;
-
-        // Frame_mc owns the scaling grid. Bounds_mc mirrors the requested visible width for layout.
-        SetNumber(a_layoutClip, "_xscale", 100.0);
-        SetNumber(a_frame, "_width", frameWidth);
-        SetNumber(a_boundsClip, "_width", boundsWidth);
-
-        // Measure globally because the meter's parent can carry its own translation and scale.
-        std::array<double, 4> globalBounds{};
-        if (!GetGlobalClipBounds(a_view, a_boundsClip, root, globalBounds)) {
-            return false;
-        }
-
-        auto globalMeterWidth = globalBounds[2] - globalBounds[0];
-        auto globalMeterHeight = globalBounds[3] - globalBounds[1];
-        if (globalMeterWidth <= 0.0 || globalMeterHeight <= 0.0) {
-            return false;
-        }
-
-        // Bounds_mc is invisible and mirrors the visible frame width, giving layout a stable measurement
-        // while Meter_mc changes frames.
-        if (globalMeterWidth > safeWidth) {
-            const auto safeScale = safeWidth / globalMeterWidth;
-            frameWidth *= safeScale;
-            boundsWidth *= safeScale;
-            SetNumber(a_frame, "_width", frameWidth);
-            SetNumber(a_boundsClip, "_width", boundsWidth);
-
-            if (!GetGlobalClipBounds(a_view, a_boundsClip, root, globalBounds)) {
-                return false;
-            }
-            globalMeterWidth = globalBounds[2] - globalBounds[0];
-            globalMeterHeight = globalBounds[3] - globalBounds[1];
-        }
-
-        // Only the center of Frame_mc stretches. Scale the animated fill by that center's change rather
-        // than the frame's overall percentage so it continues to meet the fixed end caps.
-        const auto meterXScale =
-            CalculateMeterXScale(originalMeterXScale, originalFrameWidth, frameWidth);
-        SetNumber(a_meter, "_xscale", meterXScale);
-
-        const auto targetGlobalLeft = safeMinimumX +
-                                      std::max(0.0, safeWidth - globalMeterWidth) * layout.xPercent / 100.0;
-        const auto targetGlobalTop = safeMinimumY +
-                                     std::max(0.0, safeHeight - globalMeterHeight) * layout.yPercent / 100.0;
-
-        double targetLocalLeft = targetGlobalLeft;
-        double targetLocalTop = targetGlobalTop;
-        double boundsLocalLeft = globalBounds[0];
-        double boundsLocalTop = globalBounds[1];
-        if (!ConvertGlobalPointToLocal(a_view, a_parent, targetLocalLeft, targetLocalTop) ||
-            !ConvertGlobalPointToLocal(a_view, a_parent, boundsLocalLeft, boundsLocalTop)) {
-            return false;
-        }
-
-        double currentX = 0.0;
-        double currentY = 0.0;
-        if (!GetNumber(a_layoutClip, "_x", currentX) || !GetNumber(a_layoutClip, "_y", currentY)) {
-            return false;
-        }
-
-        const auto requestedLocalX = currentX + targetLocalLeft - boundsLocalLeft;
-        const auto requestedLocalY = currentY + targetLocalTop - boundsLocalTop;
-
-        // The external movie owns layout while its Meter_mc child changes timeline frames.
-        SetNumber(a_layoutClip, "_x", requestedLocalX);
-        SetNumber(a_layoutClip, "_y", requestedLocalY);
-
-        if (!GetGlobalClipBounds(a_view, a_boundsClip, root, globalBounds)) {
-            return false;
-        }
-
-        double appliedX = 0.0;
-        double appliedY = 0.0;
-        if (!GetNumber(a_layoutClip, "_x", appliedX) || !GetNumber(a_layoutClip, "_y", appliedY)) {
-            return false;
-        }
-
-        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            logger::info(
-                "positioned loading meter: x={:.1f}% y={:.1f}% width={:.1f}% "
-                "localPosition=({:.1f}, {:.1f})->({:.1f}, {:.1f}) "
-                "globalSafe=({:.1f}, {:.1f})-({:.1f}, {:.1f}) globalBounds=({:.1f}, {:.1f})-({:.1f}, {:.1f})",
-                layout.xPercent, layout.yPercent, layout.widthPercent, currentX, currentY, appliedX, appliedY,
-                safeMinimumX, safeMinimumY, safeMaximumX, safeMaximumY, globalBounds[0], globalBounds[1],
-                globalBounds[2], globalBounds[3]);
-        }
-        return true;
-    }
-
-    // Loads and initializes the standalone progress-meter movie.
-    bool LoadingProgress::CreateProgressBar(RE::GFxMovieView* a_view)
-    {
-        if (!a_view) {
-            return false;
-        }
-
-        RE::GFxValue root;
-        if (!a_view->GetVariable(&root, "_root") || !root.IsObject()) {
-            return false;
-        }
-
-        RE::GFxValue container;
-        if (!root.GetMember("SkyrimLoadProgress", &container) || !container.IsObject()) {
-            RE::GFxValue depth;
-            if (!root.Invoke("getNextHighestDepth", &depth, nullptr, 0) || !depth.IsNumber()) {
-                logger::warn("could not obtain a depth for the standalone loading meter");
-                return false;
-            }
-
-            RE::GFxValue createArguments[2];
-            createArguments[0].SetString("SkyrimLoadProgress");
-            createArguments[1] = depth;
-            if (!root.Invoke("createEmptyMovieClip", &container, createArguments, 2) ||
-                !container.IsObject()) {
-                logger::warn("could not create the standalone loading meter container");
-                return false;
-            }
-
-            RE::GFxValue moviePath;
-            moviePath.SetString("SkyrimLoadProgress/LoadingProgressMeter.swf");
-            RE::GFxValue ignored;
-            if (!container.Invoke("loadMovie", &ignored, &moviePath, 1)) {
-                logger::warn("could not request the standalone loading meter movie");
-                return false;
-            }
-
-            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                logger::info("requested SkyrimLoadProgress/LoadingProgressMeter.swf");
-            }
-            return false;
-        }
-
-        RE::GFxValue progressBar;
-        RE::GFxValue meterFrame;
-        RE::GFxValue layoutBounds;
-        if (!container.GetMember("Meter_mc", &progressBar) || !progressBar.IsObject() ||
-            !container.GetMember("Frame_mc", &meterFrame) || !meterFrame.IsObject() ||
-            !container.GetMember("Bounds_mc", &layoutBounds) || !layoutBounds.IsObject()) {
-            return false;
-        }
-
-        double emptyFrame = 0.0;
-        if (GetNumber(progressBar, "_slpEmptyFrame", emptyFrame)) {
-            return true;
-        }
-
-        double totalFrames = 0.0;
-        if (!GetNumber(progressBar, "_totalframes", totalFrames) || totalFrames <= 1.0) {
-            return false;
-        }
-
-        RE::GFxValue ignored;
-        RE::GFxValue frameArgument;
-        frameArgument.SetString("Empty");
-        if (!progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1) ||
-            !GetNumber(progressBar, "_currentframe", emptyFrame)) {
-            return false;
-        }
-        frameArgument.SetString("Full");
-        if (!progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1)) {
-            return false;
-        }
-        double fullFrame = emptyFrame;
-        if (!GetNumber(progressBar, "_currentframe", fullFrame) || fullFrame == emptyFrame) {
-            return false;
-        }
-        // Some loading menu skins place Full before Empty on the timeline.
-        SetNumber(progressBar, "_slpEmptyFrame", emptyFrame);
-        SetNumber(progressBar, "_slpFullFrame", fullFrame);
-
-        // Use a stable frame when measuring bounds; the external root remains independent of the meter timeline.
-        frameArgument.SetString("Empty");
-        if (!progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1)) {
-            return false;
-        }
-        if (!ApplyProgressBarLayout(a_view, root, container, progressBar, meterFrame, layoutBounds)) {
-            logger::warn("could not position the standalone loading meter");
-            return false;
-        }
-
-        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            logger::info("initialized standalone loading meter; frames empty={:.0f} full={:.0f}",
-                emptyFrame, fullFrame);
-        }
-        return true;
-    }
-
-    // Maps a percentage onto the external meter's labeled timeline frames.
-    bool LoadingProgress::SetMeterPercent(RE::GFxValue& a_meter, double a_percent)
-    {
-        double emptyFrame = 0.0;
-        double fullFrame = 0.0;
-        if (!GetNumber(a_meter, "_slpEmptyFrame", emptyFrame) ||
-            !GetNumber(a_meter, "_slpFullFrame", fullFrame) || fullFrame == emptyFrame) {
-            return false;
-        }
-
-        const auto   percent = std::clamp(a_percent, 0.0, 100.0);
-        const auto   frame = std::floor(emptyFrame + (fullFrame - emptyFrame) * percent / 100.0);
-        RE::GFxValue ignored;
-        RE::GFxValue argument;
-        argument.SetNumber(frame);
-        return a_meter.Invoke("gotoAndStop", &ignored, &argument, 1);
-    }
-
-    // Creates the progress meter on demand and advances it monotonically.
-    void LoadingProgress::UpdateProgressBar(RE::IMenu* a_menu)
-    {
-        // Keep queue tracking active, but do not create the external movie when its UI is disabled.
-        if (!Settings::GetSingleton().GetProgressBar().enabled ||
-            !a_menu || !a_menu->uiMovie) {
-            return;
-        }
-
-        RE::GFxValue progressBar;
-        if (!a_menu->uiMovie->GetVariable(
-                &progressBar, "_root.SkyrimLoadProgress.Meter_mc") ||
-            !progressBar.IsObject()) {
-            if (!CreateProgressBar(a_menu->uiMovie.get())) {
-                return;
-            }
-            if (!a_menu->uiMovie->GetVariable(
-                    &progressBar, "_root.SkyrimLoadProgress.Meter_mc") ||
-                !progressBar.IsObject()) {
-                return;
-            }
-        }
-
-        double emptyFrame = 0.0;
-        if (!GetNumber(progressBar, "_slpEmptyFrame", emptyFrame) &&
-            !CreateProgressBar(a_menu->uiMovie.get())) {
-            return;
-        }
-
-        const auto basisPoints = displayedBasisPoints.load(std::memory_order_acquire);
-        if (!SetMeterPercent(progressBar, static_cast<double>(basisPoints) / 100.0)) {
-            static bool warned = false;
-            if (!warned) {
-                logger::warn("external loading meter has invalid Empty/Full frame labels");
-                warned = true;
-            }
-        }
     }
 
     // Applies queue deltas outside the engine's queue-mutation call paths.
@@ -496,6 +62,7 @@ namespace load_progress
             }
 
             const auto entry = slot.entry;
+            // Release returns ownership only after this thread has copied the published record.
             slot.state.store(0, std::memory_order_release);
 
             if (!a_writeLog) {
@@ -527,11 +94,8 @@ namespace load_progress
             return;
         }
 
-        // Capture is still disabled, so no new producer can enter. Wait for a producer from an
-        // interrupted prior load before reclaiming slots that it may still be writing.
-        while (loadedEntryWriters.load(std::memory_order_acquire) != 0) {
-            std::this_thread::yield();
-        }
+        // Capture is still disabled, so no new producer can enter while stale slots are reclaimed.
+        WaitForLoadedEntryWriters();
 
         DrainLoadedEntries(false);
         for (auto& tally : loadedEntryTallies) {
@@ -549,9 +113,7 @@ namespace load_progress
             return;
         }
 
-        while (loadedEntryWriters.load(std::memory_order_acquire) != 0) {
-            std::this_thread::yield();
-        }
+        WaitForLoadedEntryWriters();
 
         DrainLoadedEntries(true);
         logger::info(
@@ -565,62 +127,91 @@ namespace load_progress
             droppedLoadedEntryDetails.load(std::memory_order_relaxed));
     }
 
-    // Copies only stable numeric identifiers from a loading worker into a bounded lock-free ring.
+    // Waits only after capture has been disabled. Producers never wait on the loading-menu thread.
+    void LoadingProgress::WaitForLoadedEntryWriters()
+    {
+        while (loadedEntryWriters.load(std::memory_order_acquire) != 0) {
+            std::this_thread::yield();
+        }
+    }
+
+    // Converts the entry type into its independently configurable diagnostic switch.
+    bool LoadingProgress::IsLoadedEntryTypeEnabled(LoadedEntryType a_type) noexcept
+    {
+        const auto& categories = Settings::GetSingleton().GetLoadedEntryLogging();
+
+        switch (a_type) {
+        case LoadedEntryType::objectReference:
+            return categories.objectReferences;
+        case LoadedEntryType::transferredReference:
+            return categories.transferredReferences;
+        case LoadedEntryType::distantReference:
+            return categories.distantReferences;
+        default:
+            return false;
+        }
+    }
+
+    // Reserves one ring slot and publishes the completed record to the loading-menu consumer.
+    bool LoadingProgress::TryStoreLoadedEntry(const LoadedEntry& a_entry) noexcept
+    {
+        // A few retries avoid dropping detail when the cursor meets a slot the consumer has not
+        // released yet. The separate tallies remain exact even when this detail buffer is saturated.
+        constexpr std::size_t reservationAttempts = 8;
+
+        for (std::size_t attempt = 0; attempt < reservationAttempts; ++attempt) {
+            const auto index = loadedEntryWriteCursor.fetch_add(1, std::memory_order_relaxed) % loadedEntryCapacity;
+            auto       expectedState = std::uint8_t{ 0 };
+            auto&      slot = loadedEntries[index];
+
+            // State 0 is free, state 1 belongs to a producer, and state 2 is ready for the consumer.
+            // The acquire/release pair ensures the consumer cannot see a partially written entry.
+            if (!slot.state.compare_exchange_strong(
+                    expectedState, std::uint8_t{ 1 }, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                continue;
+            }
+
+            slot.entry = a_entry;
+            slot.state.store(2, std::memory_order_release);
+            return true;
+        }
+
+        return false;
+    }
+
+    // Copies only stable numeric identifiers from a loading worker into the diagnostic ring.
     void LoadingProgress::CaptureLoadedEntry(
         LoadedEntryType a_type, RE::TESObjectREFR* a_reference, RE::TESObjectCELL* a_cell) noexcept
     {
-        if (!a_reference || !a_cell || !loadedEntryCaptureActive.load(std::memory_order_acquire)) {
+        const auto typeIndex = static_cast<std::size_t>(a_type);
+        if (!a_reference || !a_cell || typeIndex >= loadedEntryTypeCount ||
+            !IsLoadedEntryTypeEnabled(a_type) ||
+            !loadedEntryCaptureActive.load(std::memory_order_acquire)) {
             return;
         }
 
-        const auto& categories = Settings::GetSingleton().GetLoadedEntryLogging();
-        const auto  typeIndex = static_cast<std::size_t>(a_type);
-        const bool  selected =
-            (a_type == LoadedEntryType::objectReference && categories.objectReferences) ||
-            (a_type == LoadedEntryType::transferredReference && categories.transferredReferences) ||
-            (a_type == LoadedEntryType::distantReference && categories.distantReferences);
-        if (!selected || typeIndex >= loadedEntryTypeCount) {
-            return;
-        }
-
+        // Count active producers so EndLoadedEntryCapture cannot reclaim a slot mid-write.
         loadedEntryWriters.fetch_add(1, std::memory_order_acq_rel);
         if (!loadedEntryCaptureActive.load(std::memory_order_acquire)) {
             loadedEntryWriters.fetch_sub(1, std::memory_order_release);
             return;
         }
 
+        // Do not resolve Editor IDs here. This callback can run on an engine loading worker, where
+        // form lookups and the logger are unsafe. DrainLoadedEntries performs that work later.
         const auto* base = a_reference->GetBaseObject();
         const LoadedEntry entry{
             a_type, a_reference->GetFormID(), base ? base->GetFormID() : 0, a_cell->GetFormID()
         };
         loadedEntryTallies[typeIndex].fetch_add(1, std::memory_order_relaxed);
 
-        // A few retries avoid dropping detail when the cursor meets a slot the consumer has not
-        // released yet. Tallies remain exact even when this diagnostic detail buffer is saturated.
-        constexpr std::size_t reservationAttempts = 8;
-        bool                  stored = false;
-        for (std::size_t attempt = 0; attempt < reservationAttempts; ++attempt) {
-            const auto index = loadedEntryWriteCursor.fetch_add(1, std::memory_order_relaxed) % loadedEntryCapacity;
-            auto       expected = std::uint8_t{ 0 };
-            auto&      slot = loadedEntries[index];
-            if (!slot.state.compare_exchange_strong(
-                    expected, std::uint8_t{ 1 }, std::memory_order_acq_rel, std::memory_order_relaxed)) {
-                continue;
-            }
-
-            slot.entry = entry;
-            slot.state.store(2, std::memory_order_release);
-            stored = true;
-            break;
-        }
-
-        if (!stored) {
+        if (!TryStoreLoadedEntry(entry)) {
             droppedLoadedEntryDetails.fetch_add(1, std::memory_order_relaxed);
         }
         loadedEntryWriters.fetch_sub(1, std::memory_order_release);
     }
 
-    // Replaces the semantic call while preserving its counter-helper return value in RAX.
+    // The ordinary object path keeps the reference in RDI and its cell in RCX at the enqueue call.
     void LoadingProgress::ObjectReferenceQueued(CONTEXT& a_context) noexcept
     {
         CaptureLoadedEntry(LoadedEntryType::objectReference,
@@ -677,7 +268,9 @@ namespace load_progress
                 a_menu->uiMovie->SetBackgroundAlpha(0.0F);
                 a_menu->uiMovie->SetVisible(!seamless);
                 if (!seamless) {
-                    UpdateProgressBar(a_menu);
+                    const auto basisPoints = displayedBasisPoints.load(std::memory_order_acquire);
+                    ProgressMeter::GetSingleton().Update(
+                        a_menu, static_cast<double>(basisPoints) / 100.0);
                 }
             }
         } catch (const std::exception& error) {
@@ -768,6 +361,7 @@ namespace load_progress
 
         auto& live = liveRemaining[index];
         auto  value = live.load(std::memory_order_relaxed);
+        // Saturate at zero because the plugin may begin observing after Skyrim queued the work.
         while (value != 0 && !live.compare_exchange_weak(value, value - 1, std::memory_order_relaxed)) {}
         if (epochActive.load(std::memory_order_relaxed)) {
             pendingCompleted[index].fetch_add(1, std::memory_order_relaxed);
@@ -782,153 +376,282 @@ namespace load_progress
     void LoadingProgress::DistantEnqueue(CONTEXT&) noexcept { OnEnqueue(Queue::distantReferences); }
     void LoadingProgress::DistantComplete(CONTEXT&) noexcept { OnComplete(Queue::distantReferences); }
 
-    // Installs direct hooks on the three decoded reference queue mutations.
-    void InstallMutationHooks()
+    namespace
     {
-        struct MutationHook
+        using ContextCallback = void (*)(CONTEXT&) noexcept;
+        using CounterSignature = std::array<std::uint8_t, 7>;
+        constexpr std::size_t counterInstructionSize = std::tuple_size_v<CounterSignature>;
+
+        struct MutationHookDefinition
         {
             REL::RelocationID id;
             RuntimeOffset     offset;
-            void (*callback)(CONTEXT&) noexcept;
-            std::string_view            name;
-            std::array<std::uint8_t, 7> expectedBytes;
+            ContextCallback   callback;
+            std::string_view  name;
+            CounterSignature  signature;
         };
 
-        const auto mutationHooks = std::to_array<MutationHook>({ { IDs::CriticalReferencesEnqueue, Offsets::CriticalReferencesEnqueue,
-                                                                     LoadingProgress::CriticalEnqueue, "critical enqueue",
-                                                                     { 0xF0, 0xFF, 0x80, 0x6C, 0x01, 0x00, 0x00 } },
-            { IDs::CriticalReferencesComplete, Offsets::CriticalReferencesComplete,
-                LoadingProgress::CriticalComplete, "critical completion",
-                { 0xF0, 0xFF, 0x88, 0x6C, 0x01, 0x00, 0x00 } },
-            { IDs::ReferencesEnqueue, Offsets::ReferencesEnqueue,
-                LoadingProgress::ReferenceEnqueue, "reference enqueue",
-                { 0xF0, 0xFF, 0x80, 0x70, 0x01, 0x00, 0x00 } },
-            { IDs::ReferencesComplete, Offsets::ReferencesComplete,
-                LoadingProgress::ReferenceComplete, "reference completion",
-                { 0xF0, 0xFF, 0x88, 0x70, 0x01, 0x00, 0x00 } },
-            { IDs::DistantReferencesEnqueue, Offsets::DistantReferencesEnqueue,
-                LoadingProgress::DistantEnqueue, "distant enqueue",
-                { 0xF0, 0xFF, 0x81, 0x74, 0x01, 0x00, 0x00 } },
-            { IDs::DistantReferencesComplete, Offsets::DistantReferencesComplete,
-                LoadingProgress::DistantComplete, "distant completion",
-                { 0xF0, 0xFF, 0x88, 0x74, 0x01, 0x00, 0x00 } } });
+        struct ResolvedMutationHook
+        {
+            const MutationHookDefinition* definition;
+            std::uintptr_t                 address;
+        };
 
-        constexpr std::size_t counterInstructionSize = 7;
-        constexpr std::size_t minimumTrampolineBytes = 8 * 1024;
-        auto&                 trampoline = SKSE::GetTrampoline();
-        if (trampoline.free_size() < minimumTrampolineBytes) {
-            throw std::runtime_error(fmt::format(
-                "queue hooks require at least {} free trampoline bytes; {} remain",
-                minimumTrampolineBytes, trampoline.free_size()));
-        }
-
-        const auto                    text = REL::Module::get().segment(REL::Segment::textx);
-        std::array<std::uintptr_t, 6> addresses{};
-        for (std::size_t i = 0; i < mutationHooks.size(); ++i) {
-            const auto& hook = mutationHooks[i];
-            const auto  functionAddress = REL::Relocation<std::uintptr_t>(hook.id).address();
-            const auto  offset = hook.offset.Get();
-            if (!functionAddress || offset == 0 || !hook.callback) {
-                throw std::runtime_error(fmt::format("could not resolve the {} hook", hook.name));
-            }
-
-            const auto address = functionAddress + offset;
-            const auto withinText = address >= text.address() &&
-                                    address + counterInstructionSize <= text.address() + text.size();
-            if (!withinText ||
-                std::memcmp(reinterpret_cast<const void*>(address), hook.expectedBytes.data(),
-                    hook.expectedBytes.size()) != 0) {
-                throw std::runtime_error(fmt::format(
-                    "{} hook bytes did not match runtime {} at {:X}", hook.name,
-                    REL::Module::get().version().string("."), address));
-            }
-            addresses[i] = address;
-        }
-
-        // All six sites are verified before the first instruction is patched.
-        for (std::size_t i = 0; i < mutationHooks.size(); ++i) {
-            const auto& hook = mutationHooks[i];
-            const auto  address = addresses[i];
-            if (!SKSE::stl::install_context_hook(
-                    address, counterInstructionSize, hook.callback, counterInstructionSize)) {
-                throw std::runtime_error(fmt::format("could not install {} hook at {:X}", hook.name, address));
-            }
-            logger::info("installed direct {} hook at {:X}", hook.name, address);
-        }
-    }
-
-    // Installs semantic reference hooks only for the loaded-entry categories requested at startup.
-    void InstallLoadedEntryHooks()
-    {
-        const auto& settings = Settings::GetSingleton();
-        if (!settings.IsLoadedEntryLoggingEnabled()) {
-            return;
-        }
-
-        struct LoadedEntryHook
+        struct LoadedEntryHookDefinition
         {
             REL::RelocationID caller;
             REL::RelocationID callee;
-            void (*callback)(CONTEXT&) noexcept;
-            std::string_view name;
-            bool             enabled;
+            ContextCallback   callback;
+            std::string_view  name;
+            bool              enabled;
         };
 
-        const auto& categories = settings.GetLoadedEntryLogging();
-        const auto  hooks = std::to_array<LoadedEntryHook>({
-             { IDs::ObjectReferenceQueueCaller, IDs::ReferencesEnqueue,
-                 LoadingProgress::ObjectReferenceQueued, "object-reference enqueue",
-                 categories.objectReferences },
-             { IDs::TransferredReferenceQueueCaller, IDs::ReferencesEnqueue,
-                 LoadingProgress::TransferredReferenceQueued, "transferred-reference enqueue",
-                 categories.transferredReferences },
-             { IDs::DistantReferenceQueueCaller, IDs::DistantReferencesEnqueue,
-                 LoadingProgress::DistantReferenceQueued, "distant-reference enqueue",
-                 categories.distantReferences }
-        });
+        struct ResolvedLoadedEntryHook
+        {
+            const LoadedEntryHookDefinition* definition;
+            std::uintptr_t                    callSite;
+        };
 
-        LoadingProgress::originalReferenceEnqueue =
-            REL::Relocation<LoadingProgress::ReferenceEnqueue_t>(IDs::ReferencesEnqueue).get();
-        LoadingProgress::originalDistantReferenceEnqueue =
-            REL::Relocation<LoadingProgress::DistantReferenceEnqueue_t>(IDs::DistantReferencesEnqueue).get();
-        if ((categories.objectReferences || categories.transferredReferences) &&
-            !CellTransitioner::IsExecutableAddress(
-                reinterpret_cast<std::uintptr_t>(LoadingProgress::originalReferenceEnqueue))) {
-            throw std::runtime_error("could not resolve the reference enqueue helper");
-        }
-        if (categories.distantReferences &&
-            !CellTransitioner::IsExecutableAddress(
-                reinterpret_cast<std::uintptr_t>(LoadingProgress::originalDistantReferenceEnqueue))) {
-            throw std::runtime_error("could not resolve the distant-reference enqueue helper");
+        // Every counter instruction has the same seven-byte shape:
+        //
+        //   F0             LOCK prefix; the counter can be changed by several loading threads.
+        //   FF             x64 group-5 integer instruction.
+        //   80, 81, or 88  ModRM byte selecting INC or DEC and the RAX/RCX base register.
+        //   xx xx xx xx    Little-endian 32-bit displacement of the counter inside the owner.
+        //
+        // RAX and RCX are not semantic differences between the queues; they are simply the registers
+        // holding the counter owner at these exact decoded instructions. The distant enqueue site is
+        // the only one in this set that still has the owner in RCX.
+        //
+        // These arrays are read-only signatures; the plugin never emits them as executable code.
+        // CommonLib generates the actual context stubs through Xbyak. Naming the decoded instructions
+        // here makes runtime validation readable and keeps opaque machine bytes out of the install loop.
+        // lock inc dword ptr [rax + 0x16C]
+        constexpr CounterSignature criticalEnqueueSignature{
+            0xF0, 0xFF, 0x80, 0x6C, 0x01, 0x00, 0x00
+        };
+
+        // lock dec dword ptr [rax + 0x16C]
+        constexpr CounterSignature criticalCompleteSignature{
+            0xF0, 0xFF, 0x88, 0x6C, 0x01, 0x00, 0x00
+        };
+
+        // lock inc dword ptr [rax + 0x170]
+        constexpr CounterSignature referenceEnqueueSignature{
+            0xF0, 0xFF, 0x80, 0x70, 0x01, 0x00, 0x00
+        };
+
+        // lock dec dword ptr [rax + 0x170]
+        constexpr CounterSignature referenceCompleteSignature{
+            0xF0, 0xFF, 0x88, 0x70, 0x01, 0x00, 0x00
+        };
+
+        // lock inc dword ptr [rcx + 0x174]
+        constexpr CounterSignature distantEnqueueSignature{
+            0xF0, 0xFF, 0x81, 0x74, 0x01, 0x00, 0x00
+        };
+
+        // lock dec dword ptr [rax + 0x174]
+        constexpr CounterSignature distantCompleteSignature{
+            0xF0, 0xFF, 0x88, 0x74, 0x01, 0x00, 0x00
+        };
+
+        // Returns the six queue-counter mutations: enqueue and completion for each observed queue.
+        auto GetMutationHookDefinitions()
+        {
+            return std::to_array<MutationHookDefinition>({
+                { IDs::CriticalReferencesEnqueue, Offsets::CriticalReferencesEnqueue,
+                    LoadingProgress::CriticalEnqueue, "critical enqueue", criticalEnqueueSignature },
+                { IDs::CriticalReferencesComplete, Offsets::CriticalReferencesComplete,
+                    LoadingProgress::CriticalComplete, "critical completion", criticalCompleteSignature },
+                { IDs::ReferencesEnqueue, Offsets::ReferencesEnqueue,
+                    LoadingProgress::ReferenceEnqueue, "reference enqueue", referenceEnqueueSignature },
+                { IDs::ReferencesComplete, Offsets::ReferencesComplete,
+                    LoadingProgress::ReferenceComplete, "reference completion", referenceCompleteSignature },
+                { IDs::DistantReferencesEnqueue, Offsets::DistantReferencesEnqueue,
+                    LoadingProgress::DistantEnqueue, "distant enqueue", distantEnqueueSignature },
+                { IDs::DistantReferencesComplete, Offsets::DistantReferencesComplete,
+                    LoadingProgress::DistantComplete, "distant completion", distantCompleteSignature }
+            });
         }
 
-        std::array<std::uintptr_t, 3> callSites{};
-        for (std::size_t i = 0; i < hooks.size(); ++i) {
-            if (!hooks[i].enabled) {
-                continue;
+        // Full CONTEXT stubs are larger than ordinary branch islands, so fail before modifying code
+        // when the shared SKSE trampoline no longer has a conservative amount of working space.
+        void RequireQueueHookTrampolineSpace()
+        {
+            constexpr std::size_t minimumTrampolineBytes = 8 * 1024;
+
+            const auto freeBytes = SKSE::GetTrampoline().free_size();
+            if (freeBytes < minimumTrampolineBytes) {
+                throw std::runtime_error(fmt::format(
+                    "queue hooks require at least {} free trampoline bytes; {} remain",
+                    minimumTrampolineBytes, freeBytes));
             }
-            callSites[i] = CellTransitioner::FindUniqueRelativeCall(
-                hooks[i].caller, hooks[i].callee, hooks[i].name);
         }
 
-        for (std::size_t i = 0; i < hooks.size(); ++i) {
-            const auto& hook = hooks[i];
-            if (!hook.enabled) {
-                continue;
+        // Resolves and verifies one decoded counter instruction without changing executable memory.
+        ResolvedMutationHook ResolveMutationHook(
+            const MutationHookDefinition& a_hook, const REL::Segment& a_text)
+        {
+            const auto functionAddress = REL::Relocation<std::uintptr_t>(a_hook.id).address();
+            const auto offset = a_hook.offset.Get();
+            if (!functionAddress || offset == 0 || !a_hook.callback) {
+                throw std::runtime_error(fmt::format("could not resolve the {} hook", a_hook.name));
             }
 
-            // E8 plus its signed rel32 displacement is a five-byte x64 near call. We replace the
-            // complete instruction and copy zero original bytes because a raw rel32 call cannot be
-            // moved into CommonLib's context stub. The callback invokes the same Address Library
-            // callee itself, including the original return value and its queue-counter side effects.
+            const auto address = functionAddress + offset;
+            const auto textEnd = a_text.address() + a_text.size();
+            const bool startsInsideText = address >= a_text.address() && address < textEnd;
+            const bool hasCompleteInstruction =
+                startsInsideText && counterInstructionSize <= textEnd - address;
+            if (!hasCompleteInstruction ||
+                std::memcmp(reinterpret_cast<const void*>(address),
+                    a_hook.signature.data(), a_hook.signature.size()) != 0) {
+                throw std::runtime_error(fmt::format(
+                    "{} hook bytes did not match runtime {} at {:X}", a_hook.name,
+                    REL::Module::get().version().string("."), address));
+            }
+
+            return { std::addressof(a_hook), address };
+        }
+
+        // Resolves all counter sites first so a bad runtime cannot leave a partially installed set.
+        auto ResolveMutationHooks(const std::span<const MutationHookDefinition> a_hooks)
+        {
+            std::vector<ResolvedMutationHook> resolved;
+            resolved.reserve(a_hooks.size());
+
+            const auto text = REL::Module::get().segment(REL::Segment::textx);
+            for (const auto& hook : a_hooks) {
+                resolved.push_back(ResolveMutationHook(hook, text));
+            }
+
+            return resolved;
+        }
+
+        // Copies the verified atomic instruction before calling the observer, preserving engine behavior.
+        void InstallMutationHook(const ResolvedMutationHook& a_hook)
+        {
+            const auto& definition = *a_hook.definition;
+            if (!SKSE::stl::install_context_hook(
+                    a_hook.address, counterInstructionSize, definition.callback, counterInstructionSize)) {
+                throw std::runtime_error(
+                    fmt::format("could not install {} hook at {:X}", definition.name, a_hook.address));
+            }
+
+            logger::info("installed direct {} hook at {:X}", definition.name, a_hook.address);
+        }
+
+        // Installs direct hooks on the three decoded reference queue mutations.
+        void InstallMutationHooks()
+        {
+            RequireQueueHookTrampolineSpace();
+
+            const auto definitions = GetMutationHookDefinitions();
+            const auto resolved = ResolveMutationHooks(definitions);
+
+            // Resolution above validates every site before this loop writes the first branch.
+            for (const auto& hook : resolved) {
+                InstallMutationHook(hook);
+            }
+        }
+
+        // Resolves the original counter callees that semantic hooks must invoke in place of E8 calls.
+        void ResolveLoadedEntryCallees(const Settings::LoadedEntryLogging& a_categories)
+        {
+            LoadingProgress::originalReferenceEnqueue =
+                REL::Relocation<LoadingProgress::ReferenceEnqueue_t>(IDs::ReferencesEnqueue).get();
+            LoadingProgress::originalDistantReferenceEnqueue =
+                REL::Relocation<LoadingProgress::DistantReferenceEnqueue_t>(IDs::DistantReferencesEnqueue).get();
+
+            const auto referenceAddress =
+                reinterpret_cast<std::uintptr_t>(LoadingProgress::originalReferenceEnqueue);
+            if ((a_categories.objectReferences || a_categories.transferredReferences) &&
+                !CellTransitioner::IsExecutableAddress(referenceAddress)) {
+                throw std::runtime_error("could not resolve the reference enqueue helper");
+            }
+
+            const auto distantAddress =
+                reinterpret_cast<std::uintptr_t>(LoadingProgress::originalDistantReferenceEnqueue);
+            if (a_categories.distantReferences &&
+                !CellTransitioner::IsExecutableAddress(distantAddress)) {
+                throw std::runtime_error("could not resolve the distant-reference enqueue helper");
+            }
+        }
+
+        // Returns the three higher-level call paths whose registers still identify the queued reference.
+        auto GetLoadedEntryHookDefinitions(const Settings::LoadedEntryLogging& a_categories)
+        {
+            return std::to_array<LoadedEntryHookDefinition>({
+                { IDs::ObjectReferenceQueueCaller, IDs::ReferencesEnqueue,
+                    LoadingProgress::ObjectReferenceQueued, "object-reference enqueue",
+                    a_categories.objectReferences },
+                { IDs::TransferredReferenceQueueCaller, IDs::ReferencesEnqueue,
+                    LoadingProgress::TransferredReferenceQueued, "transferred-reference enqueue",
+                    a_categories.transferredReferences },
+                { IDs::DistantReferenceQueueCaller, IDs::DistantReferencesEnqueue,
+                    LoadingProgress::DistantReferenceQueued, "distant-reference enqueue",
+                    a_categories.distantReferences }
+            });
+        }
+
+        // Finds exactly one call in each enabled caller and performs no patching during discovery.
+        auto ResolveLoadedEntryHooks(const std::span<const LoadedEntryHookDefinition> a_hooks)
+        {
+            std::vector<ResolvedLoadedEntryHook> resolved;
+            resolved.reserve(a_hooks.size());
+
+            for (const auto& hook : a_hooks) {
+                if (!hook.enabled) {
+                    continue;
+                }
+
+                const auto callSite =
+                    CellTransitioner::FindUniqueRelativeCall(hook.caller, hook.callee, hook.name);
+                resolved.push_back({ std::addressof(hook), callSite });
+            }
+
+            return resolved;
+        }
+
+        // Replaces one E8 rel32 call with a context callback that invokes the same callee itself.
+        void InstallLoadedEntryHook(const ResolvedLoadedEntryHook& a_hook)
+        {
+            // E8 plus its signed rel32 displacement is a five-byte x64 near call. Copying those bytes
+            // into a trampoline would preserve the old relative displacement and jump to the wrong
+            // address. The callback therefore replaces all five bytes, calls the Address Library
+            // target directly, and places its return value back in the captured RAX register.
             constexpr std::size_t relativeCallSize = 5;
             constexpr std::size_t copiedInstructionBytes = 0;
+
+            const auto& definition = *a_hook.definition;
             if (!SKSE::stl::install_context_hook(
-                    callSites[i], relativeCallSize, hook.callback, copiedInstructionBytes)) {
+                    a_hook.callSite, relativeCallSize, definition.callback, copiedInstructionBytes)) {
                 throw std::runtime_error(
-                    fmt::format("could not install {} hook at {:X}", hook.name, callSites[i]));
+                    fmt::format("could not install {} hook at {:X}", definition.name, a_hook.callSite));
             }
-            logger::info("installed {} hook at {:X}", hook.name, callSites[i]);
+
+            logger::info("installed {} hook at {:X}", definition.name, a_hook.callSite);
+        }
+
+        // Installs only the semantic loaded-entry categories enabled in the startup configuration.
+        void InstallLoadedEntryHooks()
+        {
+            const auto& settings = Settings::GetSingleton();
+            if (!settings.IsLoadedEntryLoggingEnabled()) {
+                return;
+            }
+
+            const auto& categories = settings.GetLoadedEntryLogging();
+            ResolveLoadedEntryCallees(categories);
+
+            const auto definitions = GetLoadedEntryHookDefinitions(categories);
+            const auto resolved = ResolveLoadedEntryHooks(definitions);
+
+            // As with mutation hooks, validate every enabled call before changing executable memory.
+            for (const auto& hook : resolved) {
+                InstallLoadedEntryHook(hook);
+            }
         }
     }
 
@@ -944,6 +667,8 @@ namespace load_progress
             throw std::runtime_error("could not resolve the LoadingMenu vtable");
         }
 
+        // The relocation identifies the vtable array itself. Each slot is one native function pointer,
+        // so the byte address is the slot index multiplied by the pointer size.
         const auto processAddress = *reinterpret_cast<const std::uintptr_t*>(
             vtable.address() + processMessageIndex * sizeof(std::uintptr_t));
         const auto advanceAddress = *reinterpret_cast<const std::uintptr_t*>(
