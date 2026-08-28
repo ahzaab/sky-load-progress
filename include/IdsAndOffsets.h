@@ -68,6 +68,7 @@ namespace load_progress
     // Function-relative offsets decoded against 1.5.97, 1.6.1170, and 1.7.99.
     namespace Offsets
     {
+        // These queue offsets are identical in all three decoded runtimes and are considered stable.
         constexpr RuntimeOffset CriticalReferencesEnqueue{ 0x07, 0x07, 0x07 };
         constexpr RuntimeOffset CriticalReferencesComplete{ 0x0C, 0x0C, 0x0C };
         constexpr RuntimeOffset ReferencesEnqueue{ 0x07, 0x07, 0x07 };
