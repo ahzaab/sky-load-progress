@@ -38,5 +38,18 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/main.cpp)
 
 target_include_directories(${PROJECT_NAME} PRIVATE include ${CMAKE_CURRENT_BINARY_DIR}/include)
+
+# CommonLib already compiles HDE64 for trampoline patch validation. Expose only its private header to
+# this target so semantic hook discovery can walk real instruction boundaries without compiling a
+# second decoder or adding another copy of the dependency.
+if(SKSE_SUPPORT_PATCH_SAFETY)
+    include(FetchContent)
+    FetchContent_GetProperties(hde64 SOURCE_DIR HDE64_SOURCE_DIR)
+    if(NOT HDE64_SOURCE_DIR)
+        message(FATAL_ERROR "CommonLib's HDE64 source directory was not populated")
+    endif()
+    target_include_directories(${PROJECT_NAME} PRIVATE ${HDE64_SOURCE_DIR}/src/hde)
+endif()
+
 target_precompile_headers(${PROJECT_NAME} PRIVATE include/PCH.h)
 target_link_libraries(${PROJECT_NAME} PRIVATE toml11::toml11)

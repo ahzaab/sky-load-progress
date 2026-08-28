@@ -42,7 +42,8 @@ namespace load_progress
         static bool              IsSeamless();
         static void              DisableHooks(std::string_view) noexcept;
         static bool              IsExecutableAddress(std::uintptr_t) noexcept;
-        static bool              ValidateRelativeCall(std::uintptr_t, std::string_view);
+        static std::uintptr_t    FindUniqueRelativeCall(
+            REL::RelocationID, REL::RelocationID, std::string_view);
 
         static bool                            CreatePixelShader(::ID3D11Device*, std::string_view, std::string_view, ::ID3D11PixelShader**);
         static bool                            CreateLoadingOverlayShader(::ID3D11Device*);

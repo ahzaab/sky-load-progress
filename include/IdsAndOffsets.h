@@ -32,8 +32,15 @@ namespace load_progress
         constexpr REL::RelocationID DistantReferencesEnqueue{ 18677, 19159 };
         constexpr REL::RelocationID DistantReferencesComplete{ 18678, 19160 };
 
+        // Main::DrawWorld owns the call that tells Skyrim to render the normal world scene. The
+        // caller/callee pair lets the hook locate that call without a runtime-specific byte offset.
         constexpr REL::RelocationID NormalWorldRenderCaller{ 35560, 36559 };
+        constexpr REL::RelocationID NormalWorldRenderer{ 100424, 107142 };
+
+        // The UI renderer owns one call to this helper after binding the Scaleform render target and
+        // before drawing any movies. Hooking that specific call preserves the world-only capture point.
         constexpr REL::RelocationID ScaleformRenderCaller{ 79947, 82084 };
+        constexpr REL::RelocationID ScaleformBeginHelper{ 80605, 82732 };
     }
 
     struct RuntimeOffset
@@ -67,11 +74,5 @@ namespace load_progress
         constexpr RuntimeOffset ReferencesComplete{ 0x0C, 0x0C, 0x0C };
         constexpr RuntimeOffset DistantReferencesEnqueue{ 0x4E, 0x4E, 0x4E };
         constexpr RuntimeOffset DistantReferencesComplete{ 0x69, 0x69, 0x69 };
-
-        // Main::DrawWorld call to the normal world renderer.
-        constexpr RuntimeOffset NormalWorldRenderCall{ 0x831, 0x841, 0x85E };
-
-        // UI render call made after Scaleform binds its render target.
-        constexpr RuntimeOffset ScaleformBeginCall{ 0x17F, 0x18A, 0x18A };
     }
 }

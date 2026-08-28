@@ -5,15 +5,18 @@
 #include "CellTransitioner.h"
 #include "IdsAndOffsets.h"
 
+#include <hde64.h>
+
 // Cell transition injection overview
 //
 // Skyrim normally stops presenting the world as a continuous scene while LoadingMenu, FaderMenu,
 // MistMenu, and the loading image-space modifiers cover the cell change. This experiment leaves the
 // engine's loading work and render scheduling alone, but replaces those visual gates:
 //
-// 1. InstallWorldCaptureHook patches the Scaleform-begin call in Skyrim's UI render path. The original
-//    call binds the UI render target; our callback then copies that target before Scaleform draws. This
-//    produces a rolling world-only frame without the HUD, console, or other Scaleform movies.
+// 1. InstallWorldCaptureHook finds the Scaleform-begin call by its Address Library callee, then patches
+//    that call in Skyrim's UI render path. The original call binds the UI render target; our callback
+//    then copies that target before Scaleform draws. This produces a rolling world-only frame without
+//    the HUD, console, or other Scaleform movies.
 // 2. LoadingMenu's show hook calls PrepareForLoad. It selects a warm or cold presentation, locks the
 //    last complete world frame, and prevents later loading frames from replacing it. BeginLoad opens
 //    the compositor gate when the LoadingMenu open event arrives.
@@ -77,28 +80,93 @@ namespace load_progress
                protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
     }
 
-    // Verifies a rel32 call and its decoded destination before patching it.
-    bool CellTransitioner::ValidateRelativeCall(
-        std::uintptr_t a_callSite, std::string_view a_name)
+    // Finds one rel32 call to the expected callee inside an Address Library function.
+    //
+    // Address Library provides stable identities for the caller and callee, but it does not identify
+    // a particular call instruction inside the caller. The instruction's offset changes when Bethesda
+    // rebuilds the function, so adding a runtime-specific constant would make the hook unnecessarily
+    // fragile. This resolver instead searches the caller for the call whose decoded destination is the
+    // expected Address Library function.
+    //
+    // RtlLookupFunctionEntry reads the executable's x64 unwind table. Its begin/end RVAs provide the
+    // exact compiled-function boundary, keeping the search out of adjacent functions and padding. The
+    // resolver fails closed if the boundary is invalid, the call is absent, or more than one matching
+    // call exists. A future runtime therefore disables plugin initialization instead of patching an
+    // uncertain instruction.
+    std::uintptr_t CellTransitioner::FindUniqueRelativeCall(
+        REL::RelocationID a_callerID,
+        REL::RelocationID a_calleeID,
+        std::string_view  a_name)
     {
+        const auto caller = REL::Relocation<std::uintptr_t>(a_callerID).address();
+        const auto callee = REL::Relocation<std::uintptr_t>(a_calleeID).address();
+        if (!IsExecutableAddress(caller) || !IsExecutableAddress(callee)) {
+            throw std::runtime_error(fmt::format("could not resolve the {} caller or callee", a_name));
+        }
+
+        // x64 unwind entries store RVAs, so add the image base returned with the entry to recover the
+        // live addresses after ASLR.
+        DWORD64     imageBase = 0;
+        const auto* runtimeFunction = ::RtlLookupFunctionEntry(caller, &imageBase, nullptr);
+        if (!runtimeFunction || imageBase == 0) {
+            throw std::runtime_error(fmt::format("could not determine the {} function bounds", a_name));
+        }
+
+        const auto functionBegin = imageBase + runtimeFunction->BeginAddress;
+        const auto functionEnd = imageBase + runtimeFunction->EndAddress;
         const auto text = REL::Module::get().segment(REL::Segment::textx);
-        const auto withinText = a_callSite >= text.address() &&
-                                a_callSite + 5 <= text.address() + text.size();
-        if (!withinText || *reinterpret_cast<const std::uint8_t*>(a_callSite) != 0xE8) {
-            logger::error("{} was not a rel32 call in Skyrim's .text section", a_name);
-            return false;
+        const auto textEnd = text.address() + text.size();
+        if (functionBegin != caller || functionBegin >= functionEnd ||
+            functionBegin < text.address() || functionEnd > textEnd) {
+            throw std::runtime_error(fmt::format("{} had invalid runtime function bounds", a_name));
         }
 
-        std::int32_t displacement = 0;
-        std::memcpy(&displacement, reinterpret_cast<const void*>(a_callSite + 1), sizeof(displacement));
-        const auto target = a_callSite + 5 + displacement;
-        if (target < text.address() || target >= text.address() + text.size() ||
-            !IsExecutableAddress(target)) {
-            logger::error("{} resolved to an invalid target at {:X}", a_name, target);
-            return false;
+        constexpr std::size_t relativeCallSize = 5;
+        std::uintptr_t        match = 0;
+
+        // Walk decoded instruction boundaries rather than scanning individual bytes. An E8 value can
+        // occur inside an immediate or displacement belonging to another instruction and must never
+        // be treated as a patch site. HDE64 is the same compact decoder CommonLib uses to validate
+        // trampoline patches.
+        for (auto instruction = functionBegin; instruction < functionEnd;) {
+            hde64s     decoded{};
+            const auto length = hde64_disasm(reinterpret_cast<const void*>(instruction), &decoded);
+            if (length == 0 || (decoded.flags & F_ERROR) != 0 || instruction + length > functionEnd) {
+                throw std::runtime_error(fmt::format(
+                    "could not decode {} at {:X}", a_name, instruction));
+            }
+
+            // E8 encodes CALL rel32 as a one-byte opcode followed by a signed displacement from the
+            // end of the five-byte instruction. Copy the unaligned displacement instead of casting an
+            // int32_t pointer, then reproduce the CPU's destination calculation.
+            if (decoded.opcode == 0xE8 && length == relativeCallSize) {
+                std::int32_t displacement = 0;
+                std::memcpy(&displacement,
+                    reinterpret_cast<const void*>(instruction + 1), sizeof(displacement));
+                const auto target = instruction + relativeCallSize + displacement;
+                if (target == callee) {
+                    // Multiple calls to the same helper would make the intended semantic position
+                    // ambiguous. Refuse the hook instead of guessing which occurrence is correct.
+                    if (match != 0) {
+                        throw std::runtime_error(fmt::format(
+                            "{} contained more than one call to {:X}", a_name, callee));
+                    }
+
+                    match = instruction;
+                }
+            }
+
+            instruction += length;
         }
 
-        return true;
+        if (match == 0) {
+            throw std::runtime_error(fmt::format(
+                "{} contained no call to {:X}", a_name, callee));
+        }
+
+        logger::info("resolved {} semantically at {:X} within [{:X}, {:X})",
+            a_name, match, functionBegin, functionEnd);
+        return match;
     }
 
     // Locks the last world frame and configures the selected loading presentation.
@@ -1087,24 +1155,15 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             // Observes the normal world-render call without changing when Skyrim is allowed to render.
             void InstallRenderObservationHook()
             {
-                // The centralized location identifies Main::DrawWorld's normal RenderWorld rel32 call.
+                // Main::DrawWorld contains one call to the Address Library identity for the normal
+                // world renderer. Resolving the pair keeps this hook stable when instructions before
+                // the call grow or shrink between runtime builds.
                 constexpr std::size_t relativeCallSize = 5;
-                const auto            caller = REL::Relocation<std::uintptr_t>(IDs::NormalWorldRenderCaller).address();
-                const auto            offset = Offsets::NormalWorldRenderCall.Get();
-                if (!caller || offset == 0) {
-                    throw std::runtime_error("could not resolve the normal-world-render caller");
-                }
-                const auto callSite = caller + offset;
-                if (!CellTransitioner::ValidateRelativeCall(callSite, "normal-world-render call")) {
-                    throw std::runtime_error("normal-world-render call site did not match this runtime");
-                }
-
-                std::int32_t displacement = 0;
-                std::memcpy(&displacement, reinterpret_cast<const void*>(callSite + 1), sizeof(displacement));
-                CellTransitioner::originalRenderWorld = callSite + relativeCallSize + displacement;
-                if (!CellTransitioner::originalRenderWorld.address()) {
-                    throw std::runtime_error("normal-world-render call had no original function");
-                }
+                const auto            callSite = CellTransitioner::FindUniqueRelativeCall(
+                    IDs::NormalWorldRenderCaller, IDs::NormalWorldRenderer,
+                    "normal-world-render call");
+                CellTransitioner::originalRenderWorld =
+                    REL::Relocation<std::uintptr_t>(IDs::NormalWorldRenderer).address();
                 SKSE::GetTrampoline().write_call<relativeCallSize>(
                     callSite, CellTransitioner::ObserveRenderWorld);
                 logger::info("installed passive normal-world-render observation hook at {:X}", callSite);
@@ -1113,24 +1172,15 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             // Installs the rolling world-only capture after target binding and immediately before Scaleform draws.
             void InstallWorldCaptureHook()
             {
-                // The centralized location identifies Scaleform begin after its render target is bound.
+                // The helper is called elsewhere in Skyrim, so its function entry is not hooked. Only
+                // the call owned by the UI render function is replaced; this preserves the narrow point
+                // after target setup and before HUD, console, or menu movies enter the captured texture.
                 constexpr std::size_t relativeCallSize = 5;
-                const auto            caller = REL::Relocation<std::uintptr_t>(IDs::ScaleformRenderCaller).address();
-                const auto            offset = Offsets::ScaleformBeginCall.Get();
-                if (!caller || offset == 0) {
-                    throw std::runtime_error("could not resolve the Scaleform-render caller");
-                }
-                const auto callSite = caller + offset;
-                if (!CellTransitioner::ValidateRelativeCall(callSite, "Scaleform-begin call")) {
-                    throw std::runtime_error("Scaleform-begin call site did not match this runtime");
-                }
-
-                std::int32_t displacement = 0;
-                std::memcpy(&displacement, reinterpret_cast<const void*>(callSite + 1), sizeof(displacement));
-                CellTransitioner::originalBeginScaleform = callSite + relativeCallSize + displacement;
-                if (!CellTransitioner::originalBeginScaleform.address()) {
-                    throw std::runtime_error("Scaleform-begin call had no original function");
-                }
+                const auto            callSite = CellTransitioner::FindUniqueRelativeCall(
+                    IDs::ScaleformRenderCaller, IDs::ScaleformBeginHelper,
+                    "Scaleform-begin call");
+                CellTransitioner::originalBeginScaleform =
+                    REL::Relocation<std::uintptr_t>(IDs::ScaleformBeginHelper).address();
                 SKSE::GetTrampoline().write_call<relativeCallSize>(
                     callSite, CellTransitioner::CaptureAfterScaleformBegin);
                 logger::info("installed world-only capture hook after Scaleform target binding at {:X}", callSite);
