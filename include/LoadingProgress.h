@@ -30,6 +30,28 @@ namespace load_progress
             count
         };
 
+        enum class LoadedEntryType : std::size_t
+        {
+            objectReference,
+            transferredReference,
+            distantReference,
+            count
+        };
+
+        struct LoadedEntry
+        {
+            LoadedEntryType type{};
+            RE::FormID       referenceID{};
+            RE::FormID       baseID{};
+            RE::FormID       cellID{};
+        };
+
+        struct LoadedEntrySlot
+        {
+            std::atomic_uint8_t state{};
+            LoadedEntry        entry{};
+        };
+
         struct Progress
         {
             std::uint64_t total{};
@@ -58,6 +80,8 @@ namespace load_progress
 
         using AdvanceMovie_t = void (*)(RE::IMenu*, float, std::uint32_t);
         using ProcessMessage_t = RE::UI_MESSAGE_RESULTS (*)(RE::IMenu*, RE::UIMessage&);
+        using ReferenceEnqueue_t = std::uintptr_t (*)(RE::TESObjectCELL*);
+        using DistantReferenceEnqueue_t = std::uintptr_t (*)(RE::TESObjectCELL*, RE::TESObjectREFR*);
 
         static LoadingProgress& GetSingleton();
         static std::uint64_t    GetLiveRemaining();
@@ -75,6 +99,13 @@ namespace load_progress
         static bool                   SetMeterPercent(RE::GFxValue&, double);
         static void                   UpdateProgressBar(RE::IMenu*);
         static void                   DrainQueueMutations();
+        static void                   DrainLoadedEntries(bool);
+        static void                   BeginLoadedEntryCapture();
+        static void                   EndLoadedEntryCapture();
+        static void                   CaptureLoadedEntry(LoadedEntryType, RE::TESObjectREFR*, RE::TESObjectCELL*) noexcept;
+        static void                   ObjectReferenceQueued(CONTEXT&) noexcept;
+        static void                   TransferredReferenceQueued(CONTEXT&) noexcept;
+        static void                   DistantReferenceQueued(CONTEXT&) noexcept;
         static void                   LoadingMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
         static RE::UI_MESSAGE_RESULTS LoadingMenuProcessMessage(RE::IMenu*, RE::UIMessage&);
         static void                   LogProgress(const Progress&);
@@ -97,6 +128,8 @@ namespace load_progress
             const RE::TESCellFullyLoadedEvent*, RE::BSTEventSource<RE::TESCellFullyLoadedEvent>*) override;
 
         static constexpr std::size_t queueCount = static_cast<std::size_t>(Queue::count);
+        static constexpr std::size_t loadedEntryTypeCount = static_cast<std::size_t>(LoadedEntryType::count);
+        static constexpr std::size_t loadedEntryCapacity = 16384;
         inline static constexpr auto queueNames = std::to_array<std::string_view>(
             { "critical-refs", "refs", "distant-refs", "background", "tasks", "post-processing" });
         inline static std::array<std::atomic_uint64_t, queueCount> liveRemaining{};
@@ -107,10 +140,18 @@ namespace load_progress
         inline static std::atomic_bool                             hooksEnabled{ false };
         inline static std::atomic_bool                             failureLogged{ false };
         inline static std::atomic_uint32_t                         displayedBasisPoints{};
+        inline static std::array<LoadedEntrySlot, loadedEntryCapacity> loadedEntries{};
+        inline static std::array<std::atomic_uint64_t, loadedEntryTypeCount> loadedEntryTallies{};
+        inline static std::atomic_uint64_t                         loadedEntryWriteCursor{};
+        inline static std::atomic_uint64_t                         droppedLoadedEntryDetails{};
+        inline static std::atomic_uint32_t                         loadedEntryWriters{};
+        inline static std::atomic_bool                             loadedEntryCaptureActive{};
         inline static std::mutex                                   stateLock;
         inline static Progress                                     lastLogged{};
         inline static ProcessMessage_t                             originalLoadingProcessMessage{};
         inline static AdvanceMovie_t                               originalAdvanceMovie{};
+        inline static ReferenceEnqueue_t                           originalReferenceEnqueue{};
+        inline static DistantReferenceEnqueue_t                    originalDistantReferenceEnqueue{};
 
     private:
         LoadingProgress() = default;

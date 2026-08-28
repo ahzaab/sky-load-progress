@@ -294,13 +294,15 @@ namespace load_progress
             return false;
         }
 
-        logger::info(
-            "positioned loading meter: x={:.1f}% y={:.1f}% width={:.1f}% "
-            "localPosition=({:.1f}, {:.1f})->({:.1f}, {:.1f}) "
-            "globalSafe=({:.1f}, {:.1f})-({:.1f}, {:.1f}) globalBounds=({:.1f}, {:.1f})-({:.1f}, {:.1f})",
-            layout.xPercent, layout.yPercent, layout.widthPercent, currentX, currentY, appliedX, appliedY,
-            safeMinimumX, safeMinimumY, safeMaximumX, safeMaximumY, globalBounds[0], globalBounds[1],
-            globalBounds[2], globalBounds[3]);
+        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+            logger::info(
+                "positioned loading meter: x={:.1f}% y={:.1f}% width={:.1f}% "
+                "localPosition=({:.1f}, {:.1f})->({:.1f}, {:.1f}) "
+                "globalSafe=({:.1f}, {:.1f})-({:.1f}, {:.1f}) globalBounds=({:.1f}, {:.1f})-({:.1f}, {:.1f})",
+                layout.xPercent, layout.yPercent, layout.widthPercent, currentX, currentY, appliedX, appliedY,
+                safeMinimumX, safeMinimumY, safeMaximumX, safeMaximumY, globalBounds[0], globalBounds[1],
+                globalBounds[2], globalBounds[3]);
+        }
         return true;
     }
 
@@ -341,7 +343,9 @@ namespace load_progress
                 return false;
             }
 
-            logger::info("requested SkyrimLoadProgress/LoadingProgressMeter.swf");
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::info("requested SkyrimLoadProgress/LoadingProgressMeter.swf");
+            }
             return false;
         }
 
@@ -393,8 +397,10 @@ namespace load_progress
             return false;
         }
 
-        logger::info("initialized standalone loading meter; frames empty={:.0f} full={:.0f}",
-            emptyFrame, fullFrame);
+        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+            logger::info("initialized standalone loading meter; frames empty={:.0f} full={:.0f}",
+                emptyFrame, fullFrame);
+        }
         return true;
     }
 
@@ -419,7 +425,9 @@ namespace load_progress
     // Creates the progress meter on demand and advances it monotonically.
     void LoadingProgress::UpdateProgressBar(RE::IMenu* a_menu)
     {
-        if (!a_menu || !a_menu->uiMovie) {
+        // Keep queue tracking active, but do not create the external movie when its UI is disabled.
+        if (!Settings::GetSingleton().GetProgressBar().enabled ||
+            !a_menu || !a_menu->uiMovie) {
             return;
         }
 
@@ -476,6 +484,177 @@ namespace load_progress
         LogProgress(aggregator.Current());
     }
 
+    // Resolves captured numeric IDs on the loading-menu thread and releases their ring slots.
+    void LoadingProgress::DrainLoadedEntries(bool a_writeLog)
+    {
+        static constexpr auto typeNames = std::to_array<std::string_view>(
+            { "object-reference", "transferred-reference", "distant-reference" });
+
+        for (auto& slot : loadedEntries) {
+            if (slot.state.load(std::memory_order_acquire) != 2) {
+                continue;
+            }
+
+            const auto entry = slot.entry;
+            slot.state.store(0, std::memory_order_release);
+
+            if (!a_writeLog) {
+                continue;
+            }
+
+            const auto* reference = RE::TESForm::LookupByID(entry.referenceID);
+            const auto* base = RE::TESForm::LookupByID(entry.baseID);
+            const auto* cell = RE::TESForm::LookupByID(entry.cellID);
+            const auto* referenceEditorID = reference ? reference->GetFormEditorID() : nullptr;
+            const auto* baseEditorID = base ? base->GetFormEditorID() : nullptr;
+            const auto* cellEditorID = cell ? cell->GetFormEditorID() : nullptr;
+            const auto  typeIndex = static_cast<std::size_t>(entry.type);
+            const auto  typeName = typeIndex < typeNames.size() ? typeNames[typeIndex] : "unknown";
+
+            logger::info(
+                "loaded entry: type={} reference={:08X} editorID='{}' base={:08X} editorID='{}' cell={:08X} editorID='{}'",
+                typeName, entry.referenceID, referenceEditorID ? referenceEditorID : "", entry.baseID,
+                baseEditorID ? baseEditorID : "", entry.cellID, cellEditorID ? cellEditorID : "");
+        }
+    }
+
+    // Clears stale details and enables the lock-free producer path for a new Loading Menu lifetime.
+    void LoadingProgress::BeginLoadedEntryCapture()
+    {
+        const auto& settings = Settings::GetSingleton();
+        if (!settings.IsLoadedEntryLoggingEnabled() ||
+            loadedEntryCaptureActive.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        // Capture is still disabled, so no new producer can enter. Wait for a producer from an
+        // interrupted prior load before reclaiming slots that it may still be writing.
+        while (loadedEntryWriters.load(std::memory_order_acquire) != 0) {
+            std::this_thread::yield();
+        }
+
+        DrainLoadedEntries(false);
+        for (auto& tally : loadedEntryTallies) {
+            tally.store(0, std::memory_order_relaxed);
+        }
+        loadedEntryWriteCursor.store(0, std::memory_order_relaxed);
+        droppedLoadedEntryDetails.store(0, std::memory_order_relaxed);
+        loadedEntryCaptureActive.store(true, std::memory_order_release);
+    }
+
+    // Stops producers, drains their final details, and writes exact per-category enqueue totals.
+    void LoadingProgress::EndLoadedEntryCapture()
+    {
+        if (!loadedEntryCaptureActive.exchange(false, std::memory_order_acq_rel)) {
+            return;
+        }
+
+        while (loadedEntryWriters.load(std::memory_order_acquire) != 0) {
+            std::this_thread::yield();
+        }
+
+        DrainLoadedEntries(true);
+        logger::info(
+            "loaded-entry tally: object-references={} transferred-references={} distant-references={} dropped-details={}",
+            loadedEntryTallies[static_cast<std::size_t>(LoadedEntryType::objectReference)].load(
+                std::memory_order_relaxed),
+            loadedEntryTallies[static_cast<std::size_t>(LoadedEntryType::transferredReference)].load(
+                std::memory_order_relaxed),
+            loadedEntryTallies[static_cast<std::size_t>(LoadedEntryType::distantReference)].load(
+                std::memory_order_relaxed),
+            droppedLoadedEntryDetails.load(std::memory_order_relaxed));
+    }
+
+    // Copies only stable numeric identifiers from a loading worker into a bounded lock-free ring.
+    void LoadingProgress::CaptureLoadedEntry(
+        LoadedEntryType a_type, RE::TESObjectREFR* a_reference, RE::TESObjectCELL* a_cell) noexcept
+    {
+        if (!a_reference || !a_cell || !loadedEntryCaptureActive.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        const auto& categories = Settings::GetSingleton().GetLoadedEntryLogging();
+        const auto  typeIndex = static_cast<std::size_t>(a_type);
+        const bool  selected =
+            (a_type == LoadedEntryType::objectReference && categories.objectReferences) ||
+            (a_type == LoadedEntryType::transferredReference && categories.transferredReferences) ||
+            (a_type == LoadedEntryType::distantReference && categories.distantReferences);
+        if (!selected || typeIndex >= loadedEntryTypeCount) {
+            return;
+        }
+
+        loadedEntryWriters.fetch_add(1, std::memory_order_acq_rel);
+        if (!loadedEntryCaptureActive.load(std::memory_order_acquire)) {
+            loadedEntryWriters.fetch_sub(1, std::memory_order_release);
+            return;
+        }
+
+        const auto* base = a_reference->GetBaseObject();
+        const LoadedEntry entry{
+            a_type, a_reference->GetFormID(), base ? base->GetFormID() : 0, a_cell->GetFormID()
+        };
+        loadedEntryTallies[typeIndex].fetch_add(1, std::memory_order_relaxed);
+
+        // A few retries avoid dropping detail when the cursor meets a slot the consumer has not
+        // released yet. Tallies remain exact even when this diagnostic detail buffer is saturated.
+        constexpr std::size_t reservationAttempts = 8;
+        bool                  stored = false;
+        for (std::size_t attempt = 0; attempt < reservationAttempts; ++attempt) {
+            const auto index = loadedEntryWriteCursor.fetch_add(1, std::memory_order_relaxed) % loadedEntryCapacity;
+            auto       expected = std::uint8_t{ 0 };
+            auto&      slot = loadedEntries[index];
+            if (!slot.state.compare_exchange_strong(
+                    expected, std::uint8_t{ 1 }, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                continue;
+            }
+
+            slot.entry = entry;
+            slot.state.store(2, std::memory_order_release);
+            stored = true;
+            break;
+        }
+
+        if (!stored) {
+            droppedLoadedEntryDetails.fetch_add(1, std::memory_order_relaxed);
+        }
+        loadedEntryWriters.fetch_sub(1, std::memory_order_release);
+    }
+
+    // Replaces the semantic call while preserving its counter-helper return value in RAX.
+    void LoadingProgress::ObjectReferenceQueued(CONTEXT& a_context) noexcept
+    {
+        CaptureLoadedEntry(LoadedEntryType::objectReference,
+            reinterpret_cast<RE::TESObjectREFR*>(a_context.Rdi),
+            reinterpret_cast<RE::TESObjectCELL*>(a_context.Rcx));
+        if (originalReferenceEnqueue) {
+            a_context.Rax = originalReferenceEnqueue(reinterpret_cast<RE::TESObjectCELL*>(a_context.Rcx));
+        }
+    }
+
+    // The transfer path keeps the moved reference in RBX and its destination cell in RCX.
+    void LoadingProgress::TransferredReferenceQueued(CONTEXT& a_context) noexcept
+    {
+        CaptureLoadedEntry(LoadedEntryType::transferredReference,
+            reinterpret_cast<RE::TESObjectREFR*>(a_context.Rbx),
+            reinterpret_cast<RE::TESObjectCELL*>(a_context.Rcx));
+        if (originalReferenceEnqueue) {
+            a_context.Rax = originalReferenceEnqueue(reinterpret_cast<RE::TESObjectCELL*>(a_context.Rcx));
+        }
+    }
+
+    // The distant path passes the reference to its counter helper in RDX and the cell in RCX.
+    void LoadingProgress::DistantReferenceQueued(CONTEXT& a_context) noexcept
+    {
+        CaptureLoadedEntry(LoadedEntryType::distantReference,
+            reinterpret_cast<RE::TESObjectREFR*>(a_context.Rdx),
+            reinterpret_cast<RE::TESObjectCELL*>(a_context.Rcx));
+        if (originalDistantReferenceEnqueue) {
+            a_context.Rax = originalDistantReferenceEnqueue(
+                reinterpret_cast<RE::TESObjectCELL*>(a_context.Rcx),
+                reinterpret_cast<RE::TESObjectREFR*>(a_context.Rdx));
+        }
+    }
+
     // Updates the progress widget and hides Scaleform for warm transitions.
     void LoadingProgress::LoadingMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
     {
@@ -489,6 +668,9 @@ namespace load_progress
 
         try {
             DrainQueueMutations();
+            if (loadedEntryCaptureActive.load(std::memory_order_acquire)) {
+                DrainLoadedEntries(true);
+            }
 
             if (a_menu && a_menu->uiMovie) {
                 const bool seamless = CellTransitioner::IsSeamless();
@@ -511,6 +693,7 @@ namespace load_progress
         if (hooksEnabled.load(std::memory_order_acquire) &&
             a_message.type == RE::UI_MESSAGE_TYPE::kShow) {
             try {
+                BeginLoadedEntryCapture();
                 CellTransitioner::PrepareForLoad(a_menu);
             } catch (const std::exception& error) {
                 DisableHooks(error.what());
@@ -537,8 +720,11 @@ namespace load_progress
             a_progress.remaining == lastLogged.remaining) {
             return;
         }
-        logger::info("load progress completed={} remaining={} total={} percent={:.1f}",
-            a_progress.completed, a_progress.remaining, a_progress.total, a_progress.fraction * 100.0);
+        if (Settings::GetSingleton().IsVerboseQueueLoggingEnabled()) {
+            logger::info("load progress completed={} remaining={} total={} percent={:.1f}",
+                a_progress.completed, a_progress.remaining, a_progress.total,
+                a_progress.fraction * 100.0);
+        }
         lastLogged = a_progress;
     }
 
@@ -547,6 +733,7 @@ namespace load_progress
     {
         hooksEnabled.store(false, std::memory_order_release);
         epochActive.store(false, std::memory_order_release);
+        loadedEntryCaptureActive.store(false, std::memory_order_release);
 
         if (!failureLogged.exchange(true, std::memory_order_acq_rel)) {
             try {
@@ -670,6 +857,81 @@ namespace load_progress
         }
     }
 
+    // Installs semantic reference hooks only for the loaded-entry categories requested at startup.
+    void InstallLoadedEntryHooks()
+    {
+        const auto& settings = Settings::GetSingleton();
+        if (!settings.IsLoadedEntryLoggingEnabled()) {
+            return;
+        }
+
+        struct LoadedEntryHook
+        {
+            REL::RelocationID caller;
+            REL::RelocationID callee;
+            void (*callback)(CONTEXT&) noexcept;
+            std::string_view name;
+            bool             enabled;
+        };
+
+        const auto& categories = settings.GetLoadedEntryLogging();
+        const auto  hooks = std::to_array<LoadedEntryHook>({
+             { IDs::ObjectReferenceQueueCaller, IDs::ReferencesEnqueue,
+                 LoadingProgress::ObjectReferenceQueued, "object-reference enqueue",
+                 categories.objectReferences },
+             { IDs::TransferredReferenceQueueCaller, IDs::ReferencesEnqueue,
+                 LoadingProgress::TransferredReferenceQueued, "transferred-reference enqueue",
+                 categories.transferredReferences },
+             { IDs::DistantReferenceQueueCaller, IDs::DistantReferencesEnqueue,
+                 LoadingProgress::DistantReferenceQueued, "distant-reference enqueue",
+                 categories.distantReferences }
+        });
+
+        LoadingProgress::originalReferenceEnqueue =
+            REL::Relocation<LoadingProgress::ReferenceEnqueue_t>(IDs::ReferencesEnqueue).get();
+        LoadingProgress::originalDistantReferenceEnqueue =
+            REL::Relocation<LoadingProgress::DistantReferenceEnqueue_t>(IDs::DistantReferencesEnqueue).get();
+        if ((categories.objectReferences || categories.transferredReferences) &&
+            !CellTransitioner::IsExecutableAddress(
+                reinterpret_cast<std::uintptr_t>(LoadingProgress::originalReferenceEnqueue))) {
+            throw std::runtime_error("could not resolve the reference enqueue helper");
+        }
+        if (categories.distantReferences &&
+            !CellTransitioner::IsExecutableAddress(
+                reinterpret_cast<std::uintptr_t>(LoadingProgress::originalDistantReferenceEnqueue))) {
+            throw std::runtime_error("could not resolve the distant-reference enqueue helper");
+        }
+
+        std::array<std::uintptr_t, 3> callSites{};
+        for (std::size_t i = 0; i < hooks.size(); ++i) {
+            if (!hooks[i].enabled) {
+                continue;
+            }
+            callSites[i] = CellTransitioner::FindUniqueRelativeCall(
+                hooks[i].caller, hooks[i].callee, hooks[i].name);
+        }
+
+        for (std::size_t i = 0; i < hooks.size(); ++i) {
+            const auto& hook = hooks[i];
+            if (!hook.enabled) {
+                continue;
+            }
+
+            // E8 plus its signed rel32 displacement is a five-byte x64 near call. We replace the
+            // complete instruction and copy zero original bytes because a raw rel32 call cannot be
+            // moved into CommonLib's context stub. The callback invokes the same Address Library
+            // callee itself, including the original return value and its queue-counter side effects.
+            constexpr std::size_t relativeCallSize = 5;
+            constexpr std::size_t copiedInstructionBytes = 0;
+            if (!SKSE::stl::install_context_hook(
+                    callSites[i], relativeCallSize, hook.callback, copiedInstructionBytes)) {
+                throw std::runtime_error(
+                    fmt::format("could not install {} hook at {:X}", hook.name, callSites[i]));
+            }
+            logger::info("installed {} hook at {:X}", hook.name, callSites[i]);
+        }
+    }
+
     // Installs the LoadingMenu message and movie-advance hooks.
     void InstallLoadingMenuHook()
     {
@@ -715,6 +977,10 @@ namespace load_progress
     {
         std::scoped_lock lock(stateLock);
 
+        // ProcessMessage normally arms this capture first. This fallback also covers UI event-order
+        // changes in which the menu-open notification arrives before the show message.
+        BeginLoadedEntryCapture();
+
         displayedBasisPoints.store(0, std::memory_order_release);
         for (std::size_t i = 0; i < queueCount; ++i) {
             pendingEnqueued[i].store(0, std::memory_order_relaxed);
@@ -728,8 +994,10 @@ namespace load_progress
         epochActive.store(true, std::memory_order_release);
         CellTransitioner::BeginLoad();
 
-        logger::info(
-            "loading epoch began: Loading Menu opened; baseline remaining={}", aggregator.Current().remaining);
+        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+            logger::info(
+                "loading epoch began: Loading Menu opened; baseline remaining={}", aggregator.Current().remaining);
+        }
         LogProgress(aggregator.Current());
     }
 
@@ -743,11 +1011,14 @@ namespace load_progress
             pendingEnqueued[i].store(0, std::memory_order_relaxed);
             pendingCompleted[i].store(0, std::memory_order_relaxed);
         }
+        EndLoadedEntryCapture();
         CellTransitioner::EndLoad();
 
         const auto final = aggregator.Current();
-        logger::info("loading epoch ended: Loading Menu closed; completed={} remaining={} total={}",
-            final.completed, final.remaining, final.total);
+        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+            logger::info("loading epoch ended: Loading Menu closed; completed={} remaining={} total={}",
+                final.completed, final.remaining, final.total);
+        }
         aggregator.End();
     }
 
@@ -788,9 +1059,12 @@ namespace load_progress
             if (CellTransitioner::renderObservationState.load(std::memory_order_acquire) != 0 && a_event &&
                 a_event->cell) {
                 const auto* editorID = a_event->cell->GetFormEditorID();
-                logger::info("cell fully loaded: formID={:08X} editorID='{}' menuOpen={} liveRemaining={}",
-                    a_event->cell->GetFormID(), editorID ? editorID : "",
-                    epochActive.load(std::memory_order_acquire), GetLiveRemaining());
+                if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                    logger::info(
+                        "cell fully loaded: formID={:08X} editorID='{}' menuOpen={} liveRemaining={}",
+                        a_event->cell->GetFormID(), editorID ? editorID : "",
+                        epochActive.load(std::memory_order_acquire), GetLiveRemaining());
+                }
             }
         } catch (const std::exception& error) {
             DisableHooks(error.what());
@@ -823,7 +1097,9 @@ namespace load_progress
 
         remaining_[index] += a_count;
         total_[index] += a_count;
-        logger::debug("queue '{}' enqueued {} item(s)", queueNames[index], a_count);
+        if (Settings::GetSingleton().IsVerboseQueueLoggingEnabled()) {
+            logger::info("queue '{}' enqueued {} item(s)", queueNames[index], a_count);
+        }
         Recalculate();
     }
 
@@ -843,8 +1119,10 @@ namespace load_progress
         const auto unobserved = a_count - observed;
         remaining_[index] -= observed;
         total_[index] += unobserved;
-        logger::debug("queue '{}' completed {} item(s), including {} unobserved",
-            queueNames[index], a_count, unobserved);
+        if (Settings::GetSingleton().IsVerboseQueueLoggingEnabled()) {
+            logger::info("queue '{}' completed {} item(s), including {} unobserved",
+                queueNames[index], a_count, unobserved);
+        }
         Recalculate();
     }
 
@@ -885,6 +1163,7 @@ namespace load_progress
         }
 
         InstallMutationHooks();
+        InstallLoadedEntryHooks();
         InstallLoadingMenuHook();
 
         ui->AddEventSink<RE::MenuOpenCloseEvent>(&events);

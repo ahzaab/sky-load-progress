@@ -418,18 +418,22 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         const auto type = transitionType.load(std::memory_order_acquire);
-        logger::info(
-            "loading destination: cell={:08X} editorID='{}' loadedData={} attached={} presentation={} transition={} "
-            "fadeIn={}ms hold={}ms fadeOut={}ms",
-            cell ? cell->GetFormID() : 0, editorID, resident,
-            cell && cell->IsAttached(), selected == Presentation::seamless ? "seamless" : "loading-menu",
-            type == Settings::TransitionType::color ? "color" : "blur", fadeInDuration.load(),
-            holdAfterLoad.load(), fadeOutDuration.load());
+        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+            logger::info(
+                "loading destination: cell={:08X} editorID='{}' loadedData={} attached={} presentation={} transition={} "
+                "fadeIn={}ms hold={}ms fadeOut={}ms",
+                cell ? cell->GetFormID() : 0, editorID, resident,
+                cell && cell->IsAttached(), selected == Presentation::seamless ? "seamless" : "loading-menu",
+                type == Settings::TransitionType::color ? "color" : "blur", fadeInDuration.load(),
+                holdAfterLoad.load(), fadeOutDuration.load());
 
-        if (type == Settings::TransitionType::color) {
-            logger::info("color transition: source={} fallback=#{:06X}",
-                colorSource.load(std::memory_order_acquire) == Settings::ColorSource::dominant ? "dominant" : "fixed",
-                transitionColor.load(std::memory_order_acquire));
+            if (type == Settings::TransitionType::color) {
+                logger::info("color transition: source={} fallback=#{:06X}",
+                    colorSource.load(std::memory_order_acquire) == Settings::ColorSource::dominant ?
+                        "dominant" :
+                        "fixed",
+                    transitionColor.load(std::memory_order_acquire));
+            }
         }
         return selected;
     }
@@ -464,7 +468,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
         {
             std::scoped_lock lock(controlStateLock);
-            if (!lastControlState || *state != *lastControlState) {
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled() &&
+                (!lastControlState || *state != *lastControlState)) {
                 logger::info(
                     "post-load controls: enabled={:08X} stored={:08X} blockInput={} paused={} fader={} mist={}",
                     state->enabled, state->stored, state->blockInput, state->paused, state->faderOpen,
@@ -481,7 +486,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         const bool gameplayReady = controls->IsMovementControlsEnabled() && controls->IsLookingControlsEnabled() &&
                                    controls->IsActivateControlsEnabled() && !state->blockInput && !state->paused;
         if (gameplayReady) {
-            logger::info("post-load gameplay controls are ready");
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::info("post-load gameplay controls are ready");
+            }
             awaitingControlRestore.store(false, std::memory_order_release);
         }
     }
@@ -673,7 +680,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         transitionColor.store(*color, std::memory_order_release);
-        logger::info("selected captured-frame transition color #{:06X}", transitionColor.load());
+        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+            logger::info("selected captured-frame transition color #{:06X}", transitionColor.load());
+        }
     }
 
     // Converts the packed transition color and caller-supplied alpha for SpriteBatch.
@@ -736,7 +745,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         a_context->CopyResource(a_backBuffer, frozenFrame);
 
         if (!loggedFrozenPresentation) {
-            logger::info("presenting the frozen pre-load frame");
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::info("presenting the frozen pre-load frame");
+            }
             loggedFrozenPresentation = true;
         }
     }
@@ -799,7 +810,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (fadeElapsed >= duration) {
             postLoadFadeStart.store(0, std::memory_order_release);
             frozenFrameLocked.store(false, std::memory_order_release);
-            logger::info("post-load frozen-frame crossfade completed");
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::info("post-load frozen-frame crossfade completed");
+            }
             return;
         }
 
@@ -896,6 +909,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     // Logs the world state at the two render milestones used by this experiment.
     void CellTransitioner::LogRenderState(std::string_view a_timing)
     {
+        if (!Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+            return;
+        }
+
         const auto* player = RE::PlayerCharacter::GetSingleton();
         const auto* cell = player ? player->GetParentCell() : nullptr;
         logger::info("normal world render {}: cell={:08X} worldRoot={} camera={} player3D={}", a_timing,
@@ -963,8 +980,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 loggedFrozenPresentation = false;
 
                 if (!loggedFrozenFrame) {
-                    logger::info(
-                        "capturing rolling {}x{} world frames before Scaleform", desc.width, desc.height);
+                    if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                        logger::info(
+                            "capturing rolling {}x{} world frames before Scaleform", desc.width, desc.height);
+                    }
                     loggedFrozenFrame = true;
                 }
             }
@@ -1072,7 +1091,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (ui->IsMenuOpen(RE::MistMenu::MENU_NAME)) {
             messages->AddMessage(RE::MistMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
         }
-        logger::info("queued immediate closure of residual loading menus");
+        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+            logger::info("queued immediate closure of residual loading menus");
+        }
     }
 
     namespace transitions

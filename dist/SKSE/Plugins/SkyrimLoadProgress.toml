@@ -7,7 +7,34 @@
 # All timing values are milliseconds. Values below zero are treated as zero,
 # and values above 600000 are limited to 600000.
 
+[logging]
+# Per-load summaries and transition diagnostics can be useful when diagnosing
+# compatibility problems. Keep this off for normal play. Startup messages,
+# warnings, and errors are still written when it is false.
+loading = false
+
+# Log individual queue mutations and aggregate progress samples. This can write
+# many lines during a cold load and only takes effect when loading is also true.
+verbose_queues = false
+
+[logging.loaded_entries]
+# Log references when Skyrim actually enqueues their normal 3D or object-loading
+# work. Each entry includes the reference, base object, and cell Form IDs and
+# resolves their Editor IDs later on the game thread.
+object_references = false
+
+# Log references whose queued work is transferred from one cell to another.
+transferred_references = false
+
+# Log references added to Skyrim's distant-reference queue. This queue can
+# include LOD-related work, but it is not a direct count of generated LOD meshes.
+distant_references = false
+
 [progress_bar]
+# Set this to false to disable the loading progress meter. Queue tracking stays
+# active, while diagnostic output follows the [logging] settings above.
+enabled = true
+
 # Position is measured inside the Loading Menu safe zone. The meter's visual
 # bounds are used, so its registration point does not affect placement.
 #

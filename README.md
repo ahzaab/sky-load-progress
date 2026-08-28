@@ -2,9 +2,9 @@
 
 Skyrim Load Progress adds a progress meter to the loading screen. The meter uses the same artwork as the level progress bar and is placed directly below it.
 
-> **Experimental branch:** `codex/seamless-loading-experiment` keeps Skyrim's loading, fader, and mist update loops running but disables their presentation. This hides both Scaleform movies and suppresses MistMenu's native mist, background, and load-screen NIF rendering. It also disables form-backed image-space modifiers, including their cross-fades. The last completed frame is kept in a GPU texture and presented while the Loading Menu is open. Expect a frozen image followed by normal pop-in when rendering resumes.
+> **Experimental branch:** `seamless-loading-experiment` keeps Skyrim's loading, fader, and mist update loops running but disables their presentation. This hides both Scaleform movies and suppresses MistMenu's native mist, background, and load-screen NIF rendering. It also disables form-backed image-space modifiers, including their cross-fades. The last completed frame is kept in a GPU texture and presented while the Loading Menu is open. Expect a frozen image followed by normal pop-in when rendering resumes.
 
-This is still a proof of concept. The plugin currently tracks the reference, critical reference, and distant reference queues used while cells are loading. It writes the queue activity and calculated progress to `SkyrimLoadProgress.log`.
+This is still a proof of concept. The plugin currently tracks the reference, critical reference, and distant reference queues used while cells are loading. Optional diagnostics can write the queue activity and calculated progress to `SkyrimLoadProgress.log`.
 
 ## How it Works
 
@@ -24,7 +24,9 @@ Transition settings are read from:
 Data/SKSE/Plugins/SkyrimLoadProgress.toml
 ```
 
-The TOML file controls the loading meter's safe-zone position and width, the blur shader, warm-cell fade timing, the default cold-cell transition, and ordered rules for cell editor IDs. Cell patterns are case-insensitive and support `*` and `?` wildcards. The first matching rule wins.
+The TOML file can disable the loading meter or control its safe-zone position and width. It also controls the blur shader, warm-cell fade timing, the default cold-cell transition, and ordered rules for cell editor IDs. Cell patterns are case-insensitive and support `*` and `?` wildcards. The first matching rule wins.
+
+Loading diagnostics are disabled by default. Set `logging.loading` to write per-load and transition details. Set `logging.verbose_queues` as well to include individual queue mutations and aggregate progress samples. The `logging.loaded_entries` table can separately log normal object-reference work, references transferred between cells, and distant-reference work. Enabled entry categories include Form IDs and Editor IDs where available, plus an end-of-load tally. Startup messages, warnings, and errors are always logged.
 
 Cold transitions can use the retained frame with an optional blur, or blend to a fixed or captured dominant color. Each cold rule can override `fade_in_ms`, `hold_after_load_ms`, and `fade_out_ms`. Values omitted from a rule inherit from the global `[cold]` table. Warm transitions are global and do not use cell rules.
 

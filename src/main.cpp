@@ -109,7 +109,8 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 
         logger::info("Skyrim Load Progress {} loading", Version::NAME);
 
-        // Reserve enough room for the six context-capture stubs and every branch island.
+        // Reserve enough room for the six queue-counter stubs, three optional loaded-entry stubs,
+        // and every transition branch island.
         constexpr std::size_t trampolineSize = 1 << 14;
         SKSE::AllocTrampoline(trampolineSize);
 

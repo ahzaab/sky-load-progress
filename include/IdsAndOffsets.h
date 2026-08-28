@@ -32,6 +32,13 @@ namespace load_progress
         constexpr REL::RelocationID DistantReferencesEnqueue{ 18677, 19159 };
         constexpr REL::RelocationID DistantReferencesComplete{ 18678, 19160 };
 
+        // These callers own the semantic enqueue operations used by loaded-entry diagnostics. The
+        // hook installer finds their unique calls to the counter helpers above, so these sites do not
+        // depend on fragile function-relative offsets.
+        constexpr REL::RelocationID ObjectReferenceQueueCaller{ 12910, 13057 };
+        constexpr REL::RelocationID TransferredReferenceQueueCaller{ 19391, 19818 };
+        constexpr REL::RelocationID DistantReferenceQueueCaller{ 17811, 18223 };
+
         // Main::DrawWorld owns the call that tells Skyrim to render the normal world scene. The
         // caller/callee pair lets the hook locate that call without a runtime-specific byte offset.
         constexpr REL::RelocationID NormalWorldRenderCaller{ 35560, 36559 };
