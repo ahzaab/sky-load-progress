@@ -9,6 +9,20 @@
 
 namespace
 {
+    // Logs a fatal plugin error without allowing the logging backend to unwind through SKSE.
+    void LogCritical(std::string_view a_message, std::string_view a_detail = {}) noexcept
+    {
+        try {
+            if (a_detail.empty()) {
+                logger::critical("{}", a_message);
+            } else {
+                logger::critical("{}: {}", a_message, a_detail);
+            }
+        } catch (...) {
+            REX::W32::OutputDebugStringA("Skyrim Load Progress: fatal plugin error\n");
+        }
+    }
+
 #ifndef NDEBUG
     // Opens a console sink for local Debug builds.
     bool OpenDebugConsole()
@@ -67,7 +81,13 @@ namespace
                 load_progress::transitions::InstallHooks();
                 load_progress::InstallHooks();
             } catch (const std::exception& error) {
-                logger::critical("could not install Skyrim Load Progress hooks: {}", error.what());
+                load_progress::LoadingProgress::DisableHooks(error.what());
+                load_progress::CellTransitioner::DisableHooks(error.what());
+                LogCritical("could not install Skyrim Load Progress hooks", error.what());
+            } catch (...) {
+                load_progress::LoadingProgress::DisableHooks("unknown hook-installation exception");
+                load_progress::CellTransitioner::DisableHooks("unknown hook-installation exception");
+                LogCritical("could not install Skyrim Load Progress hooks: unknown exception");
             }
         }
     }
@@ -89,10 +109,8 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 
         logger::info("Skyrim Load Progress {} loading", Version::NAME);
 
-        // One 4 KiB page holds the six generated queue-hook stubs and the two
-        // branch islands used by the renderer hooks. Allocate it before any
-        // data-loaded callback can install either hook group.
-        constexpr std::size_t trampolineSize = 1 << 12;
+        // Reserve enough room for the six context-capture stubs and every branch island.
+        constexpr std::size_t trampolineSize = 1 << 14;
         SKSE::AllocTrampoline(trampolineSize);
 
         auto* messaging = SKSE::GetMessagingInterface();
@@ -104,7 +122,10 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
         logger::info("Skyrim Load Progress loaded");
         return true;
     } catch (const std::exception& e) {
-        logger::critical("{}", e.what());
+        LogCritical(e.what());
+        return false;
+    } catch (...) {
+        LogCritical("unknown exception during plugin initialization");
         return false;
     }
 }

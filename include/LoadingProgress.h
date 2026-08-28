@@ -5,115 +5,121 @@
 
 namespace load_progress
 {
-// LoadingProgress loads SkyrimLoadProgress/LoadingProgressMeter.swf into a root-level movie clip.
-// The external movie exposes Meter_mc with Empty and Full timeline labels, a scaling-grid-aware
-// Frame_mc, and an invisible Bounds_mc matching the visible frame. This allows a skin replacer to
-// change the artwork without changing this plugin. The outer loaded-movie container owns the
-// configured safe-zone position. Frame_mc preserves its caps while Meter_mc scales the animated
-// fill and mask together.
-// Each update converts the monotonic aggregate percentage into a frame between those two labels and
-// calls gotoAndStop. Identical assets are installed under Interface and Interface/Exported so the
-// relative movie request resolves from either loading-menu location.
-class LoadingProgress final :
-    public RE::BSTEventSink<RE::MenuOpenCloseEvent>,
-    public RE::BSTEventSink<RE::TESCellFullyLoadedEvent>
-{
-public:
-    enum class Queue : std::size_t
-    {
-        criticalReferences,
-        references,
-        distantReferences,
-        backgroundProcessing,
-        tasks,
-        postProcessing,
-        count
-    };
-
-    struct Progress
-    {
-        std::uint64_t total{};
-        std::uint64_t remaining{};
-        std::uint64_t completed{};
-        double fraction{};
-    };
-
-    class Aggregator
+    // LoadingProgress loads SkyrimLoadProgress/LoadingProgressMeter.swf into a root-level movie clip.
+    // The external movie exposes Meter_mc with Empty and Full timeline labels, a scaling-grid-aware
+    // Frame_mc, and an invisible Bounds_mc matching the visible frame. This allows a skin replacer to
+    // change the artwork without changing this plugin. The outer loaded-movie container owns the
+    // configured safe-zone position. Frame_mc preserves its caps while Meter_mc scales the animated
+    // fill and mask together.
+    // Each update converts the monotonic aggregate percentage into a frame between those two labels and
+    // calls gotoAndStop. Identical assets are installed under Interface and Interface/Exported so the
+    // relative movie request resolves from either loading-menu location.
+    class LoadingProgress final :
+        public RE::BSTEventSink<RE::MenuOpenCloseEvent>,
+        public RE::BSTEventSink<RE::TESCellFullyLoadedEvent>
     {
     public:
-        void Begin();
-        void Enqueue(Queue);
-        void Complete(Queue);
-        [[nodiscard]] Progress Current() const;
-        void End();
+        enum class Queue : std::size_t
+        {
+            criticalReferences,
+            references,
+            distantReferences,
+            backgroundProcessing,
+            tasks,
+            postProcessing,
+            count
+        };
+
+        struct Progress
+        {
+            std::uint64_t total{};
+            std::uint64_t remaining{};
+            std::uint64_t completed{};
+            double        fraction{};
+        };
+
+        class Aggregator
+        {
+        public:
+            void                   Begin();
+            void                   Enqueue(Queue, std::uint64_t = 1);
+            void                   Complete(Queue, std::uint64_t = 1);
+            [[nodiscard]] Progress Current() const;
+            void                   End();
+
+        private:
+            void Recalculate();
+
+            std::array<std::uint64_t, static_cast<std::size_t>(Queue::count)> remaining_{};
+            std::array<std::uint64_t, static_cast<std::size_t>(Queue::count)> total_{};
+            Progress                                                          progress_{};
+            bool                                                              active_{};
+        };
+
+        using AdvanceMovie_t = void (*)(RE::IMenu*, float, std::uint32_t);
+        using ProcessMessage_t = RE::UI_MESSAGE_RESULTS (*)(RE::IMenu*, RE::UIMessage&);
+
+        static LoadingProgress& GetSingleton();
+        static std::uint64_t    GetLiveRemaining();
+        static void             SetNumber(RE::GFxValue&, const char*, double);
+        static bool             GetNumber(const RE::GFxValue&, const char*, double&);
+        static bool             ConvertGlobalPointToLocal(RE::GFxMovieView*, RE::GFxValue&, double&, double&);
+        static bool             ConvertLocalPointToGlobal(RE::GFxMovieView*, RE::GFxValue&, double&, double&);
+        static bool             GetClipBounds(RE::GFxValue&, RE::GFxValue&, std::array<double, 4>&);
+        static bool             GetGlobalClipBounds(
+                        RE::GFxMovieView*, RE::GFxValue&, RE::GFxValue&, std::array<double, 4>&);
+        static double CalculateMeterXScale(double, double, double);
+        static bool   ApplyProgressBarLayout(
+              RE::GFxMovieView*, RE::GFxValue&, RE::GFxValue&, RE::GFxValue&, RE::GFxValue&, RE::GFxValue&);
+        static bool                   CreateProgressBar(RE::GFxMovieView*);
+        static bool                   SetMeterPercent(RE::GFxValue&, double);
+        static void                   UpdateProgressBar(RE::IMenu*);
+        static void                   DrainQueueMutations();
+        static void                   LoadingMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
+        static RE::UI_MESSAGE_RESULTS LoadingMenuProcessMessage(RE::IMenu*, RE::UIMessage&);
+        static void                   LogProgress(const Progress&);
+        static void                   DisableHooks(std::string_view) noexcept;
+        static void                   OnEnqueue(Queue) noexcept;
+        static void                   OnComplete(Queue) noexcept;
+        static void                   CriticalEnqueue(CONTEXT&) noexcept;
+        static void                   CriticalComplete(CONTEXT&) noexcept;
+        static void                   ReferenceEnqueue(CONTEXT&) noexcept;
+        static void                   ReferenceComplete(CONTEXT&) noexcept;
+        static void                   DistantEnqueue(CONTEXT&) noexcept;
+        static void                   DistantComplete(CONTEXT&) noexcept;
+        static void                   SeedQueuedWork();
+        static void                   BeginLoadingEpoch();
+        static void                   EndLoadingEpoch();
+
+        RE::BSEventNotifyControl ProcessEvent(
+            const RE::MenuOpenCloseEvent*, RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override;
+        RE::BSEventNotifyControl ProcessEvent(
+            const RE::TESCellFullyLoadedEvent*, RE::BSTEventSource<RE::TESCellFullyLoadedEvent>*) override;
+
+        static constexpr std::size_t queueCount = static_cast<std::size_t>(Queue::count);
+        inline static constexpr auto queueNames = std::to_array<std::string_view>(
+            { "critical-refs", "refs", "distant-refs", "background", "tasks", "post-processing" });
+        inline static std::array<std::atomic_uint64_t, queueCount> liveRemaining{};
+        inline static std::array<std::atomic_uint64_t, queueCount> pendingEnqueued{};
+        inline static std::array<std::atomic_uint64_t, queueCount> pendingCompleted{};
+        inline static Aggregator                                   aggregator;
+        inline static std::atomic_bool                             epochActive{ false };
+        inline static std::atomic_bool                             hooksEnabled{ false };
+        inline static std::atomic_bool                             failureLogged{ false };
+        inline static std::atomic_uint32_t                         displayedBasisPoints{};
+        inline static std::mutex                                   stateLock;
+        inline static Progress                                     lastLogged{};
+        inline static ProcessMessage_t                             originalLoadingProcessMessage{};
+        inline static AdvanceMovie_t                               originalAdvanceMovie{};
 
     private:
-        void Recalculate();
-
-        std::array<std::uint64_t, static_cast<std::size_t>(Queue::count)> remaining_{};
-        std::array<std::uint64_t, static_cast<std::size_t>(Queue::count)> total_{};
-        Progress progress_{};
-        bool active_{};
+        LoadingProgress() = default;
+        LoadingProgress(const LoadingProgress&) = delete;
+        LoadingProgress(LoadingProgress&&) = delete;
+        LoadingProgress& operator=(const LoadingProgress&) = delete;
+        LoadingProgress& operator=(LoadingProgress&&) = delete;
     };
 
-    using AdvanceMovie_t = void (*)(RE::IMenu*, float, std::uint32_t);
-    using ProcessMessage_t = RE::UI_MESSAGE_RESULTS (*)(RE::IMenu*, RE::UIMessage&);
-
-    static LoadingProgress& GetSingleton();
-    static std::uint64_t GetLiveRemaining();
-    static void SetNumber(RE::GFxValue&, const char*, double);
-    static bool GetNumber(const RE::GFxValue&, const char*, double&);
-    static bool ConvertGlobalPointToLocal(RE::GFxMovieView*, RE::GFxValue&, double&, double&);
-    static bool ConvertLocalPointToGlobal(RE::GFxMovieView*, RE::GFxValue&, double&, double&);
-    static bool GetClipBounds(RE::GFxValue&, RE::GFxValue&, std::array<double, 4>&);
-    static bool GetGlobalClipBounds(
-        RE::GFxMovieView*, RE::GFxValue&, RE::GFxValue&, std::array<double, 4>&);
-    static double CalculateMeterXScale(double, double, double);
-    static bool ApplyProgressBarLayout(
-        RE::GFxMovieView*, RE::GFxValue&, RE::GFxValue&, RE::GFxValue&, RE::GFxValue&, RE::GFxValue&);
-    static bool CreateProgressBar(RE::GFxMovieView*);
-    static bool SetMeterPercent(RE::GFxValue&, double);
-    static void UpdateProgressBar(RE::IMenu*);
-    static void LoadingMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
-    static RE::UI_MESSAGE_RESULTS LoadingMenuProcessMessage(RE::IMenu*, RE::UIMessage&);
-    static void LogProgress(const Progress&);
-    static void OnEnqueue(Queue);
-    static void OnComplete(Queue);
-    static void CriticalEnqueue(CONTEXT&);
-    static void CriticalComplete(CONTEXT&);
-    static void ReferenceEnqueue(CONTEXT&);
-    static void ReferenceComplete(CONTEXT&);
-    static void DistantEnqueue(CONTEXT&);
-    static void DistantComplete(CONTEXT&);
-    static void SeedQueuedWork();
-    static void BeginLoadingEpoch();
-    static void EndLoadingEpoch();
-
-    RE::BSEventNotifyControl ProcessEvent(
-        const RE::MenuOpenCloseEvent*, RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override;
-    RE::BSEventNotifyControl ProcessEvent(
-        const RE::TESCellFullyLoadedEvent*, RE::BSTEventSource<RE::TESCellFullyLoadedEvent>*) override;
-
-    static constexpr std::size_t queueCount = static_cast<std::size_t>(Queue::count);
-    inline static constexpr auto queueNames = std::to_array<std::string_view>(
-        { "critical-refs", "refs", "distant-refs", "background", "tasks", "post-processing" });
-    inline static std::array<std::atomic_uint64_t, queueCount> liveRemaining{};
-    inline static Aggregator aggregator;
-    inline static std::atomic_bool epochActive{ false };
-    inline static std::atomic_uint32_t displayedBasisPoints{};
-    inline static std::mutex stateLock;
-    inline static Progress lastLogged{};
-    inline static ProcessMessage_t originalLoadingProcessMessage{};
-    inline static AdvanceMovie_t originalAdvanceMovie{};
-
-private:
-    LoadingProgress() = default;
-    LoadingProgress(const LoadingProgress&) = delete;
-    LoadingProgress(LoadingProgress&&) = delete;
-    LoadingProgress& operator=(const LoadingProgress&) = delete;
-    LoadingProgress& operator=(LoadingProgress&&) = delete;
-};
-
-// Installs loading progress hooks and event sinks.
-void InstallHooks();
+    // Installs loading progress hooks and event sinks.
+    void InstallHooks();
 }
