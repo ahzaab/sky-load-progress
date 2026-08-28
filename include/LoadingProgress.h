@@ -5,13 +5,15 @@
 
 namespace load_progress
 {
-// LoadingProgress injects the queue meter directly into LoadingMenu's existing Scaleform movie.
-// LoadingMenu::AdvanceMovie first looks for _root.Menu_mc.LevelMeterRect.SkyrimLoadProgress.
-// When it is missing, CreateProgressBar duplicates LevelProgressBar at the next available depth so
-// the new meter inherits whichever level-bar skin is currently installed. The copy is positioned
-// below the original level meter, and its Empty and Full timeline frames are recorded on the clip.
+// LoadingProgress loads SkyrimLoadProgress/LoadingProgressMeter.swf into a root-level movie clip.
+// The external movie exposes Meter_mc with Empty and Full timeline labels, a scaling-grid-aware
+// Frame_mc, and an invisible Bounds_mc matching the visible frame. This allows a skin replacer to
+// change the artwork without changing this plugin. The outer loaded-movie container owns the
+// configured safe-zone position. Frame_mc preserves its caps while Meter_mc scales the animated
+// fill and mask together.
 // Each update converts the monotonic aggregate percentage into a frame between those two labels and
-// calls gotoAndStop. Nothing is added to the SWF on disk; the clip exists only in the active movie.
+// calls gotoAndStop. Identical assets are installed under Interface and Interface/Exported so the
+// relative movie request resolves from either loading-menu location.
 class LoadingProgress final :
     public RE::BSTEventSink<RE::MenuOpenCloseEvent>,
     public RE::BSTEventSink<RE::TESCellFullyLoadedEvent>
@@ -61,6 +63,14 @@ public:
     static std::uint64_t GetLiveRemaining();
     static void SetNumber(RE::GFxValue&, const char*, double);
     static bool GetNumber(const RE::GFxValue&, const char*, double&);
+    static bool ConvertGlobalPointToLocal(RE::GFxMovieView*, RE::GFxValue&, double&, double&);
+    static bool ConvertLocalPointToGlobal(RE::GFxMovieView*, RE::GFxValue&, double&, double&);
+    static bool GetClipBounds(RE::GFxValue&, RE::GFxValue&, std::array<double, 4>&);
+    static bool GetGlobalClipBounds(
+        RE::GFxMovieView*, RE::GFxValue&, RE::GFxValue&, std::array<double, 4>&);
+    static double CalculateMeterXScale(double, double, double);
+    static bool ApplyProgressBarLayout(
+        RE::GFxMovieView*, RE::GFxValue&, RE::GFxValue&, RE::GFxValue&, RE::GFxValue&, RE::GFxValue&);
     static bool CreateProgressBar(RE::GFxMovieView*);
     static bool SetMeterPercent(RE::GFxValue&, double);
     static void UpdateProgressBar(RE::IMenu*);

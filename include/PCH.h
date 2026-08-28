@@ -7,11 +7,16 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <charconv>
+#include <cctype>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>

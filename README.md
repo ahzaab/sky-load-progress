@@ -16,6 +16,20 @@ This is still a proof of concept. The plugin currently tracks the reference, cri
 
 The progress meter does not poll the queues. The queue totals are updated by the hooks where Skyrim changes the counters. `LoadingMenu::AdvanceMovie` is only used to display the latest calculated value.
 
+## Configuration
+
+Transition settings are read from:
+
+```text
+Data/SKSE/Plugins/SkyrimLoadProgress.toml
+```
+
+The TOML file controls the loading meter's safe-zone position and width, the blur shader, warm-cell fade timing, the default cold-cell transition, and ordered rules for cell editor IDs. Cell patterns are case-insensitive and support `*` and `?` wildcards. The first matching rule wins.
+
+Cold transitions can use the retained frame with an optional blur, or blend to a fixed or captured dominant color. Each cold rule can override `fade_in_ms`, `hold_after_load_ms`, and `fade_out_ms`. Values omitted from a rule inherit from the global `[cold]` table. Warm transitions are global and do not use cell rules.
+
+Settings are read once when Skyrim finishes loading game data. Restart the game after changing the file.
+
 ## Current Limitations
 
 Skyrim also reports background processing, task, and post-processing work in its loading diagnostics. Those queues are not included yet because their enqueue and completion points have not been identified with enough confidence.
@@ -35,10 +49,13 @@ The log contains:
 
 ## Installation
 
-Install the DLL to:
+Install the plugin, configuration, and meter assets to:
 
 ```text
 Data/SKSE/Plugins/SkyrimLoadProgress.dll
+Data/SKSE/Plugins/SkyrimLoadProgress.toml
+Data/Interface/SkyrimLoadProgress/LoadingProgressMeter.swf
+Data/Interface/Exported/SkyrimLoadProgress/LoadingProgressMeter.swf
 ```
 
 ## Requirements

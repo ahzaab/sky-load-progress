@@ -5,6 +5,7 @@
 #include "CellTransitioner.h"
 #include "IdsAndOffsets.h"
 #include "LoadingProgress.h"
+#include "Settings.h"
 
 namespace load_progress
 {
@@ -44,46 +45,288 @@ bool LoadingProgress::GetNumber(const RE::GFxValue& a_object, const char* a_name
     return true;
 }
 
-// Duplicates the loading screen's level meter for queue progress.
-bool LoadingProgress::CreateProgressBar(RE::GFxMovieView* a_view)
+// Converts one root-movie point into the meter container's local coordinate space.
+bool LoadingProgress::ConvertGlobalPointToLocal(
+    RE::GFxMovieView* a_view, RE::GFxValue& a_parent, double& a_x, double& a_y)
 {
-    RE::GFxValue meterRect;
-    RE::GFxValue source;
-    if (!a_view->GetVariable(&meterRect, "_root.Menu_mc.LevelMeterRect") || !meterRect.IsObject() ||
-        !meterRect.GetMember("LevelProgressBar", &source) || !source.IsObject()) {
-        logger::warn("could not find _root.Menu_mc.LevelMeterRect.LevelProgressBar");
+    RE::GFxValue point;
+    a_view->CreateObject(&point);
+    SetNumber(point, "x", a_x);
+    SetNumber(point, "y", a_y);
+
+    RE::GFxValue ignored;
+    if (!a_parent.Invoke("globalToLocal", &ignored, &point, 1) ||
+        !GetNumber(point, "x", a_x) || !GetNumber(point, "y", a_y)) {
         return false;
     }
 
-    // Duplicate the active skin instead of supplying our own meter artwork.
-    RE::GFxValue args[2];
-    args[0].SetString("SkyrimLoadProgress");
-    meterRect.Invoke("getNextHighestDepth", &args[1], nullptr, 0);
+    return true;
+}
+
+// Converts one coordinate-space point into Stage-global coordinates.
+bool LoadingProgress::ConvertLocalPointToGlobal(
+    RE::GFxMovieView* a_view, RE::GFxValue& a_coordinateSpace, double& a_x, double& a_y)
+{
+    RE::GFxValue point;
+    a_view->CreateObject(&point);
+    SetNumber(point, "x", a_x);
+    SetNumber(point, "y", a_y);
+
     RE::GFxValue ignored;
-    if (!source.Invoke("duplicateMovieClip", &ignored, args, 2)) {
-        logger::warn("LevelProgressBar.duplicateMovieClip failed");
+    if (!a_coordinateSpace.Invoke("localToGlobal", &ignored, &point, 1) ||
+        !GetNumber(point, "x", a_x) || !GetNumber(point, "y", a_y)) {
+        return false;
+    }
+
+    return true;
+}
+
+// Reads a movie clip's visual bounds in the requested coordinate space.
+bool LoadingProgress::GetClipBounds(
+    RE::GFxValue& a_clip, RE::GFxValue& a_coordinateSpace, std::array<double, 4>& a_bounds)
+{
+    RE::GFxValue bounds;
+    if (!a_clip.Invoke("getBounds", &bounds, &a_coordinateSpace, 1) || !bounds.IsObject()) {
+        return false;
+    }
+
+    return GetNumber(bounds, "xMin", a_bounds[0]) && GetNumber(bounds, "yMin", a_bounds[1]) &&
+           GetNumber(bounds, "xMax", a_bounds[2]) && GetNumber(bounds, "yMax", a_bounds[3]);
+}
+
+// Reads a clip's bounds and explicitly converts the result from root-local to Stage-global space.
+bool LoadingProgress::GetGlobalClipBounds(
+    RE::GFxMovieView* a_view,
+    RE::GFxValue& a_clip,
+    RE::GFxValue& a_root,
+    std::array<double, 4>& a_bounds)
+{
+    if (!GetClipBounds(a_clip, a_root, a_bounds)) {
+        return false;
+    }
+
+    double left = a_bounds[0];
+    double top = a_bounds[1];
+    double right = a_bounds[2];
+    double bottom = a_bounds[3];
+    if (!ConvertLocalPointToGlobal(a_view, a_root, left, top) ||
+        !ConvertLocalPointToGlobal(a_view, a_root, right, bottom)) {
+        return false;
+    }
+
+    a_bounds = { std::min(left, right), std::min(top, bottom),
+        std::max(left, right), std::max(top, bottom) };
+    return true;
+}
+
+// Converts the frame's target width into the scale needed by the animated center section.
+double LoadingProgress::CalculateMeterXScale(
+    double a_originalXScale, double a_originalFrameWidth, double a_targetFrameWidth)
+{
+    // Character 5 spans -2200 through 2209 twips. Its scaling grid spans -1800 through 1800,
+    // leaving 809 twips across the two fixed end-cap regions.
+    constexpr double authoredFrameWidth = 4409.0;
+    constexpr double authoredStretchWidth = 3600.0;
+    constexpr double minimumStretchWidth = 1.0;
+
+    const auto fixedWidthRatio = (authoredFrameWidth - authoredStretchWidth) / authoredFrameWidth;
+    const auto fixedCapWidth = a_originalFrameWidth * fixedWidthRatio;
+    const auto originalStretchWidth = a_originalFrameWidth - fixedCapWidth;
+    const auto targetStretchWidth = std::max(minimumStretchWidth, a_targetFrameWidth - fixedCapWidth);
+
+    return a_originalXScale * targetStretchWidth / originalStretchWidth;
+}
+
+// Sizes and positions the standalone meter inside LoadingMenu's safe rectangle.
+bool LoadingProgress::ApplyProgressBarLayout(
+    RE::GFxMovieView* a_view,
+    RE::GFxValue& a_parent,
+    RE::GFxValue& a_layoutClip,
+    RE::GFxValue& a_meter,
+    RE::GFxValue& a_frame,
+    RE::GFxValue& a_boundsClip)
+{
+    RE::GFxValue root;
+    if (!a_view->GetVariable(&root, "_root") || !root.IsObject()) {
+        return false;
+    }
+
+    // GFx reports the safe rectangle in root-movie coordinates, not Stage-global coordinates.
+    const auto safeRect = a_view->GetSafeRect();
+    double safeLeft = safeRect.left;
+    double safeTop = safeRect.top;
+    double safeRight = safeRect.right;
+    double safeBottom = safeRect.bottom;
+    if (!ConvertLocalPointToGlobal(a_view, root, safeLeft, safeTop) ||
+        !ConvertLocalPointToGlobal(a_view, root, safeRight, safeBottom)) {
+        return false;
+    }
+
+    const auto safeMinimumX = std::min(safeLeft, safeRight);
+    const auto safeMinimumY = std::min(safeTop, safeBottom);
+    const auto safeMaximumX = std::max(safeLeft, safeRight);
+    const auto safeMaximumY = std::max(safeTop, safeBottom);
+    const auto safeWidth = safeMaximumX - safeMinimumX;
+    const auto safeHeight = safeMaximumY - safeMinimumY;
+    double originalMeterXScale = 100.0;
+    double originalFrameWidth = 0.0;
+    double originalBoundsWidth = 0.0;
+    if (safeWidth <= 0.0 || safeHeight <= 0.0 ||
+        !GetNumber(a_meter, "_xscale", originalMeterXScale) ||
+        !GetNumber(a_frame, "_width", originalFrameWidth) ||
+        !GetNumber(a_boundsClip, "_width", originalBoundsWidth) || originalMeterXScale <= 0.0 ||
+        originalFrameWidth <= 0.0 || originalBoundsWidth <= 0.0) {
+        return false;
+    }
+
+    const auto& layout = Settings::GetSingleton().GetProgressBar();
+    auto frameWidth = originalFrameWidth * layout.widthPercent / 100.0;
+    auto boundsWidth = originalBoundsWidth * layout.widthPercent / 100.0;
+
+    // Frame_mc owns the scaling grid. Bounds_mc mirrors the requested visible width for layout.
+    SetNumber(a_layoutClip, "_xscale", 100.0);
+    SetNumber(a_frame, "_width", frameWidth);
+    SetNumber(a_boundsClip, "_width", boundsWidth);
+
+    // Measure globally because the meter's parent can carry its own translation and scale.
+    std::array<double, 4> globalBounds{};
+    if (!GetGlobalClipBounds(a_view, a_boundsClip, root, globalBounds)) {
+        return false;
+    }
+
+    auto globalMeterWidth = globalBounds[2] - globalBounds[0];
+    auto globalMeterHeight = globalBounds[3] - globalBounds[1];
+    if (globalMeterWidth <= 0.0 || globalMeterHeight <= 0.0) {
+        return false;
+    }
+
+    // Bounds_mc is invisible and mirrors the visible frame width, giving layout a stable measurement
+    // while Meter_mc changes frames.
+    if (globalMeterWidth > safeWidth) {
+        const auto safeScale = safeWidth / globalMeterWidth;
+        frameWidth *= safeScale;
+        boundsWidth *= safeScale;
+        SetNumber(a_frame, "_width", frameWidth);
+        SetNumber(a_boundsClip, "_width", boundsWidth);
+
+        if (!GetGlobalClipBounds(a_view, a_boundsClip, root, globalBounds)) {
+            return false;
+        }
+        globalMeterWidth = globalBounds[2] - globalBounds[0];
+        globalMeterHeight = globalBounds[3] - globalBounds[1];
+    }
+
+    // Only the center of Frame_mc stretches. Scale the animated fill by that center's change rather
+    // than the frame's overall percentage so it continues to meet the fixed end caps.
+    const auto meterXScale =
+        CalculateMeterXScale(originalMeterXScale, originalFrameWidth, frameWidth);
+    SetNumber(a_meter, "_xscale", meterXScale);
+
+    const auto targetGlobalLeft = safeMinimumX +
+                                  std::max(0.0, safeWidth - globalMeterWidth) * layout.xPercent / 100.0;
+    const auto targetGlobalTop = safeMinimumY +
+                                 std::max(0.0, safeHeight - globalMeterHeight) * layout.yPercent / 100.0;
+
+    double targetLocalLeft = targetGlobalLeft;
+    double targetLocalTop = targetGlobalTop;
+    double boundsLocalLeft = globalBounds[0];
+    double boundsLocalTop = globalBounds[1];
+    if (!ConvertGlobalPointToLocal(a_view, a_parent, targetLocalLeft, targetLocalTop) ||
+        !ConvertGlobalPointToLocal(a_view, a_parent, boundsLocalLeft, boundsLocalTop)) {
+        return false;
+    }
+
+    double currentX = 0.0;
+    double currentY = 0.0;
+    if (!GetNumber(a_layoutClip, "_x", currentX) || !GetNumber(a_layoutClip, "_y", currentY)) {
+        return false;
+    }
+
+    const auto requestedLocalX = currentX + targetLocalLeft - boundsLocalLeft;
+    const auto requestedLocalY = currentY + targetLocalTop - boundsLocalTop;
+
+    // The external movie owns layout while its Meter_mc child changes timeline frames.
+    SetNumber(a_layoutClip, "_x", requestedLocalX);
+    SetNumber(a_layoutClip, "_y", requestedLocalY);
+
+    if (!GetGlobalClipBounds(a_view, a_boundsClip, root, globalBounds)) {
+        return false;
+    }
+
+    double appliedX = 0.0;
+    double appliedY = 0.0;
+    if (!GetNumber(a_layoutClip, "_x", appliedX) || !GetNumber(a_layoutClip, "_y", appliedY)) {
+        return false;
+    }
+
+    logger::info(
+        "positioned loading meter: x={:.1f}% y={:.1f}% width={:.1f}% "
+        "localPosition=({:.1f}, {:.1f})->({:.1f}, {:.1f}) "
+        "globalSafe=({:.1f}, {:.1f})-({:.1f}, {:.1f}) globalBounds=({:.1f}, {:.1f})-({:.1f}, {:.1f})",
+        layout.xPercent, layout.yPercent, layout.widthPercent, currentX, currentY, appliedX, appliedY,
+        safeMinimumX, safeMinimumY, safeMaximumX, safeMaximumY, globalBounds[0], globalBounds[1],
+        globalBounds[2], globalBounds[3]);
+    return true;
+}
+
+// Loads and initializes the standalone progress-meter movie.
+bool LoadingProgress::CreateProgressBar(RE::GFxMovieView* a_view)
+{
+    RE::GFxValue root;
+    if (!a_view->GetVariable(&root, "_root") || !root.IsObject()) {
+        return false;
+    }
+
+    RE::GFxValue container;
+    if (!root.GetMember("SkyrimLoadProgress", &container) || !container.IsObject()) {
+        RE::GFxValue depth;
+        root.Invoke("getNextHighestDepth", &depth, nullptr, 0);
+
+        RE::GFxValue createArguments[2];
+        createArguments[0].SetString("SkyrimLoadProgress");
+        createArguments[1] = depth;
+        if (!root.Invoke("createEmptyMovieClip", &container, createArguments, 2) ||
+            !container.IsObject()) {
+            logger::warn("could not create the standalone loading meter container");
+            return false;
+        }
+
+        RE::GFxValue moviePath;
+        moviePath.SetString("SkyrimLoadProgress/LoadingProgressMeter.swf");
+        RE::GFxValue ignored;
+        if (!container.Invoke("loadMovie", &ignored, &moviePath, 1)) {
+            logger::warn("could not request the standalone loading meter movie");
+            return false;
+        }
+
+        logger::info("requested SkyrimLoadProgress/LoadingProgressMeter.swf");
         return false;
     }
 
     RE::GFxValue progressBar;
-    if (!meterRect.GetMember("SkyrimLoadProgress", &progressBar) || !progressBar.IsObject()) {
-        logger::warn("duplicated level progress bar was not addressable");
+    RE::GFxValue meterFrame;
+    RE::GFxValue layoutBounds;
+    if (!container.GetMember("Meter_mc", &progressBar) || !progressBar.IsObject() ||
+        !container.GetMember("Frame_mc", &meterFrame) || !meterFrame.IsObject() ||
+        !container.GetMember("Bounds_mc", &layoutBounds) || !layoutBounds.IsObject()) {
         return false;
     }
 
-    double x = 0.0;
-    double y = 0.0;
-    double height = 0.0;
-    GetNumber(source, "_x", x);
-    GetNumber(source, "_y", y);
-    GetNumber(source, "_height", height);
-    SetNumber(progressBar, "_x", x);
-    SetNumber(progressBar, "_y", y + height + 6.0);
+    double emptyFrame = 0.0;
+    if (GetNumber(progressBar, "_slpEmptyFrame", emptyFrame)) {
+        return true;
+    }
 
+    double totalFrames = 0.0;
+    if (!GetNumber(progressBar, "_totalframes", totalFrames) || totalFrames <= 1.0) {
+        return false;
+    }
+
+    RE::GFxValue ignored;
     RE::GFxValue frameArgument;
     frameArgument.SetString("Empty");
     progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1);
-    double emptyFrame = 1.0;
+    emptyFrame = 1.0;
     GetNumber(progressBar, "_currentframe", emptyFrame);
     frameArgument.SetString("Full");
     progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1);
@@ -93,13 +336,20 @@ bool LoadingProgress::CreateProgressBar(RE::GFxMovieView* a_view)
     SetNumber(progressBar, "_slpEmptyFrame", emptyFrame);
     SetNumber(progressBar, "_slpFullFrame", fullFrame);
 
-    logger::info(
-        "duplicated Loading Menu level meter at ({:.1f}, {:.1f}); height={:.1f}, frames empty={:.0f} full={:.0f}",
-        x, y + height + 6.0, height, emptyFrame, fullFrame);
+    // Use a stable frame when measuring bounds; the external root remains independent of the meter timeline.
+    frameArgument.SetString("Empty");
+    progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1);
+    if (!ApplyProgressBarLayout(a_view, root, container, progressBar, meterFrame, layoutBounds)) {
+        logger::warn("could not position the standalone loading meter");
+        return false;
+    }
+
+    logger::info("initialized standalone loading meter; frames empty={:.0f} full={:.0f}",
+        emptyFrame, fullFrame);
     return true;
 }
 
-// Maps a percentage onto the duplicated meter's labeled timeline frames.
+// Maps a percentage onto the external meter's labeled timeline frames.
 bool LoadingProgress::SetMeterPercent(RE::GFxValue& a_meter, double a_percent)
 {
     double emptyFrame = 0.0;
@@ -126,16 +376,22 @@ void LoadingProgress::UpdateProgressBar(RE::IMenu* a_menu)
 
     RE::GFxValue progressBar;
     if (!a_menu->uiMovie->GetVariable(
-            &progressBar, "_root.Menu_mc.LevelMeterRect.SkyrimLoadProgress") ||
+            &progressBar, "_root.SkyrimLoadProgress.Meter_mc") ||
         !progressBar.IsObject()) {
         if (!CreateProgressBar(a_menu->uiMovie.get())) {
             return;
         }
         if (!a_menu->uiMovie->GetVariable(
-                &progressBar, "_root.Menu_mc.LevelMeterRect.SkyrimLoadProgress") ||
+                &progressBar, "_root.SkyrimLoadProgress.Meter_mc") ||
             !progressBar.IsObject()) {
             return;
         }
+    }
+
+    double emptyFrame = 0.0;
+    if (!GetNumber(progressBar, "_slpEmptyFrame", emptyFrame) &&
+        !CreateProgressBar(a_menu->uiMovie.get())) {
+        return;
     }
 
     const auto basisPoints = displayedBasisPoints.load(std::memory_order_acquire);
@@ -250,8 +506,6 @@ RE::UI_MESSAGE_RESULTS LoadingProgress::LoadingMenuProcessMessage(RE::IMenu* a_m
                 LoadingProgress::DistantComplete, "distant completion" }
         });
 
-        // Context hooks need enough trampoline storage for six generated stubs.
-        SKSE::AllocTrampoline(4096);
         constexpr std::size_t counterInstructionSize = 7;
     
         for (const auto& hook : mutationHooks) {

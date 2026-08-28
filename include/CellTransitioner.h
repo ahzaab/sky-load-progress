@@ -3,13 +3,14 @@
 
 #pragma once
 
+#include "Settings.h"
+
 namespace load_progress
 {
 class CellTransitioner final
 {
 public:
     enum class Presentation : std::uint8_t { loadingMenu, seamless };
-    enum class TransitionProfile : std::uint8_t { standard, light };
 
     struct ControlState
     {
@@ -53,6 +54,7 @@ public:
     static std::optional<std::uint32_t> SelectDominantColor(const std::array<std::uint32_t, 4096>&);
     static void UpdateTransitionColor(REX::W32::ID3D11DeviceContext*);
     static DirectX::XMVECTOR TransitionColor(float);
+    static ::ID3D11PixelShader* GetFrozenFrameShader();
     static RECT GetDestinationRect(const REX::W32::D3D11_TEXTURE2D_DESC&);
     static void DrawFullscreenLayer(REX::W32::ID3D11DeviceContext*, REX::W32::ID3D11ShaderResourceView*,
         const RECT&, ::ID3D11BlendState*, ::ID3D11SamplerState*, ::ID3D11PixelShader*,
@@ -75,15 +77,15 @@ public:
     static void DisableImageSpaceModifier(RE::ImageSpaceModifierInstance*);
     static void CloseResidualLoadingMenus();
 
-    static constexpr auto postLoadFadeDelay = std::chrono::milliseconds(250);
-    static constexpr auto postLoadFadeDuration = std::chrono::milliseconds(1000);
-    static constexpr auto lightTransitionDuration = std::chrono::milliseconds(750);
-
     inline static std::atomic_bool epochActive{ false };
     inline static std::atomic_bool frozenFrameLocked{ false };
     inline static std::atomic_int64_t postLoadFadeStart{};
     inline static std::atomic<Presentation> presentation{ Presentation::loadingMenu };
-    inline static std::atomic<TransitionProfile> transitionProfile{ TransitionProfile::standard };
+    inline static std::atomic<Settings::TransitionType> transitionType{ Settings::TransitionType::blur };
+    inline static std::atomic<Settings::ColorSource> colorSource{ Settings::ColorSource::dominant };
+    inline static std::atomic_int64_t fadeInDuration{ 750 };
+    inline static std::atomic_int64_t holdAfterLoad{ 250 };
+    inline static std::atomic_int64_t fadeOutDuration{ 1000 };
     inline static std::atomic_int64_t loadingTransitionStart{};
     inline static std::atomic_bool dominantColorPending{ false };
     inline static std::atomic_uint32_t transitionColor{ 0xFFFFFF };

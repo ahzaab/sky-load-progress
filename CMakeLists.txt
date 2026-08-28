@@ -16,6 +16,7 @@ set(BUILD_TESTS OFF CACHE BOOL "Build dependency tests" FORCE)
 set(SKSE_SUPPORT_XBYAK ON CACHE BOOL "Enable instruction-context hooks" FORCE)
 add_subdirectory(external/CommonLibSSE-NG)
 include(external/CommonLibSSE-NG/cmake/CommonLibSSE.cmake)
+find_package(toml11 CONFIG REQUIRED)
 
 configure_file(cmake/Version.h.in ${CMAKE_CURRENT_BINARY_DIR}/include/Version.h @ONLY)
 
@@ -29,10 +30,13 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         include/IdsAndOffsets.h
         include/LoadingProgress.h
         include/PCH.h
+        include/Settings.h
         src/CellTransitioner.cpp
         src/LoadingProgress.cpp
         src/PCH.cpp
+        src/Settings.cpp
         src/main.cpp)
 
 target_include_directories(${PROJECT_NAME} PRIVATE include ${CMAKE_CURRENT_BINARY_DIR}/include)
 target_precompile_headers(${PROJECT_NAME} PRIVATE include/PCH.h)
+target_link_libraries(${PROJECT_NAME} PRIVATE toml11::toml11)

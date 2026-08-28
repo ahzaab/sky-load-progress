@@ -4,6 +4,7 @@
 #include "PCH.h"
 #include "CellTransitioner.h"
 #include "LoadingProgress.h"
+#include "Settings.h"
 #include "Version.h"
 
 namespace
@@ -61,6 +62,7 @@ namespace
     void MessageHandler(SKSE::MessagingInterface::Message* a_message)
     {
         if (a_message && a_message->type == SKSE::MessagingInterface::kDataLoaded) {
+            load_progress::Settings::GetSingleton().Load();
             load_progress::transitions::InstallHooks();
             load_progress::InstallHooks();
         }
@@ -78,6 +80,12 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
         }
 
         logger::info("Skyrim Load Progress {} loading", Version::NAME);
+
+        // One 4 KiB page holds the six generated queue-hook stubs and the two
+        // branch islands used by the renderer hooks. Allocate it before any
+        // data-loaded callback can install either hook group.
+        constexpr std::size_t trampolineSize = 1 << 12;
+        SKSE::AllocTrampoline(trampolineSize);
 
         if (!SKSE::GetMessagingInterface()->RegisterListener("SKSE", MessageHandler)) {
             logger::critical("could not register SKSE message listener");

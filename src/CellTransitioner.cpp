@@ -49,11 +49,10 @@ CellTransitioner::Presentation CellTransitioner::PrepareForLoad(RE::IMenu* a_men
     postLoadFadeStart.store(0, std::memory_order_release);
     loadingTransitionStart.store(CurrentTimeMilliseconds(), std::memory_order_release);
 
-    const bool selectCapturedColor = transitionProfile.load(std::memory_order_acquire) == TransitionProfile::light;
+    const bool selectCapturedColor =
+        transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&
+        colorSource.load(std::memory_order_acquire) == Settings::ColorSource::dominant;
     dominantColorPending.store(selectCapturedColor, std::memory_order_release);
-    if (selectCapturedColor) {
-        transitionColor.store(0xFFFFFF, std::memory_order_release);
-    }
 
     if (selected == Presentation::loadingMenu) {
         a_menu->menuFlags.set(
@@ -135,15 +134,15 @@ bool CellTransitioner::CreatePixelShader(
 bool CellTransitioner::CreateLoadingOverlayShader(::ID3D11Device* a_device)
 {
     constexpr std::string_view source = R"(
-D overlayTexture : register(t0);
-tate overlaySampler : register(s0);
+Texture2D overlayTexture : register(t0);
+SamplerState overlaySampler : register(s0);
 
-ain(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Target
+float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Target
 {
-t4 pixel = overlayTexture.Sample(overlaySampler, textureCoordinate) * color;
-t intensity = max(pixel.r, max(pixel.g, pixel.b));
-l.a = smoothstep(0.005, 0.04, intensity);
-rn pixel;
+    float4 pixel = overlayTexture.Sample(overlaySampler, textureCoordinate) * color;
+    float intensity = max(pixel.r, max(pixel.g, pixel.b));
+    pixel.a = smoothstep(0.005, 0.04, intensity);
+    return pixel;
 }
 )";
 
@@ -154,9 +153,9 @@ rn pixel;
 bool CellTransitioner::CreateSolidColorShader(::ID3D11Device* a_device)
 {
     constexpr std::string_view source = R"(
-ain(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Target
+float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Target
 {
-rn color;
+    return color;
 }
 )";
 
@@ -174,29 +173,35 @@ std::int64_t CellTransitioner::CurrentTimeMilliseconds()
 // Creates the inexpensive single-pass blur used on the frozen world frame.
 bool CellTransitioner::CreateFrozenFrameBlurShader(::ID3D11Device* a_device)
 {
-    constexpr std::string_view source = R"(
-D frozenTexture : register(t0);
-tate frozenSampler : register(s0);
+    std::string source = R"(
+Texture2D frozenTexture : register(t0);
+SamplerState frozenSampler : register(s0);
 
-ain(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Target
+float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Target
 {
- width;
- height;
-enTexture.GetDimensions(width, height);
-t2 texel = float2(2.0 / width, 2.0 / height);
+    uint width;
+    uint height;
+    frozenTexture.GetDimensions(width, height);
+    float2 texel = float2($BLUR_AMOUNT$ / width, $BLUR_AMOUNT$ / height);
 
-t4 pixel = frozenTexture.Sample(frozenSampler, textureCoordinate) * 0.227027;
-l += frozenTexture.Sample(frozenSampler, textureCoordinate + float2(1.384615, 0.0) * texel) * 0.158108;
-l += frozenTexture.Sample(frozenSampler, textureCoordinate - float2(1.384615, 0.0) * texel) * 0.158108;
-l += frozenTexture.Sample(frozenSampler, textureCoordinate + float2(0.0, 1.384615) * texel) * 0.158108;
-l += frozenTexture.Sample(frozenSampler, textureCoordinate - float2(0.0, 1.384615) * texel) * 0.158108;
-l += frozenTexture.Sample(frozenSampler, textureCoordinate + float2(3.230769, 3.230769) * texel) * 0.035880;
-l += frozenTexture.Sample(frozenSampler, textureCoordinate + float2(3.230769, -3.230769) * texel) * 0.035880;
-l += frozenTexture.Sample(frozenSampler, textureCoordinate + float2(-3.230769, 3.230769) * texel) * 0.035880;
-l += frozenTexture.Sample(frozenSampler, textureCoordinate - float2(3.230769, 3.230769) * texel) * 0.035880;
-rn pixel * color;
+    float4 pixel = frozenTexture.Sample(frozenSampler, textureCoordinate) * 0.227027;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate + float2(1.384615, 0.0) * texel) * 0.158108;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate - float2(1.384615, 0.0) * texel) * 0.158108;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate + float2(0.0, 1.384615) * texel) * 0.158108;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate - float2(0.0, 1.384615) * texel) * 0.158108;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate + float2(3.230769, 3.230769) * texel) * 0.035880;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate + float2(3.230769, -3.230769) * texel) * 0.035880;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate + float2(-3.230769, 3.230769) * texel) * 0.035880;
+    pixel += frozenTexture.Sample(frozenSampler, textureCoordinate - float2(3.230769, 3.230769) * texel) * 0.035880;
+    return pixel * color;
 }
 )";
+
+    constexpr std::string_view token = "$BLUR_AMOUNT$";
+    const auto amount = fmt::format("{:.3f}", Settings::GetSingleton().GetBlurAmount());
+    for (auto position = source.find(token); position != std::string::npos; position = source.find(token)) {
+        source.replace(position, token.size(), amount);
+    }
 
     return CreatePixelShader(a_device, source, "frozen frame blur", &frozenFrameBlurShader);
 }
@@ -233,16 +238,40 @@ CellTransitioner::Presentation CellTransitioner::ChoosePresentation()
     auto* cell = GetQueuedDestinationCell();
     const bool resident = cell && cell->GetRuntimeData().loadedData;
     const std::string_view editorID = cell ? cell->GetFormEditorID() : "";
-    const bool usesLightTransition =
-        editorID.starts_with("DLC2Book") || editorID.starts_with("DLC2POIBook");
-    const auto profile = usesLightTransition ? TransitionProfile::light : TransitionProfile::standard;
-    const auto selected = usesLightTransition || !resident ? Presentation::loadingMenu : Presentation::seamless;
-    transitionProfile.store(profile, std::memory_order_release);
+
+    const auto selected = resident ? Presentation::seamless : Presentation::loadingMenu;
+    if (selected == Presentation::seamless) {
+        const auto& warm = Settings::GetSingleton().GetWarmTransition();
+        transitionType.store(Settings::TransitionType::blur, std::memory_order_release);
+        colorSource.store(Settings::ColorSource::fixed, std::memory_order_release);
+        transitionColor.store(0xFFFFFF, std::memory_order_release);
+        fadeInDuration.store(0, std::memory_order_release);
+        holdAfterLoad.store(warm.holdAfterLoad.count(), std::memory_order_release);
+        fadeOutDuration.store(warm.fadeOut.count(), std::memory_order_release);
+    } else {
+        const auto& cold = Settings::GetSingleton().GetColdTransition(editorID);
+        transitionType.store(cold.type, std::memory_order_release);
+        colorSource.store(cold.colorSource, std::memory_order_release);
+        transitionColor.store(cold.color, std::memory_order_release);
+        fadeInDuration.store(cold.fadeIn.count(), std::memory_order_release);
+        holdAfterLoad.store(cold.holdAfterLoad.count(), std::memory_order_release);
+        fadeOutDuration.store(cold.fadeOut.count(), std::memory_order_release);
+    }
+
+    const auto type = transitionType.load(std::memory_order_acquire);
     logger::info(
-        "loading destination: cell={:08X} editorID='{}' loadedData={} attached={} presentation={} transition={}",
+        "loading destination: cell={:08X} editorID='{}' loadedData={} attached={} presentation={} transition={} "
+        "fadeIn={}ms hold={}ms fadeOut={}ms",
         cell ? cell->GetFormID() : 0, cell ? cell->GetFormEditorID() : "", resident,
         cell && cell->IsAttached(), selected == Presentation::seamless ? "seamless" : "loading-menu",
-        profile == TransitionProfile::light ? "light" : "standard");
+        type == Settings::TransitionType::color ? "color" : "blur", fadeInDuration.load(),
+        holdAfterLoad.load(), fadeOutDuration.load());
+
+    if (type == Settings::TransitionType::color) {
+        logger::info("color transition: source={} fallback=#{:06X}",
+            colorSource.load(std::memory_order_acquire) == Settings::ColorSource::dominant ? "dominant" : "fixed",
+            transitionColor.load(std::memory_order_acquire));
+    }
     return selected;
 }
 // Collects the input and menu state used by post-load diagnostics.
@@ -426,7 +455,7 @@ std::optional<std::uint32_t> CellTransitioner::SelectDominantColor(
     return (red << 16) | (green << 8) | blue;
 }
 
-// Reads the locked source frame and selects the color used by light transitions.
+// Reads the locked source frame and selects the color used by dominant-color transitions.
 void CellTransitioner::UpdateTransitionColor(REX::W32::ID3D11DeviceContext* a_context)
 {
     if (!frozenFrame || !dominantColorReadback) {
@@ -471,6 +500,12 @@ DirectX::XMVECTOR CellTransitioner::TransitionColor(float a_alpha)
         static_cast<float>(color & 0xFF) / 255.0F, a_alpha);
 }
 
+// Selects the configured blur shader or SpriteBatch's unmodified texture shader.
+::ID3D11PixelShader* CellTransitioner::GetFrozenFrameShader()
+{
+    return Settings::GetSingleton().IsBlurEnabled() ? frozenFrameBlurShader : nullptr;
+}
+
 // Returns a full-screen destination rectangle for the current back buffer.
 RECT CellTransitioner::GetDestinationRect(const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
 {
@@ -489,8 +524,12 @@ void CellTransitioner::DrawFullscreenLayer(
 {
     auto* context = reinterpret_cast<::ID3D11DeviceContext*>(a_context);
 
-    spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, a_blendState, a_samplerState, nullptr, nullptr,
-        [context, a_shader] { context->PSSetShader(a_shader, nullptr, 0); });
+    if (a_shader) {
+        spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, a_blendState, a_samplerState, nullptr, nullptr,
+            [context, a_shader] { context->PSSetShader(a_shader, nullptr, 0); });
+    } else {
+        spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, a_blendState, a_samplerState);
+    }
     spriteBatch->Draw(reinterpret_cast<::ID3D11ShaderResourceView*>(a_texture), a_destination, a_color);
     spriteBatch->End();
 }
@@ -529,15 +568,17 @@ void CellTransitioner::PresentLoadingMenuFrame(
 
     const auto destination = GetDestinationRect(a_desc);
     DrawFullscreenLayer(a_context, frozenFrameView, destination, commonStates->Opaque(),
-        commonStates->LinearClamp(), frozenFrameBlurShader);
+        commonStates->LinearClamp(), GetFrozenFrameShader());
 
-    if (transitionProfile.load(std::memory_order_acquire) == TransitionProfile::light) {
+    if (transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color) {
         const auto elapsed =
             CurrentTimeMilliseconds() - loadingTransitionStart.load(std::memory_order_acquire);
-        const auto colorAlpha = std::clamp(
-            static_cast<float>(elapsed) / static_cast<float>(lightTransitionDuration.count()), 0.0F, 1.0F);
+        const auto duration = fadeInDuration.load(std::memory_order_acquire);
+        const auto colorAlpha = duration > 0 ?
+                                    std::clamp(static_cast<float>(elapsed) / static_cast<float>(duration), 0.0F, 1.0F) :
+                                    1.0F;
 
-        // Light transitions move from the captured world toward its dominant color.
+        // Color transitions move from the captured world toward their fixed or sampled color.
         DrawFullscreenLayer(a_context, frozenFrameView, destination, commonStates->NonPremultiplied(), nullptr,
             solidColorShader, TransitionColor(colorAlpha));
     }
@@ -557,12 +598,11 @@ void CellTransitioner::PresentPostLoadFrame(
     }
 
     // Cold loads briefly hold the cover after the menu closes. Warm loads begin blending immediately.
-    const auto delay = presentation.load(std::memory_order_acquire) == Presentation::loadingMenu ?
-                           postLoadFadeDelay.count() :
-                           0;
+    const auto delay = holdAfterLoad.load(std::memory_order_acquire);
     const auto fadeElapsed = CurrentTimeMilliseconds() - fadeStart - delay;
+    const auto duration = fadeOutDuration.load(std::memory_order_acquire);
 
-    if (fadeElapsed >= postLoadFadeDuration.count()) {
+    if (fadeElapsed >= duration) {
         postLoadFadeStart.store(0, std::memory_order_release);
         frozenFrameLocked.store(false, std::memory_order_release);
         logger::info("post-load frozen-frame crossfade completed");
@@ -573,19 +613,20 @@ void CellTransitioner::PresentPostLoadFrame(
         return;
     }
 
-    const auto fadeProgress = std::clamp(
-        static_cast<float>(fadeElapsed) / static_cast<float>(postLoadFadeDuration.count()), 0.0F, 1.0F);
+    const auto fadeProgress = duration > 0 ?
+                                  std::clamp(static_cast<float>(fadeElapsed) / static_cast<float>(duration), 0.0F, 1.0F) :
+                                  1.0F;
     const auto alpha = 1.0F - fadeProgress;
-    const auto lightTransition =
-        transitionProfile.load(std::memory_order_acquire) == TransitionProfile::light;
-    const auto color = lightTransition ?
+    const auto usesColor =
+        transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color;
+    const auto color = usesColor ?
                            TransitionColor(alpha) :
                            DirectX::XMVectorSet(1.0F, 1.0F, 1.0F, alpha);
 
-    // The standard profile fades the blurred frame; the light profile fades its solid color.
+    // Blur transitions fade the retained frame; color transitions fade their solid color.
     DrawFullscreenLayer(a_context, frozenFrameView, GetDestinationRect(a_desc),
         commonStates->NonPremultiplied(), commonStates->LinearClamp(),
-        lightTransition ? solidColorShader : frozenFrameBlurShader, color);
+        usesColor ? solidColorShader : GetFrozenFrameShader(), color);
 }
 
 // Selects the compositor path for the current loading state.
@@ -597,7 +638,7 @@ void CellTransitioner::CompositeLoadingFrame(
     // epochActive is the main loading gate. postLoadFadeStart handles the short tail after it closes.
     const bool loading = epochActive.load(std::memory_order_acquire);
 
-    if (loading && transitionProfile.load(std::memory_order_acquire) == TransitionProfile::light &&
+    if (loading && transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&
         dominantColorPending.exchange(false, std::memory_order_acq_rel)) {
         UpdateTransitionColor(a_context);
     }
@@ -872,8 +913,12 @@ namespace transitions
             CellTransitioner::commonStates =
                 std::make_unique<DirectX::CommonStates>(reinterpret_cast<::ID3D11Device*>(device));
         
-            if (!CellTransitioner::CreateFrozenFrameBlurShader(reinterpret_cast<::ID3D11Device*>(device))) {
-                throw std::runtime_error("could not create the frozen-frame blur shader");
+            if (Settings::GetSingleton().IsBlurEnabled()) {
+                if (!CellTransitioner::CreateFrozenFrameBlurShader(reinterpret_cast<::ID3D11Device*>(device))) {
+                    throw std::runtime_error("could not create the frozen-frame blur shader");
+                }
+            } else {
+                logger::info("frozen-frame blur is disabled");
             }
         
             if (!CellTransitioner::CreateSolidColorShader(reinterpret_cast<::ID3D11Device*>(device))) {
