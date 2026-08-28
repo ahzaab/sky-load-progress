@@ -8,6 +8,8 @@
 #include "ProgressMeter.h"
 #include "Settings.h"
 
+#include <xbyak/xbyak.h>
+
 namespace load_progress
 {
     // Returns the singleton that owns loading aggregation and event handling.
@@ -379,8 +381,13 @@ namespace load_progress
     namespace
     {
         using ContextCallback = void (*)(CONTEXT&) noexcept;
-        using CounterSignature = std::array<std::uint8_t, 7>;
-        constexpr std::size_t counterInstructionSize = std::tuple_size_v<CounterSignature>;
+        using CounterSignature = std::vector<std::uint8_t>;
+
+        enum class CounterOperation : std::uint8_t
+        {
+            increment,
+            decrement
+        };
 
         struct MutationHookDefinition
         {
@@ -412,66 +419,54 @@ namespace load_progress
             std::uintptr_t                    callSite;
         };
 
-        // Every counter instruction has the same seven-byte shape:
-        //
-        //   F0             LOCK prefix; the counter can be changed by several loading threads.
-        //   FF             x64 group-5 integer instruction.
-        //   80, 81, or 88  ModRM byte selecting INC or DEC and the RAX/RCX base register.
-        //   xx xx xx xx    Little-endian 32-bit displacement of the counter inside the owner.
-        //
-        // RAX and RCX are not semantic differences between the queues; they are simply the registers
-        // holding the counter owner at these exact decoded instructions. The distant enqueue site is
-        // the only one in this set that still has the owner in RCX.
-        //
-        // These arrays are read-only signatures; the plugin never emits them as executable code.
-        // CommonLib generates the actual context stubs through Xbyak. Naming the decoded instructions
-        // here makes runtime validation readable and keeps opaque machine bytes out of the install loop.
-        // lock inc dword ptr [rax + 0x16C]
-        constexpr CounterSignature criticalEnqueueSignature{
-            0xF0, 0xFF, 0x80, 0x6C, 0x01, 0x00, 0x00
-        };
+        // Uses Xbyak mnemonics to produce the exact instruction expected in Skyrim's executable.
+        // The returned bytes are read-only validation data; CommonLib separately uses Xbyak to build
+        // the context trampoline that runs after the copied counter instruction.
+        CounterSignature BuildCounterSignature(
+            CounterOperation a_operation, const Xbyak::Reg64& a_owner, std::int32_t a_counterOffset)
+        {
+            Xbyak::CodeGenerator assembler;
+            const auto           counter = assembler.dword[a_owner + a_counterOffset];
 
-        // lock dec dword ptr [rax + 0x16C]
-        constexpr CounterSignature criticalCompleteSignature{
-            0xF0, 0xFF, 0x88, 0x6C, 0x01, 0x00, 0x00
-        };
+            // LOCK is required because several loading workers can mutate the same counter.
+            assembler.lock();
+            if (a_operation == CounterOperation::increment) {
+                assembler.inc(counter);
+            } else {
+                assembler.dec(counter);
+            }
+            assembler.ready();
 
-        // lock inc dword ptr [rax + 0x170]
-        constexpr CounterSignature referenceEnqueueSignature{
-            0xF0, 0xFF, 0x80, 0x70, 0x01, 0x00, 0x00
-        };
-
-        // lock dec dword ptr [rax + 0x170]
-        constexpr CounterSignature referenceCompleteSignature{
-            0xF0, 0xFF, 0x88, 0x70, 0x01, 0x00, 0x00
-        };
-
-        // lock inc dword ptr [rcx + 0x174]
-        constexpr CounterSignature distantEnqueueSignature{
-            0xF0, 0xFF, 0x81, 0x74, 0x01, 0x00, 0x00
-        };
-
-        // lock dec dword ptr [rax + 0x174]
-        constexpr CounterSignature distantCompleteSignature{
-            0xF0, 0xFF, 0x88, 0x74, 0x01, 0x00, 0x00
-        };
+            const auto* bytes = assembler.getCode();
+            return { bytes, bytes + assembler.getSize() };
+        }
 
         // Returns the six queue-counter mutations: enqueue and completion for each observed queue.
         auto GetMutationHookDefinitions()
         {
+            using namespace Xbyak::util;
+
+            // RAX and RCX are simply the registers holding the counter owner at these decoded sites.
+            // Distant enqueue is the only one in this set whose owner remains in RCX.
             return std::to_array<MutationHookDefinition>({
                 { IDs::CriticalReferencesEnqueue, Offsets::CriticalReferencesEnqueue,
-                    LoadingProgress::CriticalEnqueue, "critical enqueue", criticalEnqueueSignature },
+                    LoadingProgress::CriticalEnqueue, "critical enqueue",
+                    BuildCounterSignature(CounterOperation::increment, rax, 0x16C) },
                 { IDs::CriticalReferencesComplete, Offsets::CriticalReferencesComplete,
-                    LoadingProgress::CriticalComplete, "critical completion", criticalCompleteSignature },
+                    LoadingProgress::CriticalComplete, "critical completion",
+                    BuildCounterSignature(CounterOperation::decrement, rax, 0x16C) },
                 { IDs::ReferencesEnqueue, Offsets::ReferencesEnqueue,
-                    LoadingProgress::ReferenceEnqueue, "reference enqueue", referenceEnqueueSignature },
+                    LoadingProgress::ReferenceEnqueue, "reference enqueue",
+                    BuildCounterSignature(CounterOperation::increment, rax, 0x170) },
                 { IDs::ReferencesComplete, Offsets::ReferencesComplete,
-                    LoadingProgress::ReferenceComplete, "reference completion", referenceCompleteSignature },
+                    LoadingProgress::ReferenceComplete, "reference completion",
+                    BuildCounterSignature(CounterOperation::decrement, rax, 0x170) },
                 { IDs::DistantReferencesEnqueue, Offsets::DistantReferencesEnqueue,
-                    LoadingProgress::DistantEnqueue, "distant enqueue", distantEnqueueSignature },
+                    LoadingProgress::DistantEnqueue, "distant enqueue",
+                    BuildCounterSignature(CounterOperation::increment, rcx, 0x174) },
                 { IDs::DistantReferencesComplete, Offsets::DistantReferencesComplete,
-                    LoadingProgress::DistantComplete, "distant completion", distantCompleteSignature }
+                    LoadingProgress::DistantComplete, "distant completion",
+                    BuildCounterSignature(CounterOperation::decrement, rax, 0x174) }
             });
         }
 
@@ -500,10 +495,11 @@ namespace load_progress
             }
 
             const auto address = functionAddress + offset;
+            const auto instructionSize = a_hook.signature.size();
             const auto textEnd = a_text.address() + a_text.size();
             const bool startsInsideText = address >= a_text.address() && address < textEnd;
             const bool hasCompleteInstruction =
-                startsInsideText && counterInstructionSize <= textEnd - address;
+                startsInsideText && instructionSize <= textEnd - address;
             if (!hasCompleteInstruction ||
                 std::memcmp(reinterpret_cast<const void*>(address),
                     a_hook.signature.data(), a_hook.signature.size()) != 0) {
@@ -533,8 +529,10 @@ namespace load_progress
         void InstallMutationHook(const ResolvedMutationHook& a_hook)
         {
             const auto& definition = *a_hook.definition;
+            const auto  instructionSize = definition.signature.size();
             if (!SKSE::stl::install_context_hook(
-                    a_hook.address, counterInstructionSize, definition.callback, counterInstructionSize)) {
+                    a_hook.address, static_cast<int>(instructionSize), definition.callback,
+                    static_cast<int>(instructionSize))) {
                 throw std::runtime_error(
                     fmt::format("could not install {} hook at {:X}", definition.name, a_hook.address));
             }
