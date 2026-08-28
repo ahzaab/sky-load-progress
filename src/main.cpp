@@ -62,9 +62,13 @@ namespace
     void MessageHandler(SKSE::MessagingInterface::Message* a_message)
     {
         if (a_message && a_message->type == SKSE::MessagingInterface::kDataLoaded) {
-            load_progress::Settings::GetSingleton().Load();
-            load_progress::transitions::InstallHooks();
-            load_progress::InstallHooks();
+            try {
+                load_progress::Settings::GetSingleton().Load();
+                load_progress::transitions::InstallHooks();
+                load_progress::InstallHooks();
+            } catch (const std::exception& error) {
+                logger::critical("could not install Skyrim Load Progress hooks: {}", error.what());
+            }
         }
     }
 }
@@ -73,6 +77,10 @@ namespace
 SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
     try {
+        if (!a_skse) {
+            return false;
+        }
+
         SKSE::Init(a_skse);
 
         if (!InitializeLog()) {
@@ -87,7 +95,8 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
         constexpr std::size_t trampolineSize = 1 << 12;
         SKSE::AllocTrampoline(trampolineSize);
 
-        if (!SKSE::GetMessagingInterface()->RegisterListener("SKSE", MessageHandler)) {
+        auto* messaging = SKSE::GetMessagingInterface();
+        if (!messaging || !messaging->RegisterListener("SKSE", MessageHandler)) {
             logger::critical("could not register SKSE message listener");
             return false;
         }

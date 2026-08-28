@@ -54,6 +54,11 @@ CellTransitioner::Presentation CellTransitioner::PrepareForLoad(RE::IMenu* a_men
         colorSource.load(std::memory_order_acquire) == Settings::ColorSource::dominant;
     dominantColorPending.store(selectCapturedColor, std::memory_order_release);
 
+    if (!a_menu) {
+        logger::warn("could not update LoadingMenu flags because the menu pointer was null");
+        return selected;
+    }
+
     if (selected == Presentation::loadingMenu) {
         a_menu->menuFlags.set(
             RE::UI_MENU_FLAGS::kFreezeFrameBackground, RE::UI_MENU_FLAGS::kUsesBlurredBackground);
@@ -103,14 +108,26 @@ bool CellTransitioner::CreatePixelShader(
     std::string_view a_name,
     ::ID3D11PixelShader** a_shader)
 {
+    if (!a_device || !a_shader || a_source.empty() || a_name.empty()) {
+        return false;
+    }
+
+    *a_shader = nullptr;
     REX::W32::ID3DBlob* bytecode = nullptr;
     REX::W32::ID3DBlob* errors = nullptr;
 
     const auto result = REX::W32::D3DCompile(a_source.data(), a_source.size(), a_name.data(), nullptr, nullptr,
         "main", "ps_5_0", 0, 0, &bytecode, &errors);
-    if (FAILED(result)) {
+    if (FAILED(result) || !bytecode) {
+        const auto* errorText = errors && errors->GetBufferPointer() ?
+                                    static_cast<const char*>(errors->GetBufferPointer()) :
+                                    "unknown error";
         logger::error("could not compile the {} shader: {}", a_name,
-            errors ? static_cast<const char*>(errors->GetBufferPointer()) : "unknown error");
+            errorText);
+
+        if (bytecode) {
+            bytecode->Release();
+        }
 
         if (errors) {
             errors->Release();
@@ -123,8 +140,15 @@ bool CellTransitioner::CreatePixelShader(
         errors->Release();
     }
 
+    const auto* buffer = bytecode->GetBufferPointer();
+    const auto bufferSize = bytecode->GetBufferSize();
+    if (!buffer || bufferSize == 0) {
+        bytecode->Release();
+        return false;
+    }
+
     const auto createResult =
-        a_device->CreatePixelShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, a_shader);
+        a_device->CreatePixelShader(buffer, bufferSize, nullptr, a_shader);
     bytecode->Release();
 
     return SUCCEEDED(createResult);
@@ -237,7 +261,8 @@ CellTransitioner::Presentation CellTransitioner::ChoosePresentation()
 {
     auto* cell = GetQueuedDestinationCell();
     const bool resident = cell && cell->GetRuntimeData().loadedData;
-    const std::string_view editorID = cell ? cell->GetFormEditorID() : "";
+    const auto* editorIDText = cell ? cell->GetFormEditorID() : nullptr;
+    const std::string_view editorID = editorIDText ? editorIDText : "";
 
     const auto selected = resident ? Presentation::seamless : Presentation::loadingMenu;
     if (selected == Presentation::seamless) {
@@ -262,7 +287,7 @@ CellTransitioner::Presentation CellTransitioner::ChoosePresentation()
     logger::info(
         "loading destination: cell={:08X} editorID='{}' loadedData={} attached={} presentation={} transition={} "
         "fadeIn={}ms hold={}ms fadeOut={}ms",
-        cell ? cell->GetFormID() : 0, cell ? cell->GetFormEditorID() : "", resident,
+        cell ? cell->GetFormID() : 0, editorID, resident,
         cell && cell->IsAttached(), selected == Presentation::seamless ? "seamless" : "loading-menu",
         type == Settings::TransitionType::color ? "color" : "blur", fadeInDuration.load(),
         holdAfterLoad.load(), fadeOutDuration.load());
@@ -275,15 +300,19 @@ CellTransitioner::Presentation CellTransitioner::ChoosePresentation()
     return selected;
 }
 // Collects the input and menu state used by post-load diagnostics.
-CellTransitioner::ControlState CellTransitioner::GetControlState()
+std::optional<CellTransitioner::ControlState> CellTransitioner::GetControlState()
 {
     auto* controls = RE::ControlMap::GetSingleton();
     auto* playerControls = RE::PlayerControls::GetSingleton();
     auto* ui = RE::UI::GetSingleton();
+    if (!controls || !playerControls || !ui) {
+        return std::nullopt;
+    }
+
     std::uint32_t enabled = 0;
     std::uint32_t stored = 0;
     controls->GetControlsState(enabled, stored);
-    return { enabled, stored, playerControls->blockPlayerInput, ui->GameIsPaused(),
+    return ControlState{ enabled, stored, playerControls->blockPlayerInput, ui->GameIsPaused(),
         ui->IsMenuOpen(RE::FaderMenu::MENU_NAME), ui->IsMenuOpen(RE::MistMenu::MENU_NAME) };
 }
 
@@ -295,16 +324,25 @@ void CellTransitioner::ObserveControlRestore()
     }
 
     const auto state = GetControlState();
-    if (!lastControlState || state != *lastControlState) {
+    if (!state) {
+        return;
+    }
+
+    if (!lastControlState || *state != *lastControlState) {
         logger::info(
             "post-load controls: enabled={:08X} stored={:08X} blockInput={} paused={} fader={} mist={}",
-            state.enabled, state.stored, state.blockInput, state.paused, state.faderOpen, state.mistOpen);
-        lastControlState = state;
+            state->enabled, state->stored, state->blockInput, state->paused, state->faderOpen,
+            state->mistOpen);
+        lastControlState = *state;
     }
 
     auto* controls = RE::ControlMap::GetSingleton();
+    if (!controls) {
+        return;
+    }
+
     const bool gameplayReady = controls->IsMovementControlsEnabled() && controls->IsLookingControlsEnabled() &&
-                               controls->IsActivateControlsEnabled() && !state.blockInput && !state.paused;
+                               controls->IsActivateControlsEnabled() && !state->blockInput && !state->paused;
     if (gameplayReady) {
         logger::info("post-load gameplay controls are ready");
         awaitingControlRestore.store(false, std::memory_order_release);
@@ -352,6 +390,10 @@ void CellTransitioner::ReleaseFrameResources()
 bool CellTransitioner::PrepareFrozenFrame(
     REX::W32::ID3D11Device* a_device, const REX::W32::D3D11_TEXTURE2D_DESC& a_backBufferDesc)
 {
+    if (!a_device || a_backBufferDesc.width == 0 || a_backBufferDesc.height == 0) {
+        return false;
+    }
+
     if (MatchesFrozenFrame(a_backBufferDesc)) {
         return true;
     }
@@ -368,6 +410,7 @@ bool CellTransitioner::PrepareFrozenFrame(
     if (a_device->CreateTexture2D(&desc, nullptr, &frozenFrame) < 0 ||
         a_device->CreateShaderResourceView(frozenFrame, nullptr, &frozenFrameView) < 0) {
         logger::error("could not allocate the frozen loading frame texture");
+        ReleaseFrameResources();
         return false;
     }
 
@@ -386,6 +429,7 @@ bool CellTransitioner::PrepareFrozenFrame(
     if (a_device->CreateTexture2D(&desc, nullptr, &loadingOverlay) < 0 ||
         a_device->CreateShaderResourceView(loadingOverlay, nullptr, &loadingOverlayView) < 0) {
         logger::error("could not allocate the loading-menu overlay texture");
+        ReleaseFrameResources();
         return false;
     }
 
@@ -414,6 +458,10 @@ std::array<std::uint32_t, 4096> CellTransitioner::BuildColorHistogram(
     const REX::W32::D3D11_MAPPED_SUBRESOURCE& a_mapped, bool a_bgra)
 {
     std::array<std::uint32_t, 4096> histogram{};
+    if (!a_mapped.data || a_mapped.rowPitch / 4 < frozenFrameDesc.width) {
+        return histogram;
+    }
+
     constexpr std::uint32_t sampleStep = 4;
 
     for (std::uint32_t y = 0; y < frozenFrameDesc.height; y += sampleStep) {
@@ -458,7 +506,7 @@ std::optional<std::uint32_t> CellTransitioner::SelectDominantColor(
 // Reads the locked source frame and selects the color used by dominant-color transitions.
 void CellTransitioner::UpdateTransitionColor(REX::W32::ID3D11DeviceContext* a_context)
 {
-    if (!frozenFrame || !dominantColorReadback) {
+    if (!a_context || !frozenFrame || !dominantColorReadback) {
         logger::warn("using the default transition color because no captured frame is readable");
         return;
     }
@@ -523,6 +571,10 @@ void CellTransitioner::DrawFullscreenLayer(
     DirectX::XMVECTOR a_color)
 {
     auto* context = reinterpret_cast<::ID3D11DeviceContext*>(a_context);
+    auto* texture = reinterpret_cast<::ID3D11ShaderResourceView*>(a_texture);
+    if (!context || !texture || !spriteBatch) {
+        return;
+    }
 
     if (a_shader) {
         spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, a_blendState, a_samplerState, nullptr, nullptr,
@@ -530,7 +582,7 @@ void CellTransitioner::DrawFullscreenLayer(
     } else {
         spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, a_blendState, a_samplerState);
     }
-    spriteBatch->Draw(reinterpret_cast<::ID3D11ShaderResourceView*>(a_texture), a_destination, a_color);
+    spriteBatch->Draw(texture, a_destination, a_color);
     spriteBatch->End();
 }
 
@@ -540,7 +592,7 @@ void CellTransitioner::PresentSeamlessFrame(
     REX::W32::ID3D11Texture2D* a_backBuffer,
     const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
 {
-    if (!MatchesFrozenFrame(a_desc)) {
+    if (!a_context || !a_backBuffer || !MatchesFrozenFrame(a_desc)) {
         return;
     }
 
@@ -558,7 +610,8 @@ void CellTransitioner::PresentLoadingMenuFrame(
     REX::W32::ID3D11Texture2D* a_backBuffer,
     const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
 {
-    if (!MatchesFrozenFrame(a_desc) || !frozenFrameView || !loadingOverlay || !loadingOverlayView) {
+    if (!a_context || !a_backBuffer || !commonStates || !MatchesFrozenFrame(a_desc) ||
+        !frozenFrameView || !loadingOverlay || !loadingOverlayView) {
         return;
     }
 
@@ -592,6 +645,10 @@ void CellTransitioner::PresentLoadingMenuFrame(
 void CellTransitioner::PresentPostLoadFrame(
     REX::W32::ID3D11DeviceContext* a_context, const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
 {
+    if (!a_context || !commonStates) {
+        return;
+    }
+
     const auto fadeStart = postLoadFadeStart.load(std::memory_order_acquire);
     if (fadeStart <= 0) {
         return;
@@ -635,6 +692,10 @@ void CellTransitioner::CompositeLoadingFrame(
     REX::W32::ID3D11Texture2D* a_backBuffer,
     const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
 {
+    if (!a_context || !a_backBuffer || !spriteBatch || !commonStates) {
+        return;
+    }
+
     // epochActive is the main loading gate. postLoadFadeStart handles the short tail after it closes.
     const bool loading = epochActive.load(std::memory_order_acquire);
 
@@ -660,6 +721,12 @@ void CellTransitioner::CompositeLoadingFrame(
 REX::W32::HRESULT CellTransitioner::PresentFrozenFrame(
     REX::W32::IDXGISwapChain* a_swapChain, std::uint32_t a_syncInterval, std::uint32_t a_flags)
 {
+    // Win32 E_POINTER is the only safe result when the hooked COM receiver is unavailable.
+    constexpr auto nullPointerResult = static_cast<REX::W32::HRESULT>(0x80004003U);
+    if (!a_swapChain || !originalPresent) {
+        return nullPointerResult;
+    }
+
     ObserveControlRestore();
 
     REX::W32::ID3D11Texture2D* backBuffer = nullptr;
@@ -703,7 +770,9 @@ void CellTransitioner::ObserveRenderWorld(bool a_firstPerson)
     } else if (state == 3 && renderObservationState.compare_exchange_strong(state, 0)) {
         LogRenderState("for the first time after Loading Menu closed");
     }
-    originalRenderWorld(a_firstPerson);
+    if (originalRenderWorld.address()) {
+        originalRenderWorld(a_firstPerson);
+    }
 }
 
 // Copies the currently bound world target into the rolling frozen-frame texture.
@@ -765,6 +834,9 @@ void CellTransitioner::CaptureBoundWorldTarget()
 void CellTransitioner::CaptureAfterScaleformBegin(void* a_renderer)
 {
     // The original call must run first because it binds the render target that contains the finished world.
+    if (!originalBeginScaleform.address()) {
+        return;
+    }
     originalBeginScaleform(a_renderer);
 
     // Locking preserves the last complete world frame throughout the loading epoch.
@@ -776,7 +848,9 @@ void CellTransitioner::CaptureAfterScaleformBegin(void* a_renderer)
 // Advances FaderMenu normally while suppressing its full-screen color layer.
 void CellTransitioner::FaderMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
 {
-    originalFaderAdvanceMovie(a_menu, a_interval, a_currentTime);
+    if (originalFaderAdvanceMovie) {
+        originalFaderAdvanceMovie(a_menu, a_interval, a_currentTime);
+    }
     if (a_menu && a_menu->uiMovie) {
         // FaderMenu supplies the black or white transition over the world.
         a_menu->uiMovie->SetBackgroundAlpha(0.0F);
@@ -787,7 +861,13 @@ void CellTransitioner::FaderMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval
 // Advances MistMenu while disabling its mist and model rendering flags.
 void CellTransitioner::MistMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
 {
-    originalMistAdvanceMovie(a_menu, a_interval, a_currentTime);
+    if (originalMistAdvanceMovie) {
+        originalMistAdvanceMovie(a_menu, a_interval, a_currentTime);
+    }
+    if (!a_menu) {
+        return;
+    }
+
     auto* mistMenu = static_cast<RE::MistMenu*>(a_menu);
     auto& runtimeData = mistMenu->GetRuntimeData();
     runtimeData.showMist = false;
@@ -807,6 +887,11 @@ void CellTransitioner::CloseResidualLoadingMenus()
 {
     auto* ui = RE::UI::GetSingleton();
     auto* messages = RE::UIMessageQueue::GetSingleton();
+    if (!ui || !messages) {
+        logger::warn("could not close residual loading menus because UI services were unavailable");
+        return;
+    }
+
     if (ui->IsMenuOpen(RE::FaderMenu::MENU_NAME)) {
         messages->AddMessage(RE::FaderMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
     }
@@ -827,6 +912,16 @@ namespace transitions
             // CommonLib's IMenu vtable maps slot 5 to AdvanceMovie.
             constexpr std::size_t advanceMovieIndex = 0x05;
             REL::Relocation<std::uintptr_t> vtable{ RE::FaderMenu::VTABLE[0] };
+            if (!vtable.address()) {
+                throw std::runtime_error("could not resolve the FaderMenu vtable");
+            }
+
+            const auto originalAddress = *reinterpret_cast<const std::uintptr_t*>(
+                vtable.address() + advanceMovieIndex * sizeof(std::uintptr_t));
+            if (!originalAddress) {
+                throw std::runtime_error("FaderMenu::AdvanceMovie had no original function");
+            }
+
             const auto original = vtable.write_vfunc(advanceMovieIndex, CellTransitioner::FaderMenuAdvanceMovie);
             CellTransitioner::originalFaderAdvanceMovie =
                 reinterpret_cast<CellTransitioner::AdvanceMovie_t>(original);
@@ -840,6 +935,16 @@ namespace transitions
             constexpr std::size_t advanceMovieIndex = 0x05;
             constexpr std::size_t postDisplayIndex = 0x06;
             REL::Relocation<std::uintptr_t> vtable{ RE::MistMenu::VTABLE[0] };
+            if (!vtable.address()) {
+                throw std::runtime_error("could not resolve the MistMenu vtable");
+            }
+
+            const auto originalAddress = *reinterpret_cast<const std::uintptr_t*>(
+                vtable.address() + advanceMovieIndex * sizeof(std::uintptr_t));
+            if (!originalAddress) {
+                throw std::runtime_error("MistMenu::AdvanceMovie had no original function");
+            }
+
             const auto original = vtable.write_vfunc(advanceMovieIndex, CellTransitioner::MistMenuAdvanceMovie);
             CellTransitioner::originalMistAdvanceMovie =
                 reinterpret_cast<CellTransitioner::AdvanceMovie_t>(original);
@@ -853,6 +958,9 @@ namespace transitions
             // IDA identifies slot 0x26 as ImageSpaceModifierInstanceForm::Apply on Skyrim 1.7.99.
             constexpr std::size_t applyIndex = 0x26;
             REL::Relocation<std::uintptr_t> vtable{ RE::ImageSpaceModifierInstanceForm::VTABLE[0] };
+            if (!vtable.address()) {
+                throw std::runtime_error("could not resolve the image-space modifier vtable");
+            }
             vtable.write_vfunc(applyIndex, CellTransitioner::DisableImageSpaceModifier);
             logger::info("disabled form-backed image-space modifiers for the experiment");
         }
@@ -863,14 +971,19 @@ namespace transitions
         {
             // The centralized location identifies Main::DrawWorld's normal RenderWorld rel32 call.
             constexpr std::size_t relativeCallSize = 5;
-            const auto callSite =
-                REL::Relocation<std::uintptr_t>(IDs::NormalWorldRenderCaller).address() +
-                Offsets::NormalWorldRenderCall;
+            const auto caller = REL::Relocation<std::uintptr_t>(IDs::NormalWorldRenderCaller).address();
+            if (!caller) {
+                throw std::runtime_error("could not resolve the normal-world-render caller");
+            }
+            const auto callSite = caller + Offsets::NormalWorldRenderCall;
             if (*reinterpret_cast<const std::uint8_t*>(callSite) != 0xE8) {
                 throw std::runtime_error("normal-world-render call site did not match Skyrim 1.7.99");
             }
             CellTransitioner::originalRenderWorld =
                 SKSE::GetTrampoline().write_call<relativeCallSize>(callSite, CellTransitioner::ObserveRenderWorld);
+            if (!CellTransitioner::originalRenderWorld.address()) {
+                throw std::runtime_error("normal-world-render call had no original function");
+            }
             logger::info("installed passive normal-world-render observation hook at {:X}", callSite);
         }
         
@@ -879,14 +992,19 @@ namespace transitions
         {
             // The centralized location identifies Scaleform begin after its render target is bound.
             constexpr std::size_t relativeCallSize = 5;
-            const auto callSite =
-                REL::Relocation<std::uintptr_t>(IDs::ScaleformRenderCaller).address() +
-                Offsets::ScaleformBeginCall;
+            const auto caller = REL::Relocation<std::uintptr_t>(IDs::ScaleformRenderCaller).address();
+            if (!caller) {
+                throw std::runtime_error("could not resolve the Scaleform-render caller");
+            }
+            const auto callSite = caller + Offsets::ScaleformBeginCall;
             if (*reinterpret_cast<const std::uint8_t*>(callSite) != 0xE8) {
                 throw std::runtime_error("Scaleform-begin call site did not match Skyrim 1.7.99");
             }
             CellTransitioner::originalBeginScaleform = SKSE::GetTrampoline().write_call<relativeCallSize>(
                 callSite, CellTransitioner::CaptureAfterScaleformBegin);
+            if (!CellTransitioner::originalBeginScaleform.address()) {
+                throw std::runtime_error("Scaleform-begin call had no original function");
+            }
             logger::info("installed world-only capture hook after Scaleform target binding at {:X}", callSite);
         }
         
@@ -900,16 +1018,16 @@ namespace transitions
             if (!window || !window->swapChain) {
                 throw std::runtime_error("could not find Skyrim's swap chain");
             }
-        
-            const auto vtableAddress = *reinterpret_cast<std::uintptr_t*>(window->swapChain);
-            REL::Relocation<std::uintptr_t> vtable{ vtableAddress };
-            const auto original = vtable.write_vfunc(presentIndex, CellTransitioner::PresentFrozenFrame);
-            CellTransitioner::originalPresent = reinterpret_cast<CellTransitioner::Present_t>(original);
-        
+
             auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
             auto* device = RE::BSGraphics::Renderer::GetDevice();
+            auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
+            if (!renderer || !device || !context) {
+                throw std::runtime_error("could not find Skyrim's D3D11 device or context");
+            }
+
             CellTransitioner::spriteBatch = std::make_unique<DirectX::SpriteBatch>(
-                reinterpret_cast<::ID3D11DeviceContext*>(renderer->GetRuntimeData().context));
+                reinterpret_cast<::ID3D11DeviceContext*>(context));
             CellTransitioner::commonStates =
                 std::make_unique<DirectX::CommonStates>(reinterpret_cast<::ID3D11Device*>(device));
         
@@ -928,7 +1046,22 @@ namespace transitions
             if (!CellTransitioner::CreateLoadingOverlayShader(reinterpret_cast<::ID3D11Device*>(device))) {
                 throw std::runtime_error("could not create the loading overlay shader");
             }
-        
+
+            // Patch Present only after every resource needed by its callback is ready.
+            const auto vtableAddress = *reinterpret_cast<std::uintptr_t*>(window->swapChain);
+            if (!vtableAddress) {
+                throw std::runtime_error("Skyrim's swap chain had no vtable");
+            }
+            REL::Relocation<std::uintptr_t> vtable{ vtableAddress };
+            const auto originalAddress = *reinterpret_cast<const std::uintptr_t*>(
+                vtable.address() + presentIndex * sizeof(std::uintptr_t));
+            if (!originalAddress) {
+                throw std::runtime_error("IDXGISwapChain::Present had no original function");
+            }
+
+            const auto original = vtable.write_vfunc(presentIndex, CellTransitioner::PresentFrozenFrame);
+            CellTransitioner::originalPresent = reinterpret_cast<CellTransitioner::Present_t>(original);
+
             logger::info("installed frozen-frame swap-chain Present hook");
         }
         

@@ -94,6 +94,8 @@ SpacesInContainerLiterals: 'true'
 SpacesInParentheses: 'false'
 SpacesInSquareBrackets: 'false'
 Standard: Latest
+TabWidth: 4
+UseTab: Never
 UseCRLF: 'true'
 
 ...

@@ -42,7 +42,7 @@ public:
     static bool CreateFrozenFrameBlurShader(::ID3D11Device*);
     static RE::TESObjectCELL* GetQueuedDestinationCell();
     static Presentation ChoosePresentation();
-    static ControlState GetControlState();
+    static std::optional<ControlState> GetControlState();
     static void ObserveControlRestore();
     static bool MatchesFrozenFrame(const REX::W32::D3D11_TEXTURE2D_DESC&);
     static void ReleaseFrameResources();

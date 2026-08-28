@@ -29,6 +29,10 @@ std::uint64_t LoadingProgress::GetLiveRemaining()
 // Writes a numeric member to an ActionScript object.
 void LoadingProgress::SetNumber(RE::GFxValue& a_object, const char* a_name, double a_value)
 {
+    if (!a_name || !a_object.IsObject()) {
+        return;
+    }
+
     RE::GFxValue value;
     value.SetNumber(a_value);
     a_object.SetMember(a_name, value);
@@ -37,6 +41,10 @@ void LoadingProgress::SetNumber(RE::GFxValue& a_object, const char* a_name, doub
 // Reads a numeric member from an ActionScript object.
 bool LoadingProgress::GetNumber(const RE::GFxValue& a_object, const char* a_name, double& a_value)
 {
+    if (!a_name || !a_object.IsObject()) {
+        return false;
+    }
+
     RE::GFxValue value;
     if (!a_object.GetMember(a_name, &value) || !value.IsNumber()) {
         return false;
@@ -49,8 +57,15 @@ bool LoadingProgress::GetNumber(const RE::GFxValue& a_object, const char* a_name
 bool LoadingProgress::ConvertGlobalPointToLocal(
     RE::GFxMovieView* a_view, RE::GFxValue& a_parent, double& a_x, double& a_y)
 {
+    if (!a_view || !a_parent.IsObject()) {
+        return false;
+    }
+
     RE::GFxValue point;
     a_view->CreateObject(&point);
+    if (!point.IsObject()) {
+        return false;
+    }
     SetNumber(point, "x", a_x);
     SetNumber(point, "y", a_y);
 
@@ -67,8 +82,15 @@ bool LoadingProgress::ConvertGlobalPointToLocal(
 bool LoadingProgress::ConvertLocalPointToGlobal(
     RE::GFxMovieView* a_view, RE::GFxValue& a_coordinateSpace, double& a_x, double& a_y)
 {
+    if (!a_view || !a_coordinateSpace.IsObject()) {
+        return false;
+    }
+
     RE::GFxValue point;
     a_view->CreateObject(&point);
+    if (!point.IsObject()) {
+        return false;
+    }
     SetNumber(point, "x", a_x);
     SetNumber(point, "y", a_y);
 
@@ -85,6 +107,10 @@ bool LoadingProgress::ConvertLocalPointToGlobal(
 bool LoadingProgress::GetClipBounds(
     RE::GFxValue& a_clip, RE::GFxValue& a_coordinateSpace, std::array<double, 4>& a_bounds)
 {
+    if (!a_clip.IsObject() || !a_coordinateSpace.IsObject()) {
+        return false;
+    }
+
     RE::GFxValue bounds;
     if (!a_clip.Invoke("getBounds", &bounds, &a_coordinateSpace, 1) || !bounds.IsObject()) {
         return false;
@@ -101,6 +127,10 @@ bool LoadingProgress::GetGlobalClipBounds(
     RE::GFxValue& a_root,
     std::array<double, 4>& a_bounds)
 {
+    if (!a_view || !a_clip.IsObject() || !a_root.IsObject()) {
+        return false;
+    }
+
     if (!GetClipBounds(a_clip, a_root, a_bounds)) {
         return false;
     }
@@ -146,6 +176,11 @@ bool LoadingProgress::ApplyProgressBarLayout(
     RE::GFxValue& a_frame,
     RE::GFxValue& a_boundsClip)
 {
+    if (!a_view || !a_parent.IsObject() || !a_layoutClip.IsObject() || !a_meter.IsObject() ||
+        !a_frame.IsObject() || !a_boundsClip.IsObject()) {
+        return false;
+    }
+
     RE::GFxValue root;
     if (!a_view->GetVariable(&root, "_root") || !root.IsObject()) {
         return false;
@@ -272,6 +307,10 @@ bool LoadingProgress::ApplyProgressBarLayout(
 // Loads and initializes the standalone progress-meter movie.
 bool LoadingProgress::CreateProgressBar(RE::GFxMovieView* a_view)
 {
+    if (!a_view) {
+        return false;
+    }
+
     RE::GFxValue root;
     if (!a_view->GetVariable(&root, "_root") || !root.IsObject()) {
         return false;
@@ -280,7 +319,10 @@ bool LoadingProgress::CreateProgressBar(RE::GFxMovieView* a_view)
     RE::GFxValue container;
     if (!root.GetMember("SkyrimLoadProgress", &container) || !container.IsObject()) {
         RE::GFxValue depth;
-        root.Invoke("getNextHighestDepth", &depth, nullptr, 0);
+        if (!root.Invoke("getNextHighestDepth", &depth, nullptr, 0) || !depth.IsNumber()) {
+            logger::warn("could not obtain a depth for the standalone loading meter");
+            return false;
+        }
 
         RE::GFxValue createArguments[2];
         createArguments[0].SetString("SkyrimLoadProgress");
@@ -325,20 +367,27 @@ bool LoadingProgress::CreateProgressBar(RE::GFxMovieView* a_view)
     RE::GFxValue ignored;
     RE::GFxValue frameArgument;
     frameArgument.SetString("Empty");
-    progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1);
-    emptyFrame = 1.0;
-    GetNumber(progressBar, "_currentframe", emptyFrame);
+    if (!progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1) ||
+        !GetNumber(progressBar, "_currentframe", emptyFrame)) {
+        return false;
+    }
     frameArgument.SetString("Full");
-    progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1);
+    if (!progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1)) {
+        return false;
+    }
     double fullFrame = emptyFrame;
-    GetNumber(progressBar, "_currentframe", fullFrame);
+    if (!GetNumber(progressBar, "_currentframe", fullFrame) || fullFrame == emptyFrame) {
+        return false;
+    }
     // Some loading menu skins place Full before Empty on the timeline.
     SetNumber(progressBar, "_slpEmptyFrame", emptyFrame);
     SetNumber(progressBar, "_slpFullFrame", fullFrame);
 
     // Use a stable frame when measuring bounds; the external root remains independent of the meter timeline.
     frameArgument.SetString("Empty");
-    progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1);
+    if (!progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1)) {
+        return false;
+    }
     if (!ApplyProgressBarLayout(a_view, root, container, progressBar, meterFrame, layoutBounds)) {
         logger::warn("could not position the standalone loading meter");
         return false;
@@ -398,7 +447,7 @@ void LoadingProgress::UpdateProgressBar(RE::IMenu* a_menu)
     if (!SetMeterPercent(progressBar, static_cast<double>(basisPoints) / 100.0)) {
         static bool warned = false;
         if (!warned) {
-            logger::warn("duplicated level meter has invalid Empty/Full frame labels");
+            logger::warn("external loading meter has invalid Empty/Full frame labels");
             warned = true;
         }
     }
@@ -407,7 +456,9 @@ void LoadingProgress::UpdateProgressBar(RE::IMenu* a_menu)
 // Updates the progress widget and hides Scaleform for warm transitions.
 void LoadingProgress::LoadingMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
 {
-    originalAdvanceMovie(a_menu, a_interval, a_currentTime);
+    if (originalAdvanceMovie) {
+        originalAdvanceMovie(a_menu, a_interval, a_currentTime);
+    }
     if (a_menu && a_menu->uiMovie) {
         const bool seamless = CellTransitioner::IsSeamless();
         a_menu->uiMovie->SetBackgroundAlpha(0.0F);
@@ -424,7 +475,9 @@ RE::UI_MESSAGE_RESULTS LoadingProgress::LoadingMenuProcessMessage(RE::IMenu* a_m
     if (a_message.type == RE::UI_MESSAGE_TYPE::kShow) {
         CellTransitioner::PrepareForLoad(a_menu);
     }
-    return originalLoadingProcessMessage(a_menu, a_message);
+    return originalLoadingProcessMessage ?
+               originalLoadingProcessMessage(a_menu, a_message) :
+               RE::UI_MESSAGE_RESULTS::kPassOn;
 }
 
 
@@ -449,7 +502,12 @@ RE::UI_MESSAGE_RESULTS LoadingProgress::LoadingMenuProcessMessage(RE::IMenu* a_m
     // Records a direct queue increment and adds it to the active epoch.
     void LoadingProgress::OnEnqueue(Queue a_queue)
     {
-        liveRemaining[static_cast<std::size_t>(a_queue)].fetch_add(1, std::memory_order_relaxed);
+        const auto index = static_cast<std::size_t>(a_queue);
+        if (index >= queueCount) {
+            return;
+        }
+
+        liveRemaining[index].fetch_add(1, std::memory_order_relaxed);
         if (!epochActive.load(std::memory_order_acquire)) {
             return;
         }
@@ -461,7 +519,12 @@ RE::UI_MESSAGE_RESULTS LoadingProgress::LoadingMenuProcessMessage(RE::IMenu* a_m
     // Records a direct queue decrement and completes it in the active epoch.
     void LoadingProgress::OnComplete(Queue a_queue)
     {
-        auto& live = liveRemaining[static_cast<std::size_t>(a_queue)];
+        const auto index = static_cast<std::size_t>(a_queue);
+        if (index >= queueCount) {
+            return;
+        }
+
+        auto& live = liveRemaining[index];
         auto value = live.load(std::memory_order_relaxed);
         while (value != 0 && !live.compare_exchange_weak(value, value - 1, std::memory_order_relaxed)) {}
         if (!epochActive.load(std::memory_order_acquire)) {
@@ -509,7 +572,11 @@ RE::UI_MESSAGE_RESULTS LoadingProgress::LoadingMenuProcessMessage(RE::IMenu* a_m
         constexpr std::size_t counterInstructionSize = 7;
     
         for (const auto& hook : mutationHooks) {
-            const auto address = REL::Relocation<std::uintptr_t>(hook.id).address() + hook.offset;
+            const auto functionAddress = REL::Relocation<std::uintptr_t>(hook.id).address();
+            if (!functionAddress || !hook.callback) {
+                throw std::runtime_error(fmt::format("could not resolve the {} hook", hook.name));
+            }
+            const auto address = functionAddress + hook.offset;
             // Each target is a seven-byte lock inc/dec instruction.
             if (!SKSE::stl::install_context_hook(
                     address, counterInstructionSize, hook.callback, counterInstructionSize)) {
@@ -527,6 +594,18 @@ RE::UI_MESSAGE_RESULTS LoadingProgress::LoadingMenuProcessMessage(RE::IMenu* a_m
         constexpr std::size_t advanceMovieIndex = 0x05;
 
         REL::Relocation<std::uintptr_t> vtable{ RE::LoadingMenu::VTABLE[0] };
+        if (!vtable.address()) {
+            throw std::runtime_error("could not resolve the LoadingMenu vtable");
+        }
+
+        const auto processAddress = *reinterpret_cast<const std::uintptr_t*>(
+            vtable.address() + processMessageIndex * sizeof(std::uintptr_t));
+        const auto advanceAddress = *reinterpret_cast<const std::uintptr_t*>(
+            vtable.address() + advanceMovieIndex * sizeof(std::uintptr_t));
+        if (!processAddress || !advanceAddress) {
+            throw std::runtime_error("LoadingMenu had a null original vtable function");
+        }
+
         const auto originalProcess =
             vtable.write_vfunc(processMessageIndex, LoadingProgress::LoadingMenuProcessMessage);
         LoadingProgress::originalLoadingProcessMessage =
@@ -604,8 +683,9 @@ RE::BSEventNotifyControl LoadingProgress::ProcessEvent(
 {
     if (CellTransitioner::renderObservationState.load(std::memory_order_acquire) != 0 && a_event &&
         a_event->cell) {
+        const auto* editorID = a_event->cell->GetFormEditorID();
         logger::info("cell fully loaded: formID={:08X} editorID='{}' menuOpen={} liveRemaining={}",
-            a_event->cell->GetFormID(), a_event->cell->GetFormEditorID(),
+            a_event->cell->GetFormID(), editorID ? editorID : "",
             epochActive.load(std::memory_order_acquire), GetLiveRemaining());
     }
 
@@ -627,6 +707,10 @@ void LoadingProgress::Aggregator::Enqueue(LoadingProgress::Queue a_queue)
         return;
     }
     const auto index = static_cast<std::size_t>(a_queue);
+    if (index >= queueCount) {
+        return;
+    }
+
     ++remaining_[index];
     ++total_[index];
     logger::debug("queue '{}' enqueued one item", queueNames[index]);
@@ -640,6 +724,10 @@ void LoadingProgress::Aggregator::Complete(LoadingProgress::Queue a_queue)
         return;
     }
     const auto index = static_cast<std::size_t>(a_queue);
+    if (index >= queueCount) {
+        return;
+    }
+
     if (remaining_[index] == 0) {
         ++total_[index];
         logger::debug("queue '{}' completed an unobserved item", queueNames[index]);
@@ -673,12 +761,18 @@ void LoadingProgress::Aggregator::End() { active_ = false; }
 // Installs loading progress hooks and registers the singleton event sink.
 void InstallHooks()
 {
+    auto& events = LoadingProgress::GetSingleton();
+    auto* ui = RE::UI::GetSingleton();
+    auto* eventSources = RE::ScriptEventSourceHolder::GetSingleton();
+    if (!ui || !eventSources) {
+        throw std::runtime_error("could not find Skyrim's UI or script event source holder");
+    }
+
     InstallMutationHooks();
     InstallLoadingMenuHook();
 
-    auto& events = LoadingProgress::GetSingleton();
-    RE::UI::GetSingleton()->AddEventSink<RE::MenuOpenCloseEvent>(&events);
-    RE::ScriptEventSourceHolder::GetSingleton()->AddEventSink<RE::TESCellFullyLoadedEvent>(&events);
+    ui->AddEventSink<RE::MenuOpenCloseEvent>(&events);
+    eventSources->AddEventSink<RE::TESCellFullyLoadedEvent>(&events);
 
     logger::info("installed loading-menu and cell-fully-loaded event sinks");
 }
