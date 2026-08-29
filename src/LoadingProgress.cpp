@@ -3,6 +3,7 @@
 
 #include "PCH.h"
 #include "CellTransitioner.h"
+#include "FormResolver.h"
 #include "IdsAndOffsets.h"
 #include "LoadingProgress.h"
 #include "ProgressMeter.h"
@@ -58,6 +59,12 @@ namespace load_progress
         static constexpr auto typeNames = std::to_array<std::string_view>(
             { "object-reference", "transferred-reference", "distant-reference" });
 
+        std::string logBatch;
+        if (a_writeLog) {
+            // One sink operation per drain avoids thousands of console writes during the visual transition.
+            logBatch.reserve(16 * 1024);
+        }
+
         for (auto& slot : loadedEntries) {
             if (slot.state.load(std::memory_order_acquire) != 2) {
                 continue;
@@ -74,16 +81,19 @@ namespace load_progress
             const auto* reference = RE::TESForm::LookupByID(entry.referenceID);
             const auto* base = RE::TESForm::LookupByID(entry.baseID);
             const auto* cell = RE::TESForm::LookupByID(entry.cellID);
-            const auto* referenceEditorID = reference ? reference->GetFormEditorID() : nullptr;
-            const auto* baseEditorID = base ? base->GetFormEditorID() : nullptr;
-            const auto* cellEditorID = cell ? cell->GetFormEditorID() : nullptr;
+            const auto  referenceDescription = FormResolver::Describe(entry.referenceID, reference);
+            const auto  baseDescription = FormResolver::Describe(entry.baseID, base);
+            const auto  cellDescription = FormResolver::Describe(entry.cellID, cell);
             const auto  typeIndex = static_cast<std::size_t>(entry.type);
             const auto  typeName = typeIndex < typeNames.size() ? typeNames[typeIndex] : "unknown";
 
-            logger::info(
-                "loaded entry: type={} reference={:08X} editorID='{}' base={:08X} editorID='{}' cell={:08X} editorID='{}'",
-                typeName, entry.referenceID, referenceEditorID ? referenceEditorID : "", entry.baseID,
-                baseEditorID ? baseEditorID : "", entry.cellID, cellEditorID ? cellEditorID : "");
+            fmt::format_to(std::back_inserter(logBatch),
+                "\nloaded entry: type={} reference=[{}] base=[{}] cell=[{}]",
+                typeName, referenceDescription, baseDescription, cellDescription);
+        }
+
+        if (!logBatch.empty()) {
+            logger::info("loaded entries:{}", logBatch);
         }
     }
 
@@ -781,11 +791,12 @@ namespace load_progress
         try {
             if (CellTransitioner::renderObservationState.load(std::memory_order_acquire) != 0 && a_event &&
                 a_event->cell) {
-                const auto* editorID = a_event->cell->GetFormEditorID();
+                const auto description = FormResolver::Describe(
+                    a_event->cell->GetFormID(), a_event->cell);
                 if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                     logger::info(
-                        "cell fully loaded: formID={:08X} editorID='{}' menuOpen={} liveRemaining={}",
-                        a_event->cell->GetFormID(), editorID ? editorID : "",
+                        "cell fully loaded: cell=[{}] menuOpen={} liveRemaining={}",
+                        description,
                         epochActive.load(std::memory_order_acquire), GetLiveRemaining());
                 }
             }
@@ -893,6 +904,8 @@ namespace load_progress
         eventSources->AddEventSink<RE::TESCellFullyLoadedEvent>(&events);
         LoadingProgress::hooksEnabled.store(true, std::memory_order_release);
 
+        logger::info("optional powerofthree's Tweaks Editor-ID provider: {}",
+            FormResolver::HasExternalEditorIDProvider() ? "detected" : "not detected; using native IDs and names");
         logger::info("installed loading-menu and cell-fully-loaded event sinks");
     }
 }

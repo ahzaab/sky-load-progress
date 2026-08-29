@@ -23,6 +23,7 @@
 #include <SKSE/ContextHook.h>
 #include <CommonStates.h>
 #include <SpriteBatch.h>
+#include <spdlog/async.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #ifndef NDEBUG
 #    include <spdlog/sinks/msvc_sink.h>
