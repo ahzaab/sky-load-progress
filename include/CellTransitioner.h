@@ -69,13 +69,10 @@ namespace load_progress
         static void                         DrawFullscreenLayer(REX::W32::ID3D11DeviceContext*, REX::W32::ID3D11ShaderResourceView*,
                                     const RECT&, ::ID3D11BlendState*, ::ID3D11SamplerState*, ::ID3D11PixelShader*,
                                     DirectX::XMVECTOR = DirectX::Colors::White);
-        static void                         DrawLoadingOverlay(
-                                    REX::W32::ID3D11DeviceContext*, const RECT&, float = 1.0F);
         static void                         PresentSeamlessFrame(
                                     REX::W32::ID3D11DeviceContext*, REX::W32::ID3D11Texture2D*, const REX::W32::D3D11_TEXTURE2D_DESC&);
         static void PresentLoadingMenuFrame(
             REX::W32::ID3D11DeviceContext*, REX::W32::ID3D11Texture2D*, const REX::W32::D3D11_TEXTURE2D_DESC&);
-        static std::int64_t AdvanceWarmFadeClock(std::int64_t) noexcept;
         static void PresentPostLoadFrame(REX::W32::ID3D11DeviceContext*, const REX::W32::D3D11_TEXTURE2D_DESC&);
         static void CompositeLoadingFrame(
             REX::W32::ID3D11DeviceContext*, REX::W32::ID3D11Texture2D*, const REX::W32::D3D11_TEXTURE2D_DESC&);
@@ -103,10 +100,6 @@ namespace load_progress
         inline static std::atomic_int64_t                   fadeOutDuration{ 1000 };
         inline static std::atomic_int64_t                   loadingTransitionStart{};
         inline static std::atomic_bool                      dominantColorPending{ false };
-        inline static std::atomic_bool                      loadingOverlayCaptured{ false };
-        inline static std::atomic_bool                      loggedPostLoadColorFadeContinuation{ false };
-        inline static std::atomic_int64_t                   warmFadeVisualElapsed{};
-        inline static std::atomic_int64_t                   warmFadeLastPresent{};
         inline static std::atomic_uint32_t                  transitionColor{ 0xFFFFFF };
         inline static std::atomic_uint8_t                   renderObservationState{};
         inline static std::atomic_bool                      awaitingControlRestore{ false };
@@ -135,12 +128,6 @@ namespace load_progress
         inline static bool                                   loggedFrozenPresentation{};
 
     private:
-        static bool           IsReadableRange(std::uintptr_t, std::size_t) noexcept;
-        static bool           IsChainedToPrimary(
-                      const RUNTIME_FUNCTION&, const RUNTIME_FUNCTION&, std::uintptr_t) noexcept;
-        static std::uintptr_t FindLogicalFunctionEnd(
-                      const RUNTIME_FUNCTION&, std::uintptr_t, std::uintptr_t);
-
         CellTransitioner() = default;
         CellTransitioner(const CellTransitioner&) = delete;
         CellTransitioner(CellTransitioner&&) = delete;

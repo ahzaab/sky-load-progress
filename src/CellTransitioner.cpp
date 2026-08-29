@@ -3,7 +3,6 @@
 
 #include "PCH.h"
 #include "CellTransitioner.h"
-#include "FormResolver.h"
 #include "IdsAndOffsets.h"
 
 #include <hde64.h>
@@ -81,115 +80,6 @@ namespace load_progress
                protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
     }
 
-    // Checks that a complete metadata record can be read without crossing a committed memory region.
-    bool CellTransitioner::IsReadableRange(
-        std::uintptr_t a_address,
-        std::size_t    a_size) noexcept
-    {
-        if (!a_address || !a_size) {
-            return false;
-        }
-
-        REX::W32::MEMORY_BASIC_INFORMATION memory{};
-        if (!REX::W32::VirtualQuery(reinterpret_cast<const void*>(a_address), &memory, sizeof(memory)) ||
-            memory.state != MEM_COMMIT) {
-            return false;
-        }
-
-        if ((memory.protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
-            return false;
-        }
-
-        const auto regionBegin = reinterpret_cast<std::uintptr_t>(memory.baseAddress);
-        const auto regionEnd = regionBegin + memory.regionSize;
-        return regionEnd >= regionBegin && a_address >= regionBegin &&
-               a_address <= regionEnd && a_size <= regionEnd - a_address;
-    }
-
-    // Returns whether an unwind range explicitly chains back to the caller's primary range.
-    bool CellTransitioner::IsChainedToPrimary(
-        const RUNTIME_FUNCTION& a_candidate,
-        const RUNTIME_FUNCTION& a_primary,
-        std::uintptr_t          a_imageBase) noexcept
-    {
-        // UNWIND_INFO begins with four single-byte fields. The high five bits of the first byte are
-        // flags and the third byte is the number of two-byte unwind-code slots that follow.
-        struct UnwindInfoHeader
-        {
-            std::uint8_t versionAndFlags;
-            std::uint8_t prologSize;
-            std::uint8_t codeCount;
-            std::uint8_t frameRegisterAndOffset;
-        };
-
-        const auto unwindAddress = a_imageBase + a_candidate.UnwindData;
-        if (unwindAddress < a_imageBase ||
-            !IsReadableRange(unwindAddress, sizeof(UnwindInfoHeader))) {
-            return false;
-        }
-
-        UnwindInfoHeader header{};
-        std::memcpy(std::addressof(header),
-            reinterpret_cast<const void*>(unwindAddress), sizeof(header));
-
-        constexpr std::uint8_t unwindFlagsShift = 3;
-        const auto flags = static_cast<std::uint8_t>(header.versionAndFlags >> unwindFlagsShift);
-        if ((flags & UNW_FLAG_CHAININFO) == 0) {
-            return false;
-        }
-
-        // The unwind-code array is padded to an even number of two-byte slots. When CHAININFO is
-        // present, the next aligned record is the primary RUNTIME_FUNCTION entry for this fragment.
-        constexpr std::size_t unwindCodeSize = 2;
-        const auto alignedCodeCount = static_cast<std::size_t>(header.codeCount + 1U) & ~std::size_t{ 1 };
-        const auto chainedRecordAddress =
-            unwindAddress + sizeof(UnwindInfoHeader) + alignedCodeCount * unwindCodeSize;
-        if (chainedRecordAddress < unwindAddress ||
-            !IsReadableRange(chainedRecordAddress, sizeof(RUNTIME_FUNCTION))) {
-            return false;
-        }
-
-        RUNTIME_FUNCTION chainedPrimary{};
-        std::memcpy(std::addressof(chainedPrimary),
-            reinterpret_cast<const void*>(chainedRecordAddress), sizeof(chainedPrimary));
-
-        return chainedPrimary.BeginAddress == a_primary.BeginAddress &&
-               chainedPrimary.EndAddress == a_primary.EndAddress &&
-               chainedPrimary.UnwindData == a_primary.UnwindData;
-    }
-
-    // Extends a primary unwind range across only the contiguous fragments chained back to it.
-    std::uintptr_t CellTransitioner::FindLogicalFunctionEnd(
-        const RUNTIME_FUNCTION& a_primary,
-        std::uintptr_t          a_imageBase,
-        std::uintptr_t          a_textEnd)
-    {
-        auto current = a_primary;
-        auto functionEnd = a_imageBase + current.EndAddress;
-
-        // Windows limits unwind chains to 32 records. Applying the same bound prevents malformed
-        // metadata from keeping startup in an unbounded walk.
-        for (std::size_t depth = 0; depth < UNWIND_CHAIN_LIMIT; ++depth) {
-            DWORD64     nextImageBase = 0;
-            const auto* next = ::RtlLookupFunctionEntry(functionEnd, &nextImageBase, nullptr);
-            if (!next || nextImageBase != a_imageBase ||
-                next->BeginAddress != current.EndAddress ||
-                !IsChainedToPrimary(*next, a_primary, a_imageBase)) {
-                break;
-            }
-
-            const auto nextEnd = a_imageBase + next->EndAddress;
-            if (next->EndAddress <= next->BeginAddress || nextEnd <= functionEnd || nextEnd > a_textEnd) {
-                throw std::runtime_error("chained runtime function had invalid bounds");
-            }
-
-            current = *next;
-            functionEnd = nextEnd;
-        }
-
-        return functionEnd;
-    }
-
     // Finds one rel32 call to the expected callee inside an Address Library function.
     //
     // Address Library provides stable identities for the caller and callee, but it does not identify
@@ -198,11 +88,11 @@ namespace load_progress
     // fragile. This resolver instead searches the caller for the call whose decoded destination is the
     // expected Address Library function.
     //
-    // RtlLookupFunctionEntry reads the executable's x64 unwind table. MSVC can split one logical
-    // function into a primary range and contiguous chained ranges when different regions need
-    // different unwind behavior. The resolver follows only ranges whose CHAININFO record explicitly
-    // identifies the same primary range, keeping the search out of adjacent functions and padding.
-    // It fails closed if metadata is invalid, the call is absent, or more than one match exists.
+    // RtlLookupFunctionEntry reads the executable's x64 unwind table. Its begin/end RVAs provide the
+    // exact compiled-function boundary, keeping the search out of adjacent functions and padding. The
+    // resolver fails closed if the boundary is invalid, the call is absent, or more than one matching
+    // call exists. A future runtime therefore disables plugin initialization instead of patching an
+    // uncertain instruction.
     std::uintptr_t CellTransitioner::FindUniqueRelativeCall(
         REL::RelocationID a_callerID,
         REL::RelocationID a_calleeID,
@@ -222,16 +112,14 @@ namespace load_progress
             throw std::runtime_error(fmt::format("could not determine the {} function bounds", a_name));
         }
 
+        const auto functionBegin = imageBase + runtimeFunction->BeginAddress;
+        const auto functionEnd = imageBase + runtimeFunction->EndAddress;
         const auto text = REL::Module::get().segment(REL::Segment::textx);
         const auto textEnd = text.address() + text.size();
-        const auto functionBegin = imageBase + runtimeFunction->BeginAddress;
-        const auto primaryEnd = imageBase + runtimeFunction->EndAddress;
-        if (functionBegin != caller || functionBegin >= primaryEnd ||
-            functionBegin < text.address() || primaryEnd > textEnd) {
+        if (functionBegin != caller || functionBegin >= functionEnd ||
+            functionBegin < text.address() || functionEnd > textEnd) {
             throw std::runtime_error(fmt::format("{} had invalid runtime function bounds", a_name));
         }
-
-        const auto functionEnd = FindLogicalFunctionEnd(*runtimeFunction, imageBase, textEnd);
 
         constexpr std::size_t relativeCallSize = 5;
         std::uintptr_t        match = 0;
@@ -290,9 +178,7 @@ namespace load_progress
         // This is the capture gate. Once closed, the rolling texture remains the last pre-load world frame.
         frozenFrameLocked.store(true, std::memory_order_release);
         postLoadFadeStart.store(0, std::memory_order_release);
-        loadingTransitionStart.store(0, std::memory_order_release);
-        loadingOverlayCaptured.store(false, std::memory_order_release);
-        loggedPostLoadColorFadeContinuation.store(false, std::memory_order_release);
+        loadingTransitionStart.store(CurrentTimeMilliseconds(), std::memory_order_release);
 
         const bool selectCapturedColor =
             transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&
@@ -323,15 +209,12 @@ namespace load_progress
         renderObservationState.store(1, std::memory_order_release);
     }
 
-    // Starts the retained-frame fade and watches for gameplay controls to return.
+    // Starts the retained-frame fade and post-load control diagnostics.
     void CellTransitioner::EndLoad()
     {
         // Opening the post-load gate lets Present composite over the destination cell as soon as it returns.
         epochActive.store(false, std::memory_order_release);
-        const auto fadeStart = CurrentTimeMilliseconds();
-        postLoadFadeStart.store(fadeStart, std::memory_order_release);
-        warmFadeVisualElapsed.store(0, std::memory_order_release);
-        warmFadeLastPresent.store(fadeStart, std::memory_order_release);
+        postLoadFadeStart.store(CurrentTimeMilliseconds(), std::memory_order_release);
 
         const auto renderState = renderObservationState.load(std::memory_order_acquire);
         if (renderState == 1 || renderState == 2) {
@@ -510,9 +393,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     // Chooses the warm or cold presentation before the Loading Menu opens.
     CellTransitioner::Presentation CellTransitioner::ChoosePresentation()
     {
-        auto* cell = GetQueuedDestinationCell();
-        const bool resident = cell && cell->GetRuntimeData().loadedData;
-        const auto editorID = FormResolver::GetEditorID(cell);
+        auto*                  cell = GetQueuedDestinationCell();
+        const bool             resident = cell && cell->GetRuntimeData().loadedData;
+        const auto*            editorIDText = cell ? cell->GetFormEditorID() : nullptr;
+        const std::string_view editorID = editorIDText ? editorIDText : "";
 
         const auto selected = resident ? Presentation::seamless : Presentation::loadingMenu;
         if (selected == Presentation::seamless) {
@@ -535,13 +419,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
         const auto type = transitionType.load(std::memory_order_acquire);
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            const auto cellDescription = FormResolver::Describe(
-                cell ? cell->GetFormID() : 0, cell);
-
             logger::info(
-                "loading destination: cell=[{}] loadedData={} attached={} presentation={} transition={} "
+                "loading destination: cell={:08X} editorID='{}' loadedData={} attached={} presentation={} transition={} "
                 "fadeIn={}ms hold={}ms fadeOut={}ms",
-                cellDescription, resident,
+                cell ? cell->GetFormID() : 0, editorID, resident,
                 cell && cell->IsAttached(), selected == Presentation::seamless ? "seamless" : "loading-menu",
                 type == Settings::TransitionType::color ? "color" : "blur", fadeInDuration.load(),
                 holdAfterLoad.load(), fadeOutDuration.load());
@@ -556,7 +437,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
         return selected;
     }
-
     // Collects the input and menu state used by post-load diagnostics.
     std::optional<CellTransitioner::ControlState> CellTransitioner::GetControlState()
     {
@@ -852,23 +732,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         spriteBatch->End();
     }
 
-    // Restores the last captured LoadingMenu widgets above a replacement background.
-    void CellTransitioner::DrawLoadingOverlay(
-        REX::W32::ID3D11DeviceContext* a_context,
-        const RECT&                    a_destination,
-        float                          a_alpha)
-    {
-        if (!a_context || !commonStates || !loadingOverlayView || !loadingOverlayShader ||
-            !loadingOverlayCaptured.load(std::memory_order_acquire) || a_alpha <= 0.0F) {
-            return;
-        }
-
-        const auto alpha = std::clamp(a_alpha, 0.0F, 1.0F);
-        DrawFullscreenLayer(a_context, loadingOverlayView, a_destination,
-            commonStates->NonPremultiplied(), nullptr, loadingOverlayShader,
-            DirectX::XMVectorSet(alpha, alpha, alpha, alpha));
-    }
-
     // Replaces the loading frame with the unmodified pre-load world image.
     void CellTransitioner::PresentSeamlessFrame(
         REX::W32::ID3D11DeviceContext*        a_context,
@@ -903,31 +766,14 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         // Present runs after the UI pass, so the back buffer now contains the LoadingMenu widgets. Save that
         // result before replacing its background; loadingOverlayShader reconstructs usable alpha later.
         a_context->CopyResource(loadingOverlay, a_backBuffer);
-        loadingOverlayCaptured.store(true, std::memory_order_release);
 
         const auto destination = GetDestinationRect(a_desc);
         DrawFullscreenLayer(a_context, frozenFrameView, destination, commonStates->Opaque(),
             commonStates->LinearClamp(), GetFrozenFrameShader());
 
         if (transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color) {
-            const auto now = CurrentTimeMilliseconds();
-            auto       start = loadingTransitionStart.load(std::memory_order_acquire);
-
-            // Menu construction and renderer suspension can consume the configured fade before the
-            // first loading frame reaches Present. Start the clock here so alpha zero is observable
-            // and the captured frame always composites into the selected color on screen.
-            if (start == 0) {
-                if (loadingTransitionStart.compare_exchange_strong(
-                        start, now, std::memory_order_acq_rel, std::memory_order_acquire)) {
-                    start = now;
-
-                    if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                        logger::info("started visible color fade-in");
-                    }
-                }
-            }
-
-            const auto elapsed = std::max<std::int64_t>(now - start, 0);
+            const auto elapsed =
+                CurrentTimeMilliseconds() - loadingTransitionStart.load(std::memory_order_acquire);
             const auto duration = fadeInDuration.load(std::memory_order_acquire);
             const auto colorAlpha = duration > 0 ?
                                         std::clamp(static_cast<float>(elapsed) / static_cast<float>(duration), 0.0F, 1.0F) :
@@ -939,22 +785,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         // Recover the menu's effective alpha and composite its widgets above our replacement background.
-        DrawLoadingOverlay(a_context, destination);
-    }
-
-    // Advances a warm fade without allowing one delayed Present to create a large alpha jump.
-    std::int64_t CellTransitioner::AdvanceWarmFadeClock(std::int64_t a_now) noexcept
-    {
-        const auto previous = warmFadeLastPresent.exchange(a_now, std::memory_order_acq_rel);
-        if (previous <= 0 || a_now <= previous) {
-            return warmFadeVisualElapsed.load(std::memory_order_acquire);
-        }
-
-        // At 60 FPS a normal interval is about 17 ms. Allowing up to 33 ms preserves ordinary
-        // frame-rate variation while masking the repeatable 100–120 ms engine stall seen after load.
-        constexpr std::int64_t maximumAdvancePerPresent = 33;
-        const auto advance = std::min(a_now - previous, maximumAdvancePerPresent);
-        return warmFadeVisualElapsed.fetch_add(advance, std::memory_order_acq_rel) + advance;
+        DrawFullscreenLayer(a_context, loadingOverlayView, destination, commonStates->NonPremultiplied(), nullptr,
+            loadingOverlayShader);
     }
 
     // Draws the retained frame over the new cell until the post-load crossfade ends.
@@ -970,67 +802,14 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return;
         }
 
-        const auto now = CurrentTimeMilliseconds();
-
-        const auto usesColor =
-            transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color;
-
-        auto coverReady = fadeStart;
-        if (usesColor) {
-            auto fadeInStart = loadingTransitionStart.load(std::memory_order_acquire);
-            if (fadeInStart <= 0) {
-                fadeInStart = now;
-                loadingTransitionStart.store(fadeInStart, std::memory_order_release);
-            }
-
-            const auto fadeIn = fadeInDuration.load(std::memory_order_acquire);
-            const auto fadeInElapsed = std::max<std::int64_t>(now - fadeInStart, 0);
-            const auto fadeInAlpha = fadeIn > 0 ?
-                                         std::clamp(static_cast<float>(fadeInElapsed) / static_cast<float>(fadeIn), 0.0F, 1.0F) :
-                                         1.0F;
-
-            // A fast cell load can close LoadingMenu before the configured color fade reaches its
-            // destination. Continue compositing the retained world and the last captured menu frame
-            // until the fade-in finishes instead of jumping directly to an opaque color.
-            if (fadeInElapsed < fadeIn && MatchesFrozenFrame(a_desc) && frozenFrameView) {
-                if (!loggedPostLoadColorFadeContinuation.exchange(true, std::memory_order_acq_rel) &&
-                    Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                    logger::info("continuing color fade-in for {}ms after LoadingMenu closed",
-                        fadeIn - fadeInElapsed);
-                }
-
-                const auto destination = GetDestinationRect(a_desc);
-                DrawFullscreenLayer(a_context, frozenFrameView, destination, commonStates->Opaque(),
-                    commonStates->LinearClamp(), GetFrozenFrameShader());
-                DrawFullscreenLayer(a_context, frozenFrameView, destination,
-                    commonStates->NonPremultiplied(), nullptr, solidColorShader,
-                    TransitionColor(fadeInAlpha));
-                DrawLoadingOverlay(a_context, destination);
-                return;
-            }
-
-            // The hold begins only after both the cell load and the color fade-in have completed.
-            coverReady = std::max(fadeStart, fadeInStart + fadeIn);
-        }
-
-        // Cold loads briefly hold the completed cover. Warm loads begin blending immediately.
+        // Cold loads briefly hold the cover after the menu closes. Warm loads begin blending immediately.
         const auto delay = holdAfterLoad.load(std::memory_order_acquire);
+        const auto fadeElapsed = CurrentTimeMilliseconds() - fadeStart - delay;
         const auto duration = fadeOutDuration.load(std::memory_order_acquire);
-        const bool warm = presentation.load(std::memory_order_acquire) == Presentation::seamless;
-        const auto fadeElapsed = warm ?
-                                     AdvanceWarmFadeClock(now) - delay :
-                                     now - coverReady - delay;
 
-        // The capped clock normally adds only the duration of missed frames. This absolute deadline
-        // guarantees malformed timing or an unexpected cadence can never retain the cover indefinitely.
-        constexpr std::int64_t maximumWarmSmoothingExtension = 500;
-        const bool warmSafetyExpired = warm &&
-                                       now - fadeStart >= delay + duration + maximumWarmSmoothingExtension;
-
-        if (fadeElapsed >= duration || warmSafetyExpired) {
+        if (fadeElapsed >= duration) {
             postLoadFadeStart.store(0, std::memory_order_release);
             frozenFrameLocked.store(false, std::memory_order_release);
-
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("post-load frozen-frame crossfade completed");
             }
@@ -1045,6 +824,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                       std::clamp(static_cast<float>(fadeElapsed) / static_cast<float>(duration), 0.0F, 1.0F) :
                                       1.0F;
         const auto alpha = 1.0F - fadeProgress;
+        const auto usesColor =
+            transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color;
         const auto color = usesColor ?
                                TransitionColor(alpha) :
                                DirectX::XMVectorSet(1.0F, 1.0F, 1.0F, alpha);
@@ -1053,10 +834,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         DrawFullscreenLayer(a_context, frozenFrameView, GetDestinationRect(a_desc),
             commonStates->NonPremultiplied(), commonStates->LinearClamp(),
             usesColor ? solidColorShader : GetFrozenFrameShader(), color);
-
-        if (usesColor) {
-            DrawLoadingOverlay(a_context, GetDestinationRect(a_desc), alpha);
-        }
     }
 
     // Selects the compositor path for the current loading state.

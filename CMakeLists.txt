@@ -27,14 +27,12 @@ add_commonlibsse_plugin(${PROJECT_NAME}
     USE_ADDRESS_LIBRARY
     SOURCES
         include/CellTransitioner.h
-        include/FormResolver.h
         include/IdsAndOffsets.h
         include/LoadingProgress.h
         include/PCH.h
         include/ProgressMeter.h
         include/Settings.h
         src/CellTransitioner.cpp
-        src/FormResolver.cpp
         src/LoadingProgress.cpp
         src/PCH.cpp
         src/ProgressMeter.cpp

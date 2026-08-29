@@ -49,13 +49,7 @@ namespace
             return false;
         }
         *path /= "SkyrimLoadProgress.log";
-        // Keep earlier diagnostic runs so a later launch does not erase entries seen in the console.
-        auto file = std::make_shared<spdlog::sinks::basic_file_sink_mt>(path->string(), false);
-
-        // Detailed load diagnostics can produce thousands of lines at once. A dedicated worker keeps
-        // file and console I/O from interrupting the render thread while preserving every message.
-        constexpr std::size_t logQueueCapacity = 1 << 14;
-        spdlog::init_thread_pool(logQueueCapacity, 1);
+        auto file = std::make_shared<spdlog::sinks::basic_file_sink_mt>(path->string(), true);
 
 #ifndef NDEBUG
         if (!OpenDebugConsole()) {
@@ -64,15 +58,12 @@ namespace
 
         auto msvc = std::make_shared<spdlog::sinks::msvc_sink_mt>();
         auto console = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-        auto log = std::make_shared<spdlog::async_logger>("global",
-            spdlog::sinks_init_list{ file, msvc, console }, spdlog::thread_pool(),
-            spdlog::async_overflow_policy::block);
+        auto log = std::make_shared<spdlog::logger>(
+            "global", spdlog::sinks_init_list{ file, msvc, console });
         log->set_level(spdlog::level::trace);
         log->flush_on(spdlog::level::trace);
 #else
-        auto log = std::make_shared<spdlog::async_logger>("global",
-            spdlog::sinks_init_list{ file }, spdlog::thread_pool(),
-            spdlog::async_overflow_policy::block);
+        auto log = std::make_shared<spdlog::logger>("global", std::move(file));
         log->set_level(spdlog::level::info);
         log->flush_on(spdlog::level::info);
 #endif
