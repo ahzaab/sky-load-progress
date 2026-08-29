@@ -178,7 +178,9 @@ namespace load_progress
         // This is the capture gate. Once closed, the rolling texture remains the last pre-load world frame.
         frozenFrameLocked.store(true, std::memory_order_release);
         postLoadFadeStart.store(0, std::memory_order_release);
-        loadingTransitionStart.store(CurrentTimeMilliseconds(), std::memory_order_release);
+        // Menu construction and renderer suspension can consume the configured fade before the first
+        // loading frame is presented. Start the visible color fade from Present instead.
+        loadingTransitionStart.store(0, std::memory_order_release);
 
         const bool selectCapturedColor =
             transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&
@@ -772,8 +774,20 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             commonStates->LinearClamp(), GetFrozenFrameShader());
 
         if (transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color) {
-            const auto elapsed =
-                CurrentTimeMilliseconds() - loadingTransitionStart.load(std::memory_order_acquire);
+            const auto now = CurrentTimeMilliseconds();
+            auto       start = loadingTransitionStart.load(std::memory_order_acquire);
+            if (start == 0) {
+                if (loadingTransitionStart.compare_exchange_strong(
+                        start, now, std::memory_order_acq_rel, std::memory_order_acquire)) {
+                    start = now;
+
+                    if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                        logger::info("started visible color fade-in");
+                    }
+                }
+            }
+
+            const auto elapsed = std::max<std::int64_t>(now - start, 0);
             const auto duration = fadeInDuration.load(std::memory_order_acquire);
             const auto colorAlpha = duration > 0 ?
                                         std::clamp(static_cast<float>(elapsed) / static_cast<float>(duration), 0.0F, 1.0F) :
