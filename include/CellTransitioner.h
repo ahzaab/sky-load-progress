@@ -44,6 +44,8 @@ namespace load_progress
         static bool              IsExecutableAddress(std::uintptr_t) noexcept;
         static std::uintptr_t    FindUniqueRelativeCall(
             REL::RelocationID, REL::RelocationID, std::string_view);
+        static std::pair<std::uintptr_t, std::uintptr_t> FindChainableRelativeCall(
+            REL::RelocationID, REL::RelocationID, std::ptrdiff_t, std::string_view);
 
         static bool                            CreatePixelShader(::ID3D11Device*, std::string_view, std::string_view, ::ID3D11PixelShader**);
         static bool                            CreateLoadingOverlayShader(::ID3D11Device*);
@@ -60,7 +62,7 @@ namespace load_progress
         static bool                            IsBgraFormat(REX::W32::DXGI_FORMAT);
         static bool                            IsRgbaFormat(REX::W32::DXGI_FORMAT);
         static std::array<std::uint32_t, 4096> BuildColorHistogram(
-            const REX::W32::D3D11_MAPPED_SUBRESOURCE&, bool);
+            const REX::W32::D3D11_MAPPED_SUBRESOURCE&, REX::W32::DXGI_FORMAT);
         static std::optional<std::uint32_t> SelectDominantColor(const std::array<std::uint32_t, 4096>&);
         static void                         UpdateTransitionColor(REX::W32::ID3D11DeviceContext*);
         static DirectX::XMVECTOR            TransitionColor(float);

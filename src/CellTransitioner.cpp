@@ -169,6 +169,53 @@ namespace load_progress
         return match;
     }
 
+    // Resolves a render call while preserving an existing hook installed by another plugin.
+    std::pair<std::uintptr_t, std::uintptr_t> CellTransitioner::FindChainableRelativeCall(
+        REL::RelocationID a_callerID,
+        REL::RelocationID a_calleeID,
+        std::ptrdiff_t     a_verifiedOffset,
+        std::string_view   a_name)
+    {
+        try {
+            const auto callSite = FindUniqueRelativeCall(a_callerID, a_calleeID, a_name);
+            return { callSite, REL::Relocation<std::uintptr_t>(a_calleeID).address() };
+        } catch (const std::exception& semanticError) {
+            const auto caller = REL::Relocation<std::uintptr_t>(a_callerID).address();
+            if (!IsExecutableAddress(caller) || a_verifiedOffset <= 0) {
+                throw;
+            }
+
+            const auto callSite = caller + a_verifiedOffset;
+            const auto text = REL::Module::get().segment(REL::Segment::textx);
+            const auto textEnd = text.address() + text.size();
+            if (callSite < text.address() || callSite + 5 > textEnd) {
+                throw std::runtime_error(fmt::format(
+                    "{} fallback call site was outside Skyrim's .text section", a_name));
+            }
+
+            hde64s     decoded{};
+            const auto length = hde64_disasm(reinterpret_cast<const void*>(callSite), &decoded);
+            if (length != 5 || (decoded.flags & F_ERROR) != 0 || decoded.opcode != 0xE8) {
+                throw std::runtime_error(fmt::format(
+                    "{} fallback site was not a rel32 call", a_name));
+            }
+
+            std::int32_t displacement = 0;
+            std::memcpy(&displacement,
+                reinterpret_cast<const void*>(callSite + 1), sizeof(displacement));
+            const auto currentTarget = callSite + 5 + displacement;
+            if (!IsExecutableAddress(currentTarget)) {
+                throw std::runtime_error(fmt::format(
+                    "{} fallback call had a non-executable target at {:X}", a_name, currentTarget));
+            }
+
+            logger::warn(
+                "{} no longer targeted Skyrim's original helper ({}); chaining existing target {:X} at verified site {:X}",
+                a_name, semanticError.what(), currentTarget, callSite);
+            return { callSite, currentTarget };
+        }
+    }
+
     // Locks the last world frame and configures the selected loading presentation.
     CellTransitioner::Presentation CellTransitioner::PrepareForLoad(RE::IMenu* a_menu)
     {
@@ -601,10 +648,18 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
     // Builds a reduced RGB histogram from every fourth captured pixel.
     std::array<std::uint32_t, 4096> CellTransitioner::BuildColorHistogram(
-        const REX::W32::D3D11_MAPPED_SUBRESOURCE& a_mapped, bool a_bgra)
+        const REX::W32::D3D11_MAPPED_SUBRESOURCE& a_mapped,
+        REX::W32::DXGI_FORMAT                     a_format)
     {
         std::array<std::uint32_t, 4096> histogram{};
         if (!a_mapped.data || a_mapped.rowPitch / 4 < frozenFrameDesc.width) {
+            return histogram;
+        }
+
+        const bool bgra = IsBgraFormat(a_format);
+        const bool rgba = IsRgbaFormat(a_format);
+        const bool rgb10 = a_format == REX::W32::DXGI_FORMAT_R10G10B10A2_UNORM;
+        if (!bgra && !rgba && !rgb10) {
             return histogram;
         }
 
@@ -615,12 +670,31 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
             for (std::uint32_t x = 0; x < frozenFrameDesc.width; x += sampleStep) {
                 const auto* pixel = row + x * 4;
-                const auto  red = a_bgra ? pixel[2] : pixel[0];
-                const auto  green = pixel[1];
-                const auto  blue = a_bgra ? pixel[0] : pixel[2];
+                std::uint32_t red = 0;
+                std::uint32_t green = 0;
+                std::uint32_t blue = 0;
+                std::uint32_t alpha = 0;
+
+                if (rgb10) {
+                    std::uint32_t packed = 0;
+                    std::memcpy(&packed, pixel, sizeof(packed));
+
+                    // DXGI_FORMAT_R10G10B10A2_UNORM stores R in the least-significant ten bits.
+                    // Round each normalized ten-bit channel into the byte range used by the existing
+                    // histogram; expand two-bit alpha to the same range for the transparency filter.
+                    red = ((packed & 0x3FFU) * 255U + 511U) / 1023U;
+                    green = (((packed >> 10U) & 0x3FFU) * 255U + 511U) / 1023U;
+                    blue = (((packed >> 20U) & 0x3FFU) * 255U + 511U) / 1023U;
+                    alpha = ((packed >> 30U) & 0x03U) * 85U;
+                } else {
+                    red = bgra ? pixel[2] : pixel[0];
+                    green = pixel[1];
+                    blue = bgra ? pixel[0] : pixel[2];
+                    alpha = pixel[3];
+                }
 
                 // Transparent and nearly black pixels do not represent the scene's useful color.
-                if (pixel[3] < 128 || std::max({ red, green, blue }) < 16) {
+                if (alpha < 128 || std::max({ red, green, blue }) < 16) {
                     continue;
                 }
 
@@ -657,8 +731,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return;
         }
 
-        const bool bgra = IsBgraFormat(frozenFrameDesc.format);
-        if (!bgra && !IsRgbaFormat(frozenFrameDesc.format)) {
+        const bool supported = IsBgraFormat(frozenFrameDesc.format) ||
+                               IsRgbaFormat(frozenFrameDesc.format) ||
+                               frozenFrameDesc.format == REX::W32::DXGI_FORMAT_R10G10B10A2_UNORM;
+        if (!supported) {
             logger::warn("using the default transition color for unsupported texture format {}",
                 std::to_underlying(frozenFrameDesc.format));
             return;
@@ -672,7 +748,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return;
         }
 
-        const auto histogram = BuildColorHistogram(mapped, bgra);
+        const auto histogram = BuildColorHistogram(mapped, frozenFrameDesc.format);
         a_context->Unmap(dominantColorReadback, 0);
 
         const auto color = SelectDominantColor(histogram);
@@ -1194,14 +1270,17 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 // world renderer. Resolving the pair keeps this hook stable when instructions before
                 // the call grow or shrink between runtime builds.
                 constexpr std::size_t relativeCallSize = 5;
-                const auto            callSite = CellTransitioner::FindUniqueRelativeCall(
+                const auto [callSite, currentTarget] = CellTransitioner::FindChainableRelativeCall(
                     IDs::NormalWorldRenderCaller, IDs::NormalWorldRenderer,
+                    Offsets::NormalWorldRenderCall.Get(),
                     "normal-world-render call");
                 CellTransitioner::originalRenderWorld =
-                    REL::Relocation<std::uintptr_t>(IDs::NormalWorldRenderer).address();
+                    currentTarget;
                 SKSE::GetTrampoline().write_call<relativeCallSize>(
                     callSite, CellTransitioner::ObserveRenderWorld);
-                logger::info("installed passive normal-world-render observation hook at {:X}", callSite);
+                logger::info(
+                    "installed passive normal-world-render observation hook at {:X}; chained target {:X}",
+                    callSite, currentTarget);
             }
 
             // Installs the rolling world-only capture after target binding and immediately before Scaleform draws.
@@ -1211,14 +1290,17 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 // the call owned by the UI render function is replaced; this preserves the narrow point
                 // after target setup and before HUD, console, or menu movies enter the captured texture.
                 constexpr std::size_t relativeCallSize = 5;
-                const auto            callSite = CellTransitioner::FindUniqueRelativeCall(
+                const auto [callSite, currentTarget] = CellTransitioner::FindChainableRelativeCall(
                     IDs::ScaleformRenderCaller, IDs::ScaleformBeginHelper,
+                    Offsets::ScaleformBeginCall.Get(),
                     "Scaleform-begin call");
                 CellTransitioner::originalBeginScaleform =
-                    REL::Relocation<std::uintptr_t>(IDs::ScaleformBeginHelper).address();
+                    currentTarget;
                 SKSE::GetTrampoline().write_call<relativeCallSize>(
                     callSite, CellTransitioner::CaptureAfterScaleformBegin);
-                logger::info("installed world-only capture hook after Scaleform target binding at {:X}", callSite);
+                logger::info(
+                    "installed world-only capture hook after Scaleform target binding at {:X}; chained target {:X}",
+                    callSite, currentTarget);
             }
 
             // Installs the final compositor gate and creates the shaders/state reused by every presented frame.
@@ -1284,11 +1366,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         // Installs every renderer and visual-transition hook.
         void InstallHooks()
         {
-            if (!Runtimes::IsSupported()) {
-                throw std::runtime_error(fmt::format("unsupported Skyrim runtime {}",
-                    REL::Module::get().version().string(".")));
-            }
-
             // Construct the transition controller before any callback can reach it.
             CellTransitioner::GetSingleton();
 

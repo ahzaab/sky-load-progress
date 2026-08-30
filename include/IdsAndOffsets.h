@@ -11,15 +11,8 @@ namespace load_progress
 {
     namespace Runtimes
     {
-        inline constexpr REL::Version SkyrimSE{ 1, 5, 97, 0 };
-        inline constexpr REL::Version SkyrimAE{ 1, 6, 1170, 0 };
-        inline constexpr REL::Version SkyrimAEGOG{ 1, 7, 99, 0 };
-
-        [[nodiscard]] inline bool IsSupported() noexcept
-        {
-            const auto version = REL::Module::get().version();
-            return version == SkyrimSE || version == SkyrimAE || version == SkyrimAEGOG;
-        }
+        inline constexpr REL::Version SkyrimAEStart{ 1, 6, 0, 0 };
+        inline constexpr REL::Version Skyrim17Start{ 1, 7, 99, 0 };
     }
 
     // Address Library identifiers used as the base of each decoded hook location.
@@ -59,20 +52,19 @@ namespace load_progress
         [[nodiscard]] std::ptrdiff_t Get() const noexcept
         {
             const auto version = REL::Module::get().version();
-            if (version == Runtimes::SkyrimSE) {
+            if (version < Runtimes::SkyrimAEStart) {
                 return se;
             }
-            if (version == Runtimes::SkyrimAE) {
-                return ae;
-            }
-            if (version == Runtimes::SkyrimAEGOG) {
+            if (version >= Runtimes::Skyrim17Start) {
                 return aeGog;
             }
-            return 0;
+            return ae;
         }
     };
 
-    // Function-relative offsets decoded against 1.5.97, 1.6.1170, and 1.7.99.
+    // Function-relative offsets decoded against 1.5.97, 1.6.1170, and 1.7.99. Other
+    // Address Library-supported runtimes use the closest matching runtime family as a
+    // best-effort fallback; hook-site validation remains responsible for rejecting bad sites.
     namespace Offsets
     {
         // These queue offsets are identical in all three decoded runtimes and are considered stable.
@@ -82,5 +74,10 @@ namespace load_progress
         constexpr RuntimeOffset ReferencesComplete{ 0x0C, 0x0C, 0x0C };
         constexpr RuntimeOffset DistantReferencesEnqueue{ 0x4E, 0x4E, 0x4E };
         constexpr RuntimeOffset DistantReferencesComplete{ 0x69, 0x69, 0x69 };
+
+        // Verified fallback locations for chaining render hooks that another plugin has already
+        // redirected. Vanilla installs still use semantic caller/callee discovery first.
+        constexpr RuntimeOffset NormalWorldRenderCall{ 0x831, 0x841, 0x85E };
+        constexpr RuntimeOffset ScaleformBeginCall{ 0x17F, 0x18A, 0x18A };
     }
 }

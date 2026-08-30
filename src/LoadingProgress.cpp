@@ -873,11 +873,6 @@ namespace load_progress
     // Installs loading progress hooks and registers the singleton event sink.
     void InstallHooks()
     {
-        if (!Runtimes::IsSupported()) {
-            throw std::runtime_error(fmt::format("unsupported Skyrim runtime {}",
-                REL::Module::get().version().string(".")));
-        }
-
         auto& events = LoadingProgress::GetSingleton();
         auto* ui = RE::UI::GetSingleton();
         auto* eventSources = RE::ScriptEventSourceHolder::GetSingleton();

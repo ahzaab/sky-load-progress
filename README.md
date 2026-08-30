@@ -94,7 +94,9 @@ For a debug build with the console enabled:
 
 ## Reverse Engineering Notes
 
-The current queue hooks were verified against Skyrim 1.6.1170 and 1.7.99.
+The current queue hooks were verified against Skyrim 1.6.1170, 1.7.99, and 1.7.104.
+Other runtimes supported by Address Library are attempted on a best-effort basis using
+runtime-family offsets and hook-site validation rather than a fixed runtime whitelist.
 
 | Queue | Enqueue | Complete |
 | --- | --- | --- |
