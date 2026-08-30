@@ -2,7 +2,9 @@
 
 Skyrim Load Progress adds a progress meter to the loading screen. The meter uses the same artwork as the level progress bar and is placed directly below it.
 
-This is still a proof of concept. The plugin currently tracks the reference, critical reference, and distant reference queues used while cells are loading. It writes the queue activity and calculated progress to `SkyrimLoadProgress.log`.
+> **Experimental branch:** `seamless-loading-experiment` keeps Skyrim's loading, fader, and mist update loops running but disables their presentation. This hides both Scaleform movies and suppresses MistMenu's native mist, background, and load-screen NIF rendering. It also disables form-backed image-space modifiers, including their cross-fades. The last completed frame is kept in a GPU texture and presented while the Loading Menu is open. Expect a frozen image followed by normal pop-in when rendering resumes.
+
+This is still a proof of concept. The plugin currently tracks the reference, critical reference, and distant reference queues used while cells are loading. Optional diagnostics can write the queue activity and calculated progress to `SkyrimLoadProgress.log`.
 
 ## How it Works
 
@@ -13,6 +15,22 @@ This is still a proof of concept. The plugin currently tracks the reference, cri
 * Keeps the displayed value from moving backward when Skyrim discovers more work during the load.
 
 The progress meter does not poll the queues. The queue totals are updated by the hooks where Skyrim changes the counters. `LoadingMenu::AdvanceMovie` is only used to display the latest calculated value.
+
+## Configuration
+
+Transition settings are read from:
+
+```text
+Data/SKSE/Plugins/SkyrimLoadProgress.toml
+```
+
+The TOML file can disable the loading meter or control its safe-zone position and width. It also controls the blur shader, warm-cell fade timing, the default cold-cell transition, and ordered rules for cell editor IDs. Cell patterns are case-insensitive and support `*` and `?` wildcards. The first matching rule wins.
+
+Loading diagnostics are disabled by default. Set `logging.loading` to write per-load and transition details. Set `logging.verbose_queues` as well to include individual queue mutations and aggregate progress samples. The `logging.loaded_entries` table can separately log normal object-reference work, references transferred between cells, and distant-reference work. Enabled entry categories include Form IDs and Editor IDs where available, plus an end-of-load tally. Startup messages, warnings, and errors are always logged.
+
+Cold transitions can use the retained frame with an optional blur, or blend to a fixed or captured dominant color. Each cold rule can override `fade_in_ms`, `hold_after_load_ms`, and `fade_out_ms`. Values omitted from a rule inherit from the global `[cold]` table. Warm transitions are global and do not use cell rules.
+
+Settings are read once when Skyrim finishes loading game data. Restart the game after changing the file.
 
 ## Current Limitations
 
@@ -33,10 +51,13 @@ The log contains:
 
 ## Installation
 
-Install the DLL to:
+Install the plugin, configuration, and meter assets to:
 
 ```text
 Data/SKSE/Plugins/SkyrimLoadProgress.dll
+Data/SKSE/Plugins/SkyrimLoadProgress.toml
+Data/Interface/SkyrimLoadProgress/LoadingProgressMeter.swf
+Data/Interface/Exported/SkyrimLoadProgress/LoadingProgressMeter.swf
 ```
 
 ## Requirements
@@ -73,7 +94,9 @@ For a debug build with the console enabled:
 
 ## Reverse Engineering Notes
 
-The current queue hooks were verified against Skyrim 1.6.1170 and 1.7.99.
+The current queue hooks were verified against Skyrim 1.6.1170, 1.7.99, and 1.7.104.
+Other runtimes supported by Address Library are attempted on a best-effort basis using
+runtime-family offsets and hook-site validation rather than a fixed runtime whitelist.
 
 | Queue | Enqueue | Complete |
 | --- | --- | --- |

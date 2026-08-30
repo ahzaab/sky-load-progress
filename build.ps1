@@ -4,12 +4,14 @@ param(
     [string]$Configuration = 'Release',
     [string]$CMakeExe,
     [string]$VsDevCmd,
-    [string]$NinjaExe
+    [string]$NinjaExe,
+    [string]$DeployTarget
 )
 
 $ErrorActionPreference = 'Stop'
 $configurePreset = if ($Configuration -eq 'Debug') { 'build-debug-msvc' } else { 'build-release-msvc' }
 $buildPreset = if ($Configuration -eq 'Debug') { 'debug-msvc' } else { 'release-msvc' }
+$binaryDirectory = Join-Path $PSScriptRoot "build\$buildPreset"
 
 if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue) -or -not $env:INCLUDE) {
     if (-not $VsDevCmd) { $VsDevCmd = $env:VCVARS64 }
@@ -35,8 +37,26 @@ try {
     & $CMakeExe --preset $configurePreset -S $PSScriptRoot "-DCMAKE_MAKE_PROGRAM=$NinjaExe"
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & $CMakeExe --build --preset $buildPreset --verbose
-    exit $LASTEXITCODE
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    if ($DeployTarget) {
+        $pluginDirectory = Join-Path $DeployTarget 'SKSE\Plugins'
+        New-Item -ItemType Directory -Path $pluginDirectory -Force | Out-Null
+
+        Copy-Item -LiteralPath "$binaryDirectory\SkyrimLoadProgress.dll" -Destination $pluginDirectory -Force
+        Copy-Item -LiteralPath "$PSScriptRoot\dist\SKSE\Plugins\SkyrimLoadProgress.toml" -Destination $pluginDirectory -Force
+
+        $interfaceSource = Join-Path $PSScriptRoot 'dist\Interface'
+        if (Test-Path -LiteralPath $interfaceSource -PathType Container) {
+            Copy-Item -LiteralPath $interfaceSource -Destination $DeployTarget -Recurse -Force
+        }
+
+        if ($Configuration -eq 'Debug') {
+            Copy-Item -LiteralPath "$binaryDirectory\SkyrimLoadProgress.pdb" -Destination $pluginDirectory -Force
+        }
+    }
+
+    exit 0
 } finally {
     Pop-Location
 }
-

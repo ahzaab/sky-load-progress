@@ -1,0 +1,138 @@
+# Skyrim Load Progress
+#
+# Install this file as Data/SKSE/Plugins/SkyrimLoadProgress.toml.
+# Settings are loaded once when Skyrim finishes loading game data. Restart the
+# game after changing this file.
+#
+# All timing values are milliseconds. Values below zero are treated as zero,
+# and values above 600000 are limited to 600000.
+
+[logging]
+# Per-load summaries and transition diagnostics can be useful when diagnosing
+# compatibility problems. Keep this off for normal play. Startup messages,
+# warnings, and errors are still written when it is false.
+loading = false
+
+# Log individual queue mutations and aggregate progress samples. This can write
+# many lines during a cold load and only takes effect when loading is also true.
+verbose_queues = false
+
+[logging.loaded_entries]
+# Log references when Skyrim actually enqueues their normal 3D or object-loading
+# work. Each entry includes the reference, base object, and cell Form IDs and
+# resolves their Editor IDs later on the game thread.
+object_references = false
+
+# Log references whose queued work is transferred from one cell to another.
+transferred_references = false
+
+# Log references added to Skyrim's distant-reference queue. This queue can
+# include LOD-related work, but it is not a direct count of generated LOD meshes.
+distant_references = false
+
+[progress_bar]
+# Set this to false to disable the loading progress meter. Queue tracking stays
+# active, while diagnostic output follows the [logging] settings above.
+enabled = true
+
+# Position is measured inside the Loading Menu safe zone. The meter's visual
+# bounds are used, so its registration point does not affect placement.
+#
+# x_percent = 0 places the meter against the left edge. x_percent = 100 places
+# its right edge against the right edge. Values in between move through the
+# remaining horizontal space after the configured meter width is subtracted.
+x_percent = 50.0
+
+# y_percent = 0 places the meter against the top edge. y_percent = 100 places
+# its bottom edge against the bottom edge.
+y_percent = 25.0
+
+# Width is a percentage of the progress meter's authored width. The center
+# stretches while the decorative end caps keep their original size. A value
+# of 100 keeps the original width, 150 is 50 percent wider, and 50 is half width.
+# Valid values are 1 through 1000. Width is limited to the safe-zone width.
+width_percent = 100.0
+
+[blur]
+# Blur applies anywhere a blur transition draws the captured frame. Set this to
+# false to draw the captured frame unchanged. Color transitions still work when
+# blur is disabled.
+enabled = true
+
+# Shader sample radius in render-target pixels. Larger values produce a stronger
+# blur. Valid values are 0.0 through 20.0. Setting this to 0.0 also disables blur.
+amount = 2.0
+
+[warm]
+# A warm cell is already resident in memory. Warm loads always use the seamless
+# captured-frame transition and never use the cell rules below.
+
+# How long the captured frame remains fully visible after the new cell renders.
+hold_after_load_ms = 0
+
+# How long the captured frame takes to blend into the new cell.
+fade_out_ms = 1000
+
+[cold]
+# A cold cell is not resident in memory, so the Loading Menu remains visible.
+# These values are the defaults for every cold load. A matching cell rule can
+# override any value; omitted rule values inherit from this table.
+
+# Available transitions:
+#   "blur"  - show the captured frame, using the global blur settings above.
+#   "color" - blend the captured frame into a fixed or dominant color.
+transition = "blur"
+
+# Color is only used when transition is "color". Use "dominant" to sample the
+# captured frame, or provide a fixed RGB color such as "#FFFFFF".
+color = "dominant"
+
+# This color is used if dominant-color sampling is unavailable or finds no
+# usable pixels. It is ignored when color contains a fixed RGB value.
+fallback_color = "#FFFFFF"
+
+# Time spent blending from the captured frame into the transition color.
+fade_in_ms = 750
+
+# Time the retained frame or transition color stays fully visible after loading.
+hold_after_load_ms = 250
+
+# Time spent blending the retained frame or color into the newly loaded cell.
+fade_out_ms = 1000
+
+# Cell rules match the destination cell's Editor ID, not its Form ID. Matching is
+# case-insensitive. Rules are checked from top to bottom and the first match wins.
+# Use '*' for any number of characters and '?' for exactly one character.
+#
+# These two rules preserve the dominant-color transition used for Apocrypha.
+[[cell_rules]]
+pattern = "DLC2Book*"
+transition = "color"
+color = "dominant"
+fallback_color = "#FFFFFF"
+fade_in_ms = 750
+hold_after_load_ms = 250
+fade_out_ms = 1000
+
+[[cell_rules]]
+pattern = "DLC2POIBook*"
+transition = "color"
+color = "dominant"
+fallback_color = "#FFFFFF"
+fade_in_ms = 750
+hold_after_load_ms = 250
+fade_out_ms = 1000
+
+# Example fixed-color rule. Remove the leading '#' characters to enable it.
+# [[cell_rules]]
+# pattern = "MyMod_AshCell*"
+# transition = "color"
+# color = "#C76A32"
+# fade_in_ms = 500
+# hold_after_load_ms = 150
+# fade_out_ms = 900
+
+# Example blur rule with timings inherited from [cold].
+# [[cell_rules]]
+# pattern = "MyMod_FrozenCave*"
+# transition = "blur"
