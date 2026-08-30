@@ -92,6 +92,18 @@ For a debug build with the console enabled:
 ./build-debug.ps1
 ```
 
+## Packaging a Release
+
+Build, validate, and create a Nexus-ready ZIP with a top-level `Data` directory:
+
+```powershell
+./Scripts/BuildRelease.ps1 -VsDevCmd J:\dev\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat
+```
+
+The version defaults to `PROJECT_VERSION` from `CMakeLists.txt`. The archive is written to
+`release/<version>/` and contains the DLL, PDB, default TOML configuration, and both Interface
+movie paths required by the plugin. Use `-SkipBuild` to package an existing validated Release build.
+
 ## Reverse Engineering Notes
 
 The current queue hooks were verified against Skyrim 1.6.1170, 1.7.99, and 1.7.104.
