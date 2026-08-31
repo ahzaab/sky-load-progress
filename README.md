@@ -26,6 +26,11 @@ Data/SKSE/Plugins/SkyrimLoadProgress.toml
 
 The TOML file can disable the loading meter or control its safe-zone position and width. It also controls the blur shader, warm-cell fade timing, the default cold-cell transition, and ordered rules for cell editor IDs. Cell patterns are case-insensitive and support `*` and `?` wildcards. The first matching rule wins.
 
+Starting a new game uses a dedicated black loading presentation. When MQ101 closes Loading Menu,
+the plugin hands presentation back to Skyrim's native FaderMenu without modifying its FaderData.
+This preserves the scripted `FadeOutGame(false, true, 14.0, 15.0)` hold and fade while allowing
+TitleSequence Menu to render at its normal higher UI depth.
+
 Loading diagnostics are disabled by default. Set `logging.loading` to write per-load and transition details. Set `logging.verbose_queues` as well to include individual queue mutations and aggregate progress samples. The `logging.loaded_entries` table can separately log normal object-reference work, references transferred between cells, and distant-reference work. Enabled entry categories include Form IDs and Editor IDs where available, plus an end-of-load tally. Startup messages, warnings, and errors are always logged.
 
 Cold transitions can use the retained frame with an optional blur, or blend to a fixed or captured dominant color. Each cold rule can override `fade_in_ms`, `hold_after_load_ms`, and `fade_out_ms`. Values omitted from a rule inherit from the global `[cold]` table. Warm transitions are global and do not use cell rules.

@@ -75,7 +75,23 @@ namespace
     // Defers hook installation until Skyrim has finished loading game data.
     void MessageHandler(SKSE::MessagingInterface::Message* a_message)
     {
-        if (a_message && a_message->type == SKSE::MessagingInterface::kDataLoaded) {
+        if (!a_message) {
+            return;
+        }
+
+        // SKSE emits this before the new game is loaded, which gives the compositor time to select its
+        // one-time black loading presentation. MQ101's later FadeOutGame call remains authoritative.
+        if (a_message->type == SKSE::MessagingInterface::kNewGame) {
+            load_progress::CellTransitioner::BeginNewGameTransition();
+            return;
+        }
+
+        if (a_message->type == SKSE::MessagingInterface::kPreLoadGame) {
+            load_progress::CellTransitioner::CancelNewGameTransition();
+            return;
+        }
+
+        if (a_message->type == SKSE::MessagingInterface::kDataLoaded) {
             try {
                 load_progress::Settings::GetSingleton().Load();
                 load_progress::transitions::InstallHooks();

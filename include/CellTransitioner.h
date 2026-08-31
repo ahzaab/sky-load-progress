@@ -39,6 +39,8 @@ namespace load_progress
         static Presentation      PrepareForLoad(RE::IMenu* a_menu);
         static void              BeginLoad();
         static void              EndLoad();
+        static void              BeginNewGameTransition();
+        static void              CancelNewGameTransition();
         static bool              IsSeamless();
         static void              DisableHooks(std::string_view) noexcept;
         static bool              IsExecutableAddress(std::uintptr_t) noexcept;
@@ -83,6 +85,7 @@ namespace load_progress
         static void              ObserveRenderWorld(bool);
         static void              CaptureBoundWorldTarget();
         static void              CaptureAfterScaleformBegin(void*);
+        static RE::UI_MESSAGE_RESULTS FaderMenuProcessMessage(RE::IMenu*, RE::UIMessage&);
         static void              FaderMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
         static void              MistMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
         static void              DisableMistMenuPostDisplay(RE::IMenu*);
@@ -103,11 +106,14 @@ namespace load_progress
         inline static std::atomic_int64_t                   loadingTransitionStart{};
         inline static std::atomic_bool                      dominantColorPending{ false };
         inline static std::atomic_uint32_t                  transitionColor{ 0xFFFFFF };
+        inline static std::atomic_bool                      newGameTransitionActive{ false };
+        inline static std::atomic_bool                      newGameFadeRequestSeen{ false };
         inline static std::atomic_uint8_t                   renderObservationState{};
         inline static std::atomic_bool                      awaitingControlRestore{ false };
         inline static std::optional<ControlState>           lastControlState;
         inline static std::mutex                            controlStateLock;
 
+        inline static RE::UI_MESSAGE_RESULTS (*originalFaderProcessMessage)(RE::IMenu*, RE::UIMessage&){};
         inline static AdvanceMovie_t                         originalFaderAdvanceMovie{};
         inline static AdvanceMovie_t                         originalMistAdvanceMovie{};
         inline static PostDisplay_t                          originalMistPostDisplay{};

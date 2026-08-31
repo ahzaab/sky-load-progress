@@ -48,6 +48,8 @@ namespace load_progress
         epochActive.store(false, std::memory_order_release);
         frozenFrameLocked.store(false, std::memory_order_release);
         awaitingControlRestore.store(false, std::memory_order_release);
+        newGameTransitionActive.store(false, std::memory_order_release);
+        newGameFadeRequestSeen.store(false, std::memory_order_release);
 
         if (!failureLogged.exchange(true, std::memory_order_acq_rel)) {
             try {
@@ -261,9 +263,17 @@ namespace load_progress
     // Starts the retained-frame fade and post-load control diagnostics.
     void CellTransitioner::EndLoad()
     {
+        // MQ101 owns its first-gameplay fade. Its native FaderMenu remains below TitleSequenceMenu, so release
+        // our loading cover without adding the ordinary post-load compositor above those title cards.
+        const bool newGame = newGameTransitionActive.load(std::memory_order_acquire);
+
         // Opening the post-load gate lets Present composite over the destination cell as soon as it returns.
         epochActive.store(false, std::memory_order_release);
-        postLoadFadeStart.store(CurrentTimeMilliseconds(), std::memory_order_release);
+        postLoadFadeStart.store(newGame ? 0 : CurrentTimeMilliseconds(), std::memory_order_release);
+        if (newGame) {
+            frozenFrameLocked.store(false, std::memory_order_release);
+            logger::info("handed the new-game transition from the loading compositor to Skyrim's FaderMenu");
+        }
 
         const auto renderState = renderObservationState.load(std::memory_order_acquire);
         if (renderState == 1 || renderState == 2) {
@@ -275,7 +285,24 @@ namespace load_progress
             lastControlState.reset();
         }
         awaitingControlRestore.store(true, std::memory_order_release);
-        CloseResidualLoadingMenus();
+        if (!newGame) {
+            CloseResidualLoadingMenus();
+        }
+    }
+
+    // Arms the one-time black loading presentation before SKSE lets Skyrim create the new game.
+    void CellTransitioner::BeginNewGameTransition()
+    {
+        newGameFadeRequestSeen.store(false, std::memory_order_release);
+        newGameTransitionActive.store(true, std::memory_order_release);
+        logger::info("armed the new-game black/title-sequence transition");
+    }
+
+    // Clears a pending intro when a save load supersedes it or transition hooks fail.
+    void CellTransitioner::CancelNewGameTransition()
+    {
+        newGameTransitionActive.store(false, std::memory_order_release);
+        newGameFadeRequestSeen.store(false, std::memory_order_release);
     }
 
     // Returns whether the current transition suppresses LoadingMenu Scaleform.
@@ -442,6 +469,22 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     // Chooses the warm or cold presentation before the Loading Menu opens.
     CellTransitioner::Presentation CellTransitioner::ChoosePresentation()
     {
+        if (newGameTransitionActive.load(std::memory_order_acquire)) {
+            // The loading compositor supplies opaque black beneath LoadingMenu. Once loading ends, Skyrim's
+            // native FaderMenu takes over so TitleSequenceMenu retains its higher UI depth.
+            transitionType.store(Settings::TransitionType::color, std::memory_order_release);
+            colorSource.store(Settings::ColorSource::fixed, std::memory_order_release);
+            transitionColor.store(0x000000, std::memory_order_release);
+            fadeInDuration.store(0, std::memory_order_release);
+            holdAfterLoad.store(0, std::memory_order_release);
+            fadeOutDuration.store(0, std::memory_order_release);
+
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::info("selected the opaque new-game loading presentation");
+            }
+            return Presentation::loadingMenu;
+        }
+
         auto*                  cell = GetQueuedDestinationCell();
         const bool             resident = cell && cell->GetRuntimeData().loadedData;
         const auto*            editorIDText = cell ? cell->GetFormEditorID() : nullptr;
@@ -1103,7 +1146,28 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
     }
 
-    // Advances FaderMenu normally while suppressing its full-screen color layer.
+    // Observes MQ101's post-load FadeOutGame(false, true, delay, duration) request without changing it.
+    RE::UI_MESSAGE_RESULTS CellTransitioner::FaderMenuProcessMessage(
+        RE::IMenu* a_menu, RE::UIMessage& a_message)
+    {
+        if (hooksEnabled.load(std::memory_order_acquire) &&
+            newGameTransitionActive.load(std::memory_order_acquire) && a_message.data &&
+            (a_message.type == RE::UI_MESSAGE_TYPE::kShow ||
+                a_message.type == RE::UI_MESSAGE_TYPE::kUpdate)) {
+            const auto* data = static_cast<const RE::FaderData*>(a_message.data);
+            if (!data->isFadingOut && data->isBlack && data->fadeDuration > 0.0F) {
+                newGameFadeRequestSeen.store(true, std::memory_order_release);
+            }
+        }
+
+        // The original receives the unmodified message and FaderData. Skyrim remains responsible for
+        // timing, the fade curve, menu lifetime, pause behavior, and TitleSequence layering.
+        return originalFaderProcessMessage ?
+                   originalFaderProcessMessage(a_menu, a_message) :
+                   RE::UI_MESSAGE_RESULTS::kPassOn;
+    }
+
+    // Advances FaderMenu normally while suppressing its full-screen color layer outside the intro.
     void CellTransitioner::FaderMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
     {
         if (originalFaderAdvanceMovie) {
@@ -1116,6 +1180,22 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
         try {
             if (a_menu && a_menu->uiMovie) {
+                if (newGameTransitionActive.load(std::memory_order_acquire)) {
+                    // Earlier main-menu frames may have left the movie hidden. Restore it so Skyrim can render
+                    // the native black fade at menu depth 3, below TitleSequenceMenu at depth 4.
+                    a_menu->uiMovie->SetVisible(true);
+
+                    const bool requestSeen = newGameFadeRequestSeen.load(std::memory_order_acquire);
+                    const bool fadeFinished =
+                        requestSeen && !static_cast<RE::FaderMenu*>(a_menu)->GetRuntimeData().isActive;
+                    if (fadeFinished) {
+                        CancelNewGameTransition();
+                        logger::info(
+                            "new-game native fade-in completed; restored custom transition suppression");
+                    }
+                    return;
+                }
+
                 // FaderMenu supplies the black or white transition over the world.
                 a_menu->uiMovie->SetBackgroundAlpha(0.0F);
                 a_menu->uiMovie->SetVisible(false);
@@ -1193,23 +1273,31 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             // Replaces the FaderMenu update gate while preserving its normal movie bookkeeping.
             void InstallFaderMenuHook()
             {
-                // CommonLib's IMenu vtable maps slot 5 to AdvanceMovie.
+                // CommonLib's IMenu vtable maps slots 4 and 5 to ProcessMessage and AdvanceMovie.
+                constexpr std::size_t           processMessageIndex = 0x04;
                 constexpr std::size_t           advanceMovieIndex = 0x05;
                 REL::Relocation<std::uintptr_t> vtable{ RE::FaderMenu::VTABLE[0] };
                 if (!vtable.address()) {
                     throw std::runtime_error("could not resolve the FaderMenu vtable");
                 }
 
-                const auto originalAddress = *reinterpret_cast<const std::uintptr_t*>(
+                const auto originalProcessAddress = *reinterpret_cast<const std::uintptr_t*>(
+                    vtable.address() + processMessageIndex * sizeof(std::uintptr_t));
+                const auto originalAdvanceAddress = *reinterpret_cast<const std::uintptr_t*>(
                     vtable.address() + advanceMovieIndex * sizeof(std::uintptr_t));
-                if (!CellTransitioner::IsExecutableAddress(originalAddress)) {
-                    throw std::runtime_error("FaderMenu::AdvanceMovie had no original function");
+                if (!CellTransitioner::IsExecutableAddress(originalProcessAddress) ||
+                    !CellTransitioner::IsExecutableAddress(originalAdvanceAddress)) {
+                    throw std::runtime_error("FaderMenu hooks had no original function");
                 }
 
+                CellTransitioner::originalFaderProcessMessage =
+                    reinterpret_cast<decltype(CellTransitioner::originalFaderProcessMessage)>(
+                        originalProcessAddress);
                 CellTransitioner::originalFaderAdvanceMovie =
-                    reinterpret_cast<CellTransitioner::AdvanceMovie_t>(originalAddress);
+                    reinterpret_cast<CellTransitioner::AdvanceMovie_t>(originalAdvanceAddress);
+                vtable.write_vfunc(processMessageIndex, CellTransitioner::FaderMenuProcessMessage);
                 vtable.write_vfunc(advanceMovieIndex, CellTransitioner::FaderMenuAdvanceMovie);
-                logger::info("installed hidden FaderMenu::AdvanceMovie experiment hook");
+                logger::info("installed FaderMenu message and hidden-presentation hooks");
             }
 
             // Replaces both MistMenu gates: AdvanceMovie state and its native post-display render pass.
