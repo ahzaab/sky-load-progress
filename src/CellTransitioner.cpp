@@ -1405,32 +1405,16 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
     }
 
-    // Advances MistMenu while disabling its mist and model rendering flags.
-    void CellTransitioner::MistMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
+    // Suppresses MistMenu presentation only while our loading compositor owns the screen. AdvanceMovie
+    // remains completely native: showMist and showLoadScreen are initialization guards, not visibility flags.
+    void CellTransitioner::MistMenuPostDisplay(RE::IMenu* a_menu)
     {
-        if (originalMistAdvanceMovie) {
-            originalMistAdvanceMovie(a_menu, a_interval, a_currentTime);
-        }
-        if (!hooksEnabled.load(std::memory_order_acquire) || !a_menu) {
-            return;
-        }
-
-        try {
-            auto* mistMenu = static_cast<RE::MistMenu*>(a_menu);
-            auto& runtimeData = mistMenu->GetRuntimeData();
-            runtimeData.showMist = false;
-            runtimeData.showLoadScreen = false;
-        } catch (const std::exception& error) {
-            DisableHooks(error.what());
-        } catch (...) {
-            DisableHooks("unknown exception in MistMenu::AdvanceMovie");
-        }
-    }
-
-    // Replaces MistMenu's post-display render pass with an intentional no-op.
-    void CellTransitioner::DisableMistMenuPostDisplay(RE::IMenu* a_menu)
-    {
-        if (!hooksEnabled.load(std::memory_order_acquire) && originalMistPostDisplay) {
+        const bool suppressPresentation =
+            hooksEnabled.load(std::memory_order_acquire) &&
+            (epochActive.load(std::memory_order_acquire) ||
+                postLoadFadeStart.load(std::memory_order_acquire) > 0 ||
+                newGameTransitionActive.load(std::memory_order_acquire));
+        if (!suppressPresentation && originalMistPostDisplay) {
             originalMistPostDisplay(a_menu);
         }
     }
@@ -1491,33 +1475,26 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 logger::info("installed load-owned FaderMenu tracking hooks");
             }
 
-            // Replaces both MistMenu gates: AdvanceMovie state and its native post-display render pass.
+            // Suppresses MistMenu drawing only while the transition compositor owns presentation.
             void InstallMistMenuHooks()
             {
-                // CommonLib's IMenu vtable maps slot 5 to AdvanceMovie and slot 6 to PostDisplay.
-                constexpr std::size_t           advanceMovieIndex = 0x05;
+                // AdvanceMovie remains native so MistMenu can initialize and update its scene graph normally.
                 constexpr std::size_t           postDisplayIndex = 0x06;
                 REL::Relocation<std::uintptr_t> vtable{ RE::MistMenu::VTABLE[0] };
                 if (!vtable.address()) {
                     throw std::runtime_error("could not resolve the MistMenu vtable");
                 }
 
-                const auto originalAddress = *reinterpret_cast<const std::uintptr_t*>(
-                    vtable.address() + advanceMovieIndex * sizeof(std::uintptr_t));
                 const auto postDisplayAddress = *reinterpret_cast<const std::uintptr_t*>(
                     vtable.address() + postDisplayIndex * sizeof(std::uintptr_t));
-                if (!CellTransitioner::IsExecutableAddress(originalAddress) ||
-                    !CellTransitioner::IsExecutableAddress(postDisplayAddress)) {
-                    throw std::runtime_error("MistMenu::AdvanceMovie had no original function");
+                if (!CellTransitioner::IsExecutableAddress(postDisplayAddress)) {
+                    throw std::runtime_error("MistMenu::PostDisplay had no original function");
                 }
 
-                CellTransitioner::originalMistAdvanceMovie =
-                    reinterpret_cast<CellTransitioner::AdvanceMovie_t>(originalAddress);
                 CellTransitioner::originalMistPostDisplay =
                     reinterpret_cast<CellTransitioner::PostDisplay_t>(postDisplayAddress);
-                vtable.write_vfunc(advanceMovieIndex, CellTransitioner::MistMenuAdvanceMovie);
-                vtable.write_vfunc(postDisplayIndex, CellTransitioner::DisableMistMenuPostDisplay);
-                logger::info("disabled MistMenu mist, background, and load-screen model rendering");
+                vtable.write_vfunc(postDisplayIndex, CellTransitioner::MistMenuPostDisplay);
+                logger::info("installed load-scoped MistMenu presentation hook");
             }
 
             // Observes the normal world-render call without changing when Skyrim is allowed to render.
