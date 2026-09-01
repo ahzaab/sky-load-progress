@@ -137,7 +137,6 @@ namespace load_progress
         inline static ::ID3D11PixelShader*                   loadingOverlayShader{};
         inline static bool                                   loggedFrozenFrame{};
         inline static bool                                   loggedFrozenPresentation{};
-        inline static std::atomic_bool                       loggedSeparateUIPath{ false };
 
     private:
         CellTransitioner() = default;

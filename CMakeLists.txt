@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SkyrimLoadProgress VERSION 1.0.0.0 LANGUAGES CXX DESCRIPTION "Skyrim cell loading progress instrumentation")
+project(SkyrimLoadProgress VERSION 1.0.1.0 LANGUAGES CXX DESCRIPTION "Skyrim cell loading progress instrumentation")
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

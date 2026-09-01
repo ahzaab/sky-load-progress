@@ -10,8 +10,8 @@
 // Cell transition injection overview
 //
 // Skyrim normally stops presenting the world as a continuous scene while LoadingMenu, FaderMenu,
-// MistMenu, and the loading image-space modifiers cover the cell change. This experiment leaves the
-// engine's loading work and render scheduling alone, but replaces those visual gates:
+// MistMenu, and loading fades cover the cell change. The transition compositor leaves the engine's
+// loading work and render scheduling alone while replacing only the load-owned presentation:
 //
 // 1. InstallWorldCaptureHook finds the Scaleform-begin call by its Address Library callee, then patches
 //    that call in Skyrim's UI render path. The original call binds the UI render target; our callback
@@ -29,17 +29,18 @@
 //    or transition color over the newly rendered cell. Once the fade ends, the frame is unlocked and
 //    rolling capture resumes.
 //
-// FaderMenu, MistMenu, and form-backed image-space hooks only remove Skyrim's competing black, mist,
-// model, and fade layers. The RenderWorld hook is observational; it does not force the renderer to run.
+// FaderMenu tracking hides only native load fades during the transition window. Scripted fades and
+// image-space modifiers keep their original behavior. MistMenu hooks remove its mist/model layer, and
+// the RenderWorld hook is observational; it does not force the renderer to run.
 
 namespace load_progress
 {
     namespace
     {
-        std::string_view GetNativeLoadFadeOrigin(const RE::FaderData& a_data)
+        bool IsNativeLoadFade(const RE::FaderData& a_data)
         {
             if (!a_data.unk10) {
-                return {};
+                return false;
             }
 
             const auto callbackVtable =
@@ -53,19 +54,10 @@ namespace load_progress
             static REL::Relocation<std::uintptr_t> loadSave{
                 RE::VTABLE___FadeThenLoadCallback[0] };
 
-            if (callbackVtable == normalDoor.address()) {
-                return "normal-door";
-            }
-            if (callbackVtable == autoDoor.address()) {
-                return "auto-door";
-            }
-            if (callbackVtable == fastTravel.address()) {
-                return "fast-travel";
-            }
-            if (callbackVtable == loadSave.address()) {
-                return "load-save";
-            }
-            return {};
+            return callbackVtable == normalDoor.address() ||
+                   callbackVtable == autoDoor.address() ||
+                   callbackVtable == fastTravel.address() ||
+                   callbackVtable == loadSave.address();
         }
     }
 
@@ -668,7 +660,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             loadingOverlay->Release();
             loadingOverlay = nullptr;
         }
-
     }
 
     // Allocates the frozen frame, CPU readback, and Scaleform overlay textures.
@@ -1149,17 +1140,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                         viewportCount, previousViewports.data());
                                 }
 
-                                if (!loggedSeparateUIPath.exchange(
-                                        true, std::memory_order_acq_rel)) {
-                                    logger::info(
-                                        "using separate-UI scene compositor: scene format={}, UI format={}",
-                                        std::to_underlying(sceneDesc.format),
-                                        [&] {
-                                            REX::W32::D3D11_TEXTURE2D_DESC uiDesc{};
-                                            boundTexture->GetDesc(&uiDesc);
-                                            return std::to_underlying(uiDesc.format);
-                                        }());
-                                }
                             }
                         } else {
                             // Vanilla path: the completed back buffer contains both scene and Scaleform.
@@ -1327,15 +1307,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 (a_message.type == RE::UI_MESSAGE_TYPE::kShow ||
                     a_message.type == RE::UI_MESSAGE_TYPE::kUpdate)) {
                 const auto* data = static_cast<const RE::FaderData*>(a_message.data);
-                const auto loadOrigin = GetNativeLoadFadeOrigin(*data);
-                if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                    logger::info(
-                        "FaderMenu request: type={} fadingOut={} black={} pausesGame={} duration={:.3f}s "
-                        "loading={} postLoad={} origin={}",
-                        a_message.type.underlying(), data->isFadingOut, data->isBlack,
-                        data->pausesGame, data->fadeDuration, activeEpoch, postLoadTransition,
-                        loadOrigin.empty() ? "other" : loadOrigin);
-                }
 
                 if (newGameTransitionActive.load(std::memory_order_acquire)) {
                     if (!data->isFadingOut && data->isBlack && data->fadeDuration > 0.0F) {
@@ -1345,7 +1316,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     // Static xrefs show that native load fades carry one of four dedicated completion
                     // callbacks. Papyrus FadeOutGame uses the separate callback-free builder, so this
                     // claims the initiating fader without suppressing arbitrary scripted fades.
-                    if (!loadOrigin.empty() && data->isBlack) {
+                    if (IsNativeLoadFade(*data) && data->isBlack) {
                         loadOwnedFader.store(true, std::memory_order_release);
                         if (!activeEpoch && !postLoadTransition) {
                             preLoadOwnedFader.store(true, std::memory_order_release);
@@ -1365,8 +1336,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     }
 
                     if (activeEpoch &&
-                               !faderPresentAtLoadStart.load(std::memory_order_acquire) &&
-                               data->isBlack) {
+                        !faderPresentAtLoadStart.load(std::memory_order_acquire) &&
+                        data->isBlack) {
                         loadOwnedFader.store(true, std::memory_order_release);
                     }
                 }
@@ -1386,9 +1357,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (queuePostLoadClose) {
             if (auto* messages = RE::UIMessageQueue::GetSingleton()) {
                 messages->AddMessage(RE::FaderMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
-                if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                    logger::info("queued immediate closure of the post-load control-blocking FaderMenu");
-                }
             }
         }
 
@@ -1486,10 +1454,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
         if (ui->IsMenuOpen(RE::MistMenu::MENU_NAME)) {
             messages->AddMessage(RE::MistMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
-        }
-        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            logger::info(
-                "queued closure of residual loading menus (load-owned fader: {})", closeFader);
         }
     }
 
