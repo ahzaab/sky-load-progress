@@ -750,7 +750,15 @@ namespace load_progress
         const RE::MenuOpenCloseEvent* a_event,
         RE::BSTEventSource<RE::MenuOpenCloseEvent>*)
     {
-        if (!a_event || a_event->menuName != RE::LoadingMenu::MENU_NAME) {
+        if (!a_event) {
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
+        if (a_event->menuName == RE::MainMenu::MENU_NAME && a_event->opening) {
+            CellTransitioner::ObserveMainMenuOpening();
+        }
+
+        if (a_event->menuName != RE::LoadingMenu::MENU_NAME) {
             return RE::BSEventNotifyControl::kContinue;
         }
 

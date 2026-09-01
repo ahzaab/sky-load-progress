@@ -345,6 +345,12 @@ namespace load_progress
         newGameFadeRequestSeen.store(false, std::memory_order_release);
     }
 
+    // Remembers the Main Menu as the origin after its movie closes and before LoadingMenu opens.
+    void CellTransitioner::ObserveMainMenuOpening()
+    {
+        mainMenuLoadPending.store(true, std::memory_order_release);
+    }
+
     // Returns whether the current transition suppresses LoadingMenu Scaleform.
     bool CellTransitioner::IsSeamless()
     {
@@ -509,7 +515,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     // Chooses the warm or cold presentation before the Loading Menu opens.
     CellTransitioner::Presentation CellTransitioner::ChoosePresentation()
     {
+        mainMenuLoadActive.store(false, std::memory_order_release);
+
         if (newGameTransitionActive.load(std::memory_order_acquire)) {
+            mainMenuLoadPending.store(false, std::memory_order_release);
             // The loading compositor supplies opaque black beneath LoadingMenu. Once loading ends, Skyrim's
             // native FaderMenu takes over so TitleSequenceMenu retains its higher UI depth.
             transitionType.store(Settings::TransitionType::color, std::memory_order_release);
@@ -529,6 +538,29 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         const bool             resident = cell && cell->GetRuntimeData().loadedData;
         const auto*            editorIDText = cell ? cell->GetFormEditorID() : nullptr;
         const std::string_view editorID = editorIDText ? editorIDText : "";
+
+        auto*      ui = RE::UI::GetSingleton();
+        const bool fromMainMenu = mainMenuLoadPending.exchange(false, std::memory_order_acq_rel) ||
+                                  (ui && ui->IsMenuOpen(RE::MainMenu::MENU_NAME));
+        if (fromMainMenu) {
+            // A menu movie is not a useful retained gameplay frame. Keep Skyrim's native fade to black,
+            // then hold that same fixed black beneath LoadingMenu and fade it into the loaded save.
+            const auto& cold = Settings::GetSingleton().GetColdTransition(editorID);
+            mainMenuLoadActive.store(true, std::memory_order_release);
+            transitionType.store(Settings::TransitionType::color, std::memory_order_release);
+            colorSource.store(Settings::ColorSource::fixed, std::memory_order_release);
+            transitionColor.store(0x000000, std::memory_order_release);
+            fadeInDuration.store(0, std::memory_order_release);
+            holdAfterLoad.store(cold.holdAfterLoad.count(), std::memory_order_release);
+            fadeOutDuration.store(cold.fadeOut.count(), std::memory_order_release);
+
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::info(
+                    "selected fixed black main-menu loading presentation: cell={:08X} editorID='{}' hold={}ms fadeOut={}ms",
+                    cell ? cell->GetFormID() : 0, editorID, holdAfterLoad.load(), fadeOutDuration.load());
+            }
+            return Presentation::loadingMenu;
+        }
 
         const auto selected = resident ? Presentation::seamless : Presentation::loadingMenu;
         if (selected == Presentation::seamless) {
@@ -931,10 +963,18 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         const auto destination = GetDestinationRect(a_desc);
-        DrawFullscreenLayer(a_context, frozenFrameView, destination, commonStates->Opaque(),
-            commonStates->LinearClamp(), GetFrozenFrameShader());
+        if (mainMenuLoadActive.load(std::memory_order_acquire)) {
+            // Never expose the captured Main Menu movie or its text. The solid shader ignores the
+            // retained texture and supplies the same black cover used for the post-load fade.
+            DrawFullscreenLayer(a_context, frozenFrameView, destination, commonStates->Opaque(), nullptr,
+                solidColorShader, TransitionColor(1.0F));
+        } else {
+            DrawFullscreenLayer(a_context, frozenFrameView, destination, commonStates->Opaque(),
+                commonStates->LinearClamp(), GetFrozenFrameShader());
+        }
 
-        if (transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color) {
+        if (!mainMenuLoadActive.load(std::memory_order_acquire) &&
+            transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color) {
             const auto now = CurrentTimeMilliseconds();
             auto       start = loadingTransitionStart.load(std::memory_order_acquire);
             if (start == 0) {
@@ -987,6 +1027,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (fadeElapsed >= duration) {
             postLoadFadeStart.store(0, std::memory_order_release);
             frozenFrameLocked.store(false, std::memory_order_release);
+            mainMenuLoadActive.store(false, std::memory_order_release);
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("post-load frozen-frame crossfade completed");
             }
