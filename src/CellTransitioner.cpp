@@ -34,6 +34,41 @@
 
 namespace load_progress
 {
+    namespace
+    {
+        std::string_view GetNativeLoadFadeOrigin(const RE::FaderData& a_data)
+        {
+            if (!a_data.unk10) {
+                return {};
+            }
+
+            const auto callbackVtable =
+                *reinterpret_cast<const std::uintptr_t*>(a_data.unk10);
+            static REL::Relocation<std::uintptr_t> normalDoor{
+                RE::VTABLE___NormalDoorFadeCallback[0] };
+            static REL::Relocation<std::uintptr_t> autoDoor{
+                RE::VTABLE___AutoDoorFadeCallback[0] };
+            static REL::Relocation<std::uintptr_t> fastTravel{
+                RE::VTABLE___FadeThenFastTravelCallback[0] };
+            static REL::Relocation<std::uintptr_t> loadSave{
+                RE::VTABLE___FadeThenLoadCallback[0] };
+
+            if (callbackVtable == normalDoor.address()) {
+                return "normal-door";
+            }
+            if (callbackVtable == autoDoor.address()) {
+                return "auto-door";
+            }
+            if (callbackVtable == fastTravel.address()) {
+                return "fast-travel";
+            }
+            if (callbackVtable == loadSave.address()) {
+                return "load-save";
+            }
+            return {};
+        }
+    }
+
     // Returns the singleton that owns all cell-transition state.
     CellTransitioner& CellTransitioner::GetSingleton()
     {
@@ -47,6 +82,9 @@ namespace load_progress
         hooksEnabled.store(false, std::memory_order_release);
         epochActive.store(false, std::memory_order_release);
         frozenFrameLocked.store(false, std::memory_order_release);
+        preLoadOwnedFader.store(false, std::memory_order_release);
+        loadOwnedFader.store(false, std::memory_order_release);
+        loadFaderCloseQueued.store(false, std::memory_order_release);
         awaitingControlRestore.store(false, std::memory_order_release);
         newGameTransitionActive.store(false, std::memory_order_release);
         newGameFadeRequestSeen.store(false, std::memory_order_release);
@@ -255,6 +293,16 @@ namespace load_progress
     // Marks the transition as actively loading.
     void CellTransitioner::BeginLoad()
     {
+        auto* ui = RE::UI::GetSingleton();
+        faderPresentAtLoadStart.store(
+            ui && ui->IsMenuOpen(RE::FaderMenu::MENU_NAME), std::memory_order_release);
+        // The native fader that initiates a door, fast-travel, or save load is submitted before
+        // LoadingMenu opens. Preserve the callback-derived ownership across that boundary.
+        loadOwnedFader.store(
+            preLoadOwnedFader.exchange(false, std::memory_order_acq_rel),
+            std::memory_order_release);
+        loadFaderCloseQueued.store(false, std::memory_order_release);
+
         // Present uses this gate to choose an active loading presentation instead of the post-load fade.
         epochActive.store(true, std::memory_order_release);
         renderObservationState.store(1, std::memory_order_release);
@@ -620,6 +668,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             loadingOverlay->Release();
             loadingOverlay = nullptr;
         }
+
     }
 
     // Allocates the frozen frame, CPU readback, and Scaleform overlay textures.
@@ -877,16 +926,18 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     void CellTransitioner::PresentLoadingMenuFrame(
         REX::W32::ID3D11DeviceContext*        a_context,
         REX::W32::ID3D11Texture2D*            a_backBuffer,
-        const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
+        const REX::W32::D3D11_TEXTURE2D_DESC& a_desc,
+        bool                                  a_separateUI)
     {
         if (!a_context || !a_backBuffer || !commonStates || !MatchesFrozenFrame(a_desc) ||
-            !frozenFrameView || !loadingOverlay || !loadingOverlayView) {
+            !frozenFrameView || (!a_separateUI && (!loadingOverlay || !loadingOverlayView))) {
             return;
         }
 
-        // Present runs after the UI pass, so the back buffer now contains the LoadingMenu widgets. Save that
-        // result before replacing its background; loadingOverlayShader reconstructs usable alpha later.
-        a_context->CopyResource(loadingOverlay, a_backBuffer);
+        if (!a_separateUI) {
+            // Vanilla renders Scaleform into the scene target. Save it so its widgets can be restored.
+            a_context->CopyResource(loadingOverlay, a_backBuffer);
+        }
 
         const auto destination = GetDestinationRect(a_desc);
         DrawFullscreenLayer(a_context, frozenFrameView, destination, commonStates->Opaque(),
@@ -917,9 +968,11 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 solidColorShader, TransitionColor(colorAlpha));
         }
 
-        // Recover the menu's effective alpha and composite its widgets above our replacement background.
-        DrawFullscreenLayer(a_context, loadingOverlayView, destination, commonStates->NonPremultiplied(), nullptr,
-            loadingOverlayShader);
+        if (!a_separateUI) {
+            // Recover the menu's effective alpha and composite its widgets above our replacement background.
+            DrawFullscreenLayer(a_context, loadingOverlayView, destination, commonStates->NonPremultiplied(), nullptr,
+                loadingOverlayShader);
+        }
     }
 
     // Draws the retained frame over the new cell until the post-load crossfade ends.
@@ -973,7 +1026,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     void CellTransitioner::CompositeLoadingFrame(
         REX::W32::ID3D11DeviceContext*        a_context,
         REX::W32::ID3D11Texture2D*            a_backBuffer,
-        const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
+        const REX::W32::D3D11_TEXTURE2D_DESC& a_desc,
+        bool                                  a_separateUI)
     {
         if (!a_context || !a_backBuffer || !spriteBatch || !commonStates) {
             return;
@@ -997,7 +1051,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return;
         }
 
-        PresentLoadingMenuFrame(a_context, a_backBuffer, a_desc);
+        PresentLoadingMenuFrame(a_context, a_backBuffer, a_desc, a_separateUI);
     }
 
     // Hooks IDXGISwapChain::Present to composite the retained loading frame.
@@ -1023,10 +1077,96 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
 
                     if (device && context) {
-                        // Draw into Skyrim's completed back buffer before handing it to the real Present.
-                        REX::W32::D3D11_TEXTURE2D_DESC desc{};
-                        backBuffer->GetDesc(&desc);
-                        CompositeLoadingFrame(context, backBuffer.Get(), desc);
+                        const bool transitionActive =
+                            epochActive.load(std::memory_order_acquire) ||
+                            postLoadFadeStart.load(std::memory_order_acquire) > 0;
+
+                        auto& framebuffer = renderer->GetRuntimeData().renderTargets[
+                            RE::RENDER_TARGET::kFRAMEBUFFER];
+
+                        REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> boundView;
+                        REX::W32::ComPtr<REX::W32::ID3D11DepthStencilView> boundDepth;
+                        REX::W32::ComPtr<REX::W32::ID3D11Resource> boundResource;
+                        REX::W32::ComPtr<REX::W32::ID3D11Texture2D> boundTexture;
+                        REX::W32::ComPtr<REX::W32::ID3D11Resource> sceneResource;
+                        REX::W32::ComPtr<REX::W32::ID3D11Texture2D> sceneTexture;
+                        context->OMGetRenderTargets(
+                            1, boundView.GetAddressOf(), boundDepth.GetAddressOf());
+                        if (boundView.Get()) {
+                            boundView->GetResource(boundResource.GetAddressOf());
+                            if (boundResource.Get()) {
+                                boundResource->QueryInterface(
+                                    REX::W32::IID_ID3D11Texture2D,
+                                    reinterpret_cast<void**>(boundTexture.GetAddressOf()));
+                            }
+                        }
+                        if (framebuffer.SRV) {
+                            reinterpret_cast<REX::W32::ID3D11ShaderResourceView*>(
+                                framebuffer.SRV)->GetResource(sceneResource.GetAddressOf());
+                            if (sceneResource.Get()) {
+                                sceneResource->QueryInterface(
+                                    REX::W32::IID_ID3D11Texture2D,
+                                    reinterpret_cast<void**>(sceneTexture.GetAddressOf()));
+                            }
+                        }
+
+                        // Community Shaders redirects Scaleform to a separate transparent UI target while
+                        // retaining the scene in kFRAMEBUFFER.SRV. Composite into the scene so its
+                        // HDR/frame-generation present chain can combine our transition with that UI.
+                        const bool separateUI =
+                            transitionActive && sceneTexture.Get() && boundTexture.Get() &&
+                            sceneTexture.Get() != boundTexture.Get();
+                        if (separateUI) {
+                            REX::W32::D3D11_TEXTURE2D_DESC sceneDesc{};
+                            sceneTexture->GetDesc(&sceneDesc);
+
+                            REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> sceneView;
+                            if (device->CreateRenderTargetView(
+                                    sceneTexture.Get(), nullptr, sceneView.GetAddressOf()) >= 0 &&
+                                sceneView.Get()) {
+                                std::array<REX::W32::D3D11_VIEWPORT,
+                                    D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE>
+                                    previousViewports{};
+                                std::uint32_t viewportCount =
+                                    static_cast<std::uint32_t>(previousViewports.size());
+                                context->RSGetViewports(&viewportCount, previousViewports.data());
+
+                                auto* target = sceneView.Get();
+                                context->OMSetRenderTargets(1, &target, nullptr);
+                                const REX::W32::D3D11_VIEWPORT viewport{
+                                    0.0F, 0.0F, static_cast<float>(sceneDesc.width),
+                                    static_cast<float>(sceneDesc.height), 0.0F, 1.0F };
+                                context->RSSetViewports(1, &viewport);
+
+                                CompositeLoadingFrame(context, sceneTexture.Get(), sceneDesc, true);
+
+                                auto* previousTarget = boundView.Get();
+                                context->OMSetRenderTargets(
+                                    previousTarget ? 1U : 0U,
+                                    previousTarget ? &previousTarget : nullptr, boundDepth.Get());
+                                if (viewportCount > 0) {
+                                    context->RSSetViewports(
+                                        viewportCount, previousViewports.data());
+                                }
+
+                                if (!loggedSeparateUIPath.exchange(
+                                        true, std::memory_order_acq_rel)) {
+                                    logger::info(
+                                        "using separate-UI scene compositor: scene format={}, UI format={}",
+                                        std::to_underlying(sceneDesc.format),
+                                        [&] {
+                                            REX::W32::D3D11_TEXTURE2D_DESC uiDesc{};
+                                            boundTexture->GetDesc(&uiDesc);
+                                            return std::to_underlying(uiDesc.format);
+                                        }());
+                                }
+                            }
+                        } else {
+                            // Vanilla path: the completed back buffer contains both scene and Scaleform.
+                            REX::W32::D3D11_TEXTURE2D_DESC desc{};
+                            backBuffer->GetDesc(&desc);
+                            CompositeLoadingFrame(context, backBuffer.Get(), desc);
+                        }
                     }
                 }
             } catch (const std::exception& error) {
@@ -1094,28 +1234,52 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         REX::W32::ComPtr<REX::W32::ID3D11Resource>  resource;
-        REX::W32::ComPtr<REX::W32::ID3D11Texture2D> renderTarget;
+        REX::W32::ComPtr<REX::W32::ID3D11Texture2D> boundTarget;
         renderTargetView->GetResource(resource.GetAddressOf());
 
         const bool isTexture = resource.Get() &&
                                resource->QueryInterface(REX::W32::IID_ID3D11Texture2D,
-                                   reinterpret_cast<void**>(renderTarget.GetAddressOf())) >= 0 &&
-                               renderTarget.Get();
+                                   reinterpret_cast<void**>(boundTarget.GetAddressOf())) >= 0 &&
+                               boundTarget.Get();
         if (!isTexture) {
             logger::warn("bound UI render target was not a texture");
         } else {
+            auto& framebuffer = renderer->GetRuntimeData().renderTargets[
+                RE::RENDER_TARGET::kFRAMEBUFFER];
+            REX::W32::ComPtr<REX::W32::ID3D11Resource> framebufferResource;
+            REX::W32::ComPtr<REX::W32::ID3D11Texture2D> framebufferScene;
+            if (framebuffer.SRV) {
+                reinterpret_cast<REX::W32::ID3D11ShaderResourceView*>(
+                    framebuffer.SRV)->GetResource(framebufferResource.GetAddressOf());
+                if (framebufferResource.Get()) {
+                    framebufferResource->QueryInterface(
+                        REX::W32::IID_ID3D11Texture2D,
+                        reinterpret_cast<void**>(framebufferScene.GetAddressOf()));
+                }
+            }
+
+            auto* renderTarget =
+                framebufferScene.Get() && framebufferScene.Get() != boundTarget.Get() ?
+                    framebufferScene.Get() :
+                    boundTarget.Get();
+
             REX::W32::D3D11_TEXTURE2D_DESC desc{};
             renderTarget->GetDesc(&desc);
 
             if (PrepareFrozenFrame(device, desc)) {
-                // This target contains the world but not the Scaleform pass that follows this hook.
-                context->CopyResource(frozenFrame, renderTarget.Get());
+                // With a redirected UI target, kFRAMEBUFFER.SRV retains the completed scene.
+                context->CopyResource(frozenFrame, renderTarget);
                 loggedFrozenPresentation = false;
 
                 if (!loggedFrozenFrame) {
                     if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                         logger::info(
-                            "capturing rolling {}x{} world frames before Scaleform", desc.width, desc.height);
+                            "capturing rolling {}x{} world frames before Scaleform ({})",
+                            desc.width, desc.height,
+                            renderTarget == framebufferScene.Get() &&
+                                    framebufferScene.Get() != boundTarget.Get() ?
+                                "separate scene target" :
+                                "bound target");
                     }
                     loggedFrozenFrame = true;
                 }
@@ -1144,30 +1308,94 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 DisableHooks("unknown exception in the world-frame capture");
             }
         }
+
     }
 
-    // Observes MQ101's post-load FadeOutGame(false, true, delay, duration) request without changing it.
+    // Observes native fade requests, protecting only our internal rolling capture while Skyrim fades out.
+    // The original FaderData and menu behavior remain untouched for script-driven fades and image modifiers.
     RE::UI_MESSAGE_RESULTS CellTransitioner::FaderMenuProcessMessage(
         RE::IMenu* a_menu, RE::UIMessage& a_message)
     {
-        if (hooksEnabled.load(std::memory_order_acquire) &&
-            newGameTransitionActive.load(std::memory_order_acquire) && a_message.data &&
-            (a_message.type == RE::UI_MESSAGE_TYPE::kShow ||
-                a_message.type == RE::UI_MESSAGE_TYPE::kUpdate)) {
-            const auto* data = static_cast<const RE::FaderData*>(a_message.data);
-            if (!data->isFadingOut && data->isBlack && data->fadeDuration > 0.0F) {
-                newGameFadeRequestSeen.store(true, std::memory_order_release);
+        bool queuePostLoadClose = false;
+
+        if (hooksEnabled.load(std::memory_order_acquire)) {
+            const bool activeEpoch = epochActive.load(std::memory_order_acquire);
+            const bool postLoadTransition =
+                postLoadFadeStart.load(std::memory_order_acquire) > 0;
+
+            if (a_message.data &&
+                (a_message.type == RE::UI_MESSAGE_TYPE::kShow ||
+                    a_message.type == RE::UI_MESSAGE_TYPE::kUpdate)) {
+                const auto* data = static_cast<const RE::FaderData*>(a_message.data);
+                const auto loadOrigin = GetNativeLoadFadeOrigin(*data);
+                if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                    logger::info(
+                        "FaderMenu request: type={} fadingOut={} black={} pausesGame={} duration={:.3f}s "
+                        "loading={} postLoad={} origin={}",
+                        a_message.type.underlying(), data->isFadingOut, data->isBlack,
+                        data->pausesGame, data->fadeDuration, activeEpoch, postLoadTransition,
+                        loadOrigin.empty() ? "other" : loadOrigin);
+                }
+
+                if (newGameTransitionActive.load(std::memory_order_acquire)) {
+                    if (!data->isFadingOut && data->isBlack && data->fadeDuration > 0.0F) {
+                        newGameFadeRequestSeen.store(true, std::memory_order_release);
+                    }
+                } else {
+                    // Static xrefs show that native load fades carry one of four dedicated completion
+                    // callbacks. Papyrus FadeOutGame uses the separate callback-free builder, so this
+                    // claims the initiating fader without suppressing arbitrary scripted fades.
+                    if (!loadOrigin.empty() && data->isBlack) {
+                        loadOwnedFader.store(true, std::memory_order_release);
+                        if (!activeEpoch && !postLoadTransition) {
+                            preLoadOwnedFader.store(true, std::memory_order_release);
+                        }
+                    }
+
+                    // Skyrim can enqueue its control-blocking load fader a few milliseconds after
+                    // LoadingMenu closes. Keep ownership through our post-load crossfade and close it
+                    // immediately; non-pausing script fades outside this transition window are untouched.
+                    if (data->isBlack && data->pausesGame &&
+                        (activeEpoch || postLoadTransition)) {
+                        loadOwnedFader.store(true, std::memory_order_release);
+                        if (postLoadTransition &&
+                            !loadFaderCloseQueued.exchange(true, std::memory_order_acq_rel)) {
+                            queuePostLoadClose = true;
+                        }
+                    }
+
+                    if (activeEpoch &&
+                               !faderPresentAtLoadStart.load(std::memory_order_acquire) &&
+                               data->isBlack) {
+                        loadOwnedFader.store(true, std::memory_order_release);
+                    }
+                }
+            } else if (a_message.type == RE::UI_MESSAGE_TYPE::kHide && !activeEpoch) {
+                preLoadOwnedFader.store(false, std::memory_order_release);
+                loadOwnedFader.store(false, std::memory_order_release);
+                loadFaderCloseQueued.store(false, std::memory_order_release);
             }
         }
 
         // The original receives the unmodified message and FaderData. Skyrim remains responsible for
         // timing, the fade curve, menu lifetime, pause behavior, and TitleSequence layering.
-        return originalFaderProcessMessage ?
-                   originalFaderProcessMessage(a_menu, a_message) :
-                   RE::UI_MESSAGE_RESULTS::kPassOn;
+        const auto result = originalFaderProcessMessage ?
+                                originalFaderProcessMessage(a_menu, a_message) :
+                                RE::UI_MESSAGE_RESULTS::kPassOn;
+
+        if (queuePostLoadClose) {
+            if (auto* messages = RE::UIMessageQueue::GetSingleton()) {
+                messages->AddMessage(RE::FaderMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
+                if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                    logger::info("queued immediate closure of the post-load control-blocking FaderMenu");
+                }
+            }
+        }
+
+        return result;
     }
 
-    // Advances FaderMenu normally while suppressing its full-screen color layer outside the intro.
+    // Advances every FaderMenu normally and hides only the fade-in owned by the active ordinary load.
     void CellTransitioner::FaderMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
     {
         if (originalFaderAdvanceMovie) {
@@ -1181,8 +1409,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         try {
             if (a_menu && a_menu->uiMovie) {
                 if (newGameTransitionActive.load(std::memory_order_acquire)) {
-                    // Earlier main-menu frames may have left the movie hidden. Restore it so Skyrim can render
-                    // the native black fade at menu depth 3, below TitleSequenceMenu at depth 4.
+                    // Keep Skyrim's native black fade at menu depth 3, below TitleSequenceMenu at depth 4.
                     a_menu->uiMovie->SetVisible(true);
 
                     const bool requestSeen = newGameFadeRequestSeen.load(std::memory_order_acquire);
@@ -1196,9 +1423,12 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     return;
                 }
 
-                // FaderMenu supplies the black or white transition over the world.
-                a_menu->uiMovie->SetBackgroundAlpha(0.0F);
-                a_menu->uiMovie->SetVisible(false);
+                const bool transitionWindow = epochActive.load(std::memory_order_acquire) ||
+                                              postLoadFadeStart.load(std::memory_order_acquire) > 0;
+                if (transitionWindow && loadOwnedFader.load(std::memory_order_acquire)) {
+                    a_menu->uiMovie->SetBackgroundAlpha(0.0F);
+                    a_menu->uiMovie->SetVisible(false);
+                }
             }
         } catch (const std::exception& error) {
             DisableHooks(error.what());
@@ -1237,15 +1467,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
     }
 
-    // Replaces form-backed image-space modifier application for this experiment.
-    void CellTransitioner::DisableImageSpaceModifier(RE::ImageSpaceModifierInstance* a_modifier)
-    {
-        if (!hooksEnabled.load(std::memory_order_acquire) && originalImageSpaceModifierApply) {
-            originalImageSpaceModifierApply(a_modifier);
-        }
-    }
-
-    // Closes disabled visual menus so they cannot continue delaying post-load input restoration.
+    // Closes only the FaderMenu claimed by this load, plus the load-specific MistMenu.
     void CellTransitioner::CloseResidualLoadingMenus()
     {
         auto* ui = RE::UI::GetSingleton();
@@ -1255,14 +1477,19 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return;
         }
 
-        if (ui->IsMenuOpen(RE::FaderMenu::MENU_NAME)) {
+        const bool closeFader = loadOwnedFader.exchange(false, std::memory_order_acq_rel);
+        preLoadOwnedFader.store(false, std::memory_order_release);
+        faderPresentAtLoadStart.store(false, std::memory_order_release);
+        if (closeFader && ui->IsMenuOpen(RE::FaderMenu::MENU_NAME) &&
+            !loadFaderCloseQueued.exchange(true, std::memory_order_acq_rel)) {
             messages->AddMessage(RE::FaderMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
         }
         if (ui->IsMenuOpen(RE::MistMenu::MENU_NAME)) {
             messages->AddMessage(RE::MistMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
         }
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            logger::info("queued immediate closure of residual loading menus");
+            logger::info(
+                "queued closure of residual loading menus (load-owned fader: {})", closeFader);
         }
     }
 
@@ -1297,7 +1524,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     reinterpret_cast<CellTransitioner::AdvanceMovie_t>(originalAdvanceAddress);
                 vtable.write_vfunc(processMessageIndex, CellTransitioner::FaderMenuProcessMessage);
                 vtable.write_vfunc(advanceMovieIndex, CellTransitioner::FaderMenuAdvanceMovie);
-                logger::info("installed FaderMenu message and hidden-presentation hooks");
+                logger::info("installed load-owned FaderMenu tracking hooks");
             }
 
             // Replaces both MistMenu gates: AdvanceMovie state and its native post-display render pass.
@@ -1327,28 +1554,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 vtable.write_vfunc(advanceMovieIndex, CellTransitioner::MistMenuAdvanceMovie);
                 vtable.write_vfunc(postDisplayIndex, CellTransitioner::DisableMistMenuPostDisplay);
                 logger::info("disabled MistMenu mist, background, and load-screen model rendering");
-            }
-
-            // Removes the form-backed fade modifiers that would otherwise cover the retained frame.
-            void InstallImageSpaceModifierHook()
-            {
-                // IDA identifies slot 0x26 as ImageSpaceModifierInstanceForm::Apply on Skyrim 1.7.99.
-                constexpr std::size_t           applyIndex = 0x26;
-                REL::Relocation<std::uintptr_t> vtable{ RE::ImageSpaceModifierInstanceForm::VTABLE[0] };
-                if (!vtable.address()) {
-                    throw std::runtime_error("could not resolve the image-space modifier vtable");
-                }
-
-                const auto originalAddress = *reinterpret_cast<const std::uintptr_t*>(
-                    vtable.address() + applyIndex * sizeof(std::uintptr_t));
-                if (!CellTransitioner::IsExecutableAddress(originalAddress)) {
-                    throw std::runtime_error("image-space modifier Apply had no original function");
-                }
-
-                CellTransitioner::originalImageSpaceModifierApply =
-                    reinterpret_cast<CellTransitioner::ApplyImageSpaceModifier_t>(originalAddress);
-                vtable.write_vfunc(applyIndex, CellTransitioner::DisableImageSpaceModifier);
-                logger::info("disabled form-backed image-space modifiers for the experiment");
             }
 
             // Observes the normal world-render call without changing when Skyrim is allowed to render.
@@ -1462,7 +1667,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             InstallFrozenFrameHook();
             InstallFaderMenuHook();
             InstallMistMenuHooks();
-            InstallImageSpaceModifierHook();
             CellTransitioner::hooksEnabled.store(true, std::memory_order_release);
         }
     }
