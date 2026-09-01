@@ -52,10 +52,12 @@ $pluginDll = Join-Path $repositoryRoot 'build\release-msvc\SkyrimLoadProgress.dl
 $pluginPdb = Join-Path $repositoryRoot 'build\release-msvc\SkyrimLoadProgress.pdb'
 $sourceToml = Join-Path $repositoryRoot 'dist\SKSE\Plugins\SkyrimLoadProgress.toml'
 $sourceInterface = Join-Path $repositoryRoot 'dist\Interface'
+$sourceLicense = Join-Path $repositoryRoot 'COPYING'
 $requiredFiles = @(
     $pluginDll,
     $pluginPdb,
     $sourceToml,
+    $sourceLicense,
     (Join-Path $sourceInterface 'SkyrimLoadProgress\LoadingProgressMeter.swf'),
     (Join-Path $sourceInterface 'Exported\SkyrimLoadProgress\LoadingProgressMeter.swf')
 )
@@ -99,6 +101,7 @@ if (-not (Get-Content -LiteralPath $generatedVersionHeader -Raw).Contains('"' + 
 $tempDirectory = Join-Path ([IO.Path]::GetTempPath()) ("skyrim-load-progress-release-" + [guid]::NewGuid().ToString('N'))
 $packageDataDirectory = Join-Path $tempDirectory 'Data'
 $packagePluginDirectory = Join-Path $packageDataDirectory 'SKSE\Plugins'
+$packageLicense = Join-Path $tempDirectory 'COPYING'
 New-Item -ItemType Directory -Path $packagePluginDirectory -Force | Out-Null
 
 try
@@ -107,6 +110,7 @@ try
     Copy-Item -LiteralPath $pluginPdb -Destination (Join-Path $packagePluginDirectory 'SkyrimLoadProgress.pdb') -Force
     Copy-Item -LiteralPath $sourceToml -Destination (Join-Path $packagePluginDirectory 'SkyrimLoadProgress.toml') -Force
     Copy-Item -LiteralPath $sourceInterface -Destination $packageDataDirectory -Recurse -Force
+    Copy-Item -LiteralPath $sourceLicense -Destination $packageLicense -Force
 
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     $archiveName = 'SkyrimLoadProgress-' + $Version.Replace('.', '_') + '.zip'
@@ -118,7 +122,7 @@ try
         Remove-Item -LiteralPath $releaseArchive -Force
     }
 
-    Compress-Archive -LiteralPath $packageDataDirectory -DestinationPath $releaseArchive -CompressionLevel Optimal
+    Compress-Archive -LiteralPath $packageDataDirectory, $packageLicense -DestinationPath $releaseArchive -CompressionLevel Optimal
     if (-not (Test-Path -LiteralPath $releaseArchive -PathType Leaf))
     {
         throw "Compress-Archive did not create $releaseArchive."
@@ -130,6 +134,7 @@ try
     {
         $entries = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
         $requiredEntries = @(
+            'COPYING',
             'Data/SKSE/Plugins/SkyrimLoadProgress.dll',
             'Data/SKSE/Plugins/SkyrimLoadProgress.pdb',
             'Data/SKSE/Plugins/SkyrimLoadProgress.toml',

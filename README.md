@@ -106,8 +106,14 @@ Build, validate, and create a Nexus-ready ZIP with a top-level `Data` directory:
 ```
 
 The version defaults to `PROJECT_VERSION` from `CMakeLists.txt`. The archive is written to
-`release/<version>/` and contains the DLL, PDB, default TOML configuration, and both Interface
-movie paths required by the plugin. Use `-SkipBuild` to package an existing validated Release build.
+`release/<version>/` and contains the GPL license, DLL, PDB, default TOML configuration, and both
+Interface movie paths required by the plugin. Use `-SkipBuild` to package an existing validated
+Release build.
+
+## License
+
+Skyrim Load Progress is licensed under the [GNU General Public License version 3 or
+later](COPYING), matching CommonLibSSE-NG. See `COPYING` for the complete license terms.
 
 ## Reverse Engineering Notes
 

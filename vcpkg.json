@@ -3,7 +3,7 @@
   "name": "skyrim-load-progress",
   "version-string": "0.1.0.0",
   "description": "SKSE proof of concept for Skyrim cell loading progress",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "dependencies": [
     "directxmath",
     "directxtk",
