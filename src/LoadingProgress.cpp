@@ -784,6 +784,13 @@ namespace load_progress
             return RE::BSEventNotifyControl::kContinue;
         }
 
+        if (a_event->menuName == RE::SleepWaitMenu::MENU_NAME) {
+            a_event->opening ?
+                CellTransitioner::ObserveSleepWaitMenuOpening() :
+                CellTransitioner::ObserveSleepWaitMenuClosing();
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
         if (a_event->menuName != RE::LoadingMenu::MENU_NAME) {
             return RE::BSEventNotifyControl::kContinue;
         }

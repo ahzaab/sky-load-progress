@@ -77,6 +77,8 @@ namespace load_progress
         preLoadOwnedFader.store(false, std::memory_order_release);
         loadOwnedFader.store(false, std::memory_order_release);
         loadFaderCloseQueued.store(false, std::memory_order_release);
+        sleepFadeRequestDeadline.store(0, std::memory_order_release);
+        sleepFaderActive.store(false, std::memory_order_release);
         awaitingControlRestore.store(false, std::memory_order_release);
         newGameTransitionActive.store(false, std::memory_order_release);
         newGameFadeRequestSeen.store(false, std::memory_order_release);
@@ -515,6 +517,22 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         return std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch())
             .count();
+    }
+
+    // SleepWaitMenu opens before Skyrim queues the fade that blacks out the time-advance sequence.
+    // Keep its persistent FaderMenu movie visible even if an earlier load left that movie hidden.
+    void CellTransitioner::ObserveSleepWaitMenuOpening()
+    {
+        sleepFaderActive.store(true, std::memory_order_release);
+    }
+
+    // Marks the callback-free black recovery fade queued while SleepWaitMenu handles its close
+    // message. The deadline is a fallback if the menu-open notification was not observed.
+    void CellTransitioner::ObserveSleepWaitMenuClosing()
+    {
+        constexpr std::int64_t sleepFadeRequestWindow = 5000;
+        const auto deadline = CurrentTimeMilliseconds() + sleepFadeRequestWindow;
+        sleepFadeRequestDeadline.store(deadline, std::memory_order_release);
     }
 
     // Creates the inexpensive single-pass blur used on the frozen world frame.
@@ -1416,11 +1434,32 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     a_message.type == RE::UI_MESSAGE_TYPE::kUpdate)) {
                 const auto* data = static_cast<const RE::FaderData*>(a_message.data);
 
+                // SleepWaitMenu queues a callback-free, non-pausing black fade before advancing game
+                // time. Sleeping can open LoadingMenu before that queued request is handled, so do not
+                // let the ordinary new-black-fader-during-a-load fallback claim it.
+                const auto sleepFadeDeadline =
+                    sleepFadeRequestDeadline.load(std::memory_order_acquire);
+                const bool sleepFadeRequest =
+                    sleepFadeDeadline >= CurrentTimeMilliseconds() && !data->unk10 &&
+                    data->isFadingOut && data->isBlack && !data->pausesGame;
+                const bool preserveSleepFader =
+                    sleepFadeRequest || sleepFaderActive.load(std::memory_order_acquire);
+
+                if (sleepFadeRequest) {
+                    sleepFadeRequestDeadline.store(0, std::memory_order_release);
+                    sleepFaderActive.store(true, std::memory_order_release);
+                }
+                if (preserveSleepFader) {
+                    preLoadOwnedFader.store(false, std::memory_order_release);
+                    loadOwnedFader.store(false, std::memory_order_release);
+                    loadFaderCloseQueued.store(false, std::memory_order_release);
+                }
+
                 if (newGameTransitionActive.load(std::memory_order_acquire)) {
                     if (!data->isFadingOut && data->isBlack && data->fadeDuration > 0.0F) {
                         newGameFadeRequestSeen.store(true, std::memory_order_release);
                     }
-                } else {
+                } else if (!preserveSleepFader) {
                     // Static xrefs show that native load fades carry one of four dedicated completion
                     // callbacks. Papyrus FadeOutGame uses the separate callback-free builder, so this
                     // claims the initiating fader without suppressing arbitrary scripted fades.
@@ -1449,10 +1488,14 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         loadOwnedFader.store(true, std::memory_order_release);
                     }
                 }
-            } else if (a_message.type == RE::UI_MESSAGE_TYPE::kHide && !activeEpoch) {
-                preLoadOwnedFader.store(false, std::memory_order_release);
-                loadOwnedFader.store(false, std::memory_order_release);
-                loadFaderCloseQueued.store(false, std::memory_order_release);
+            } else if (a_message.type == RE::UI_MESSAGE_TYPE::kHide) {
+                sleepFadeRequestDeadline.store(0, std::memory_order_release);
+                sleepFaderActive.store(false, std::memory_order_release);
+                if (!activeEpoch) {
+                    preLoadOwnedFader.store(false, std::memory_order_release);
+                    loadOwnedFader.store(false, std::memory_order_release);
+                    loadFaderCloseQueued.store(false, std::memory_order_release);
+                }
             }
         }
 
@@ -1499,9 +1542,22 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     return;
                 }
 
+                if (sleepFaderActive.load(std::memory_order_acquire)) {
+                    // A load-owned request may have left this persistent movie hidden. Sleeping owns
+                    // the complete native fade-out/fade-in lifetime, so explicitly restore it.
+                    a_menu->uiMovie->SetVisible(true);
+                    return;
+                }
+
                 const bool transitionWindow = epochActive.load(std::memory_order_acquire) ||
                                               postLoadFadeStart.load(std::memory_order_acquire) > 0;
-                if (transitionWindow && loadOwnedFader.load(std::memory_order_acquire)) {
+                // Native door, fast-travel, and save-load callbacks submit their fader before
+                // LoadingMenu opens. Hide that already-identified load cover immediately so it cannot
+                // flash black in the short gap before the captured-frame transition takes over.
+                const bool suppressLoadFader =
+                    loadOwnedFader.load(std::memory_order_acquire) &&
+                    (transitionWindow || preLoadOwnedFader.load(std::memory_order_acquire));
+                if (suppressLoadFader) {
                     a_menu->uiMovie->SetBackgroundAlpha(0.0F);
                     a_menu->uiMovie->SetVisible(false);
                 }

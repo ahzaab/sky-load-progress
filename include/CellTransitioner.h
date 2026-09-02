@@ -42,6 +42,8 @@ namespace load_progress
         static void              CancelNewGameTransition();
         static void              ObserveMainMenuOpening();
         static void              ObserveHUDMenuOpening();
+        static void              ObserveSleepWaitMenuOpening();
+        static void              ObserveSleepWaitMenuClosing();
         static void              HideHUDForLoad();
         static void              RestoreHUDVisibility() noexcept;
         static bool              IsSeamless();
@@ -119,6 +121,8 @@ namespace load_progress
         inline static std::atomic_bool                      preLoadOwnedFader{ false };
         inline static std::atomic_bool                      loadOwnedFader{ false };
         inline static std::atomic_bool                      loadFaderCloseQueued{ false };
+        inline static std::atomic_int64_t                   sleepFadeRequestDeadline{};
+        inline static std::atomic_bool                      sleepFaderActive{ false };
         inline static std::atomic_uint8_t                   renderObservationState{};
         inline static std::atomic_bool                      awaitingControlRestore{ false };
         inline static std::optional<ControlState>           lastControlState;
