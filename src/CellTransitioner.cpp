@@ -80,6 +80,7 @@ namespace load_progress
         awaitingControlRestore.store(false, std::memory_order_release);
         newGameTransitionActive.store(false, std::memory_order_release);
         newGameFadeRequestSeen.store(false, std::memory_order_release);
+        RestoreHUDVisibility();
 
         if (!failureLogged.exchange(true, std::memory_order_acq_rel)) {
             try {
@@ -264,7 +265,10 @@ namespace load_progress
         const bool selectCapturedColor =
             transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&
             colorSource.load(std::memory_order_acquire) == Settings::ColorSource::dominant;
+
         dominantColorPending.store(selectCapturedColor, std::memory_order_release);
+
+        HideHUDForLoad();
 
         if (!a_menu) {
             logger::warn("could not update LoadingMenu flags because the menu pointer was null");
@@ -310,6 +314,7 @@ namespace load_progress
         // Opening the post-load gate lets Present composite over the destination cell as soon as it returns.
         epochActive.store(false, std::memory_order_release);
         postLoadFadeStart.store(newGame ? 0 : CurrentTimeMilliseconds(), std::memory_order_release);
+        RestoreHUDVisibility();
         if (newGame) {
             frozenFrameLocked.store(false, std::memory_order_release);
             logger::info("handed the new-game transition from the loading compositor to Skyrim's FaderMenu");
@@ -343,6 +348,74 @@ namespace load_progress
     {
         newGameTransitionActive.store(false, std::memory_order_release);
         newGameFadeRequestSeen.store(false, std::memory_order_release);
+    }
+
+    // Remembers the Main Menu as the origin after its movie closes and before LoadingMenu opens.
+    void CellTransitioner::ObserveMainMenuOpening()
+    {
+        mainMenuLoadPending.store(true, std::memory_order_release);
+    }
+
+    // Reapplies the load-scoped HUD policy when Skyrim creates HUDMenu during a Main Menu save load.
+    void CellTransitioner::ObserveHUDMenuOpening()
+    {
+        if (frozenFrameLocked.load(std::memory_order_acquire) &&
+            postLoadFadeStart.load(std::memory_order_acquire) <= 0) {
+            HideHUDForLoad();
+        }
+    }
+
+    // Hides only the top-level HUD movie, preserving all child alpha and animation state.
+    // Main Menu save loads never expose gameplay HUD; the setting applies only to in-game transitions.
+    void CellTransitioner::HideHUDForLoad()
+    {
+        const bool showHUD = Settings::GetSingleton().ShowHUDDuringLoading();
+        const bool forceHidden = mainMenuLoadActive.load(std::memory_order_acquire);
+        if (showHUD && !forceHidden) {
+            return;
+        }
+
+        auto* ui = RE::UI::GetSingleton();
+        auto  movie = ui ? ui->GetMovieView(RE::HUDMenu::MENU_NAME) : nullptr;
+        if (!movie) {
+            return;
+        }
+
+        if (!hudVisibilityOwned.load(std::memory_order_acquire)) {
+            const bool wasVisible = movie->GetVisible();
+            hudWasVisible.store(wasVisible, std::memory_order_release);
+            hudVisibilityOwned.store(true, std::memory_order_release);
+
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::info("claimed HUDMenu visibility for loading; previous visibility={}", wasVisible);
+            }
+        }
+
+        movie->SetVisible(false);
+    }
+
+    // Restores exactly the movie visibility observed before this transition claimed it.
+    void CellTransitioner::RestoreHUDVisibility() noexcept
+    {
+        if (!hudVisibilityOwned.exchange(false, std::memory_order_acq_rel)) {
+            return;
+        }
+
+        try {
+            auto* ui = RE::UI::GetSingleton();
+            auto  movie = ui ? ui->GetMovieView(RE::HUDMenu::MENU_NAME) : nullptr;
+            if (movie) {
+                const bool wasVisible = mainMenuLoadActive.load(std::memory_order_acquire) ||
+                                        hudWasVisible.load(std::memory_order_acquire);
+                movie->SetVisible(wasVisible);
+                if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                    logger::info("restored HUDMenu visibility={}", wasVisible);
+                }
+            }
+        } catch (...) {
+            REX::W32::OutputDebugStringA(
+                "Skyrim Load Progress: could not restore HUDMenu visibility\n");
+        }
     }
 
     // Returns whether the current transition suppresses LoadingMenu Scaleform.
@@ -509,7 +582,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     // Chooses the warm or cold presentation before the Loading Menu opens.
     CellTransitioner::Presentation CellTransitioner::ChoosePresentation()
     {
+        mainMenuLoadActive.store(false, std::memory_order_release);
+
         if (newGameTransitionActive.load(std::memory_order_acquire)) {
+            mainMenuLoadPending.store(false, std::memory_order_release);
             // The loading compositor supplies opaque black beneath LoadingMenu. Once loading ends, Skyrim's
             // native FaderMenu takes over so TitleSequenceMenu retains its higher UI depth.
             transitionType.store(Settings::TransitionType::color, std::memory_order_release);
@@ -529,6 +605,29 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         const bool             resident = cell && cell->GetRuntimeData().loadedData;
         const auto*            editorIDText = cell ? cell->GetFormEditorID() : nullptr;
         const std::string_view editorID = editorIDText ? editorIDText : "";
+
+        auto*      ui = RE::UI::GetSingleton();
+        const bool fromMainMenu = mainMenuLoadPending.exchange(false, std::memory_order_acq_rel) ||
+                                  (ui && ui->IsMenuOpen(RE::MainMenu::MENU_NAME));
+        if (fromMainMenu) {
+            // A menu movie is not a useful retained gameplay frame. Keep Skyrim's native fade to black,
+            // then hold that same fixed black beneath LoadingMenu and fade it into the loaded save.
+            const auto& cold = Settings::GetSingleton().GetColdTransition(editorID);
+            mainMenuLoadActive.store(true, std::memory_order_release);
+            transitionType.store(Settings::TransitionType::color, std::memory_order_release);
+            colorSource.store(Settings::ColorSource::fixed, std::memory_order_release);
+            transitionColor.store(0x000000, std::memory_order_release);
+            fadeInDuration.store(0, std::memory_order_release);
+            holdAfterLoad.store(cold.holdAfterLoad.count(), std::memory_order_release);
+            fadeOutDuration.store(cold.fadeOut.count(), std::memory_order_release);
+
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::info(
+                    "selected fixed black main-menu loading presentation: cell={:08X} editorID='{}' hold={}ms fadeOut={}ms",
+                    cell ? cell->GetFormID() : 0, editorID, holdAfterLoad.load(), fadeOutDuration.load());
+            }
+            return Presentation::loadingMenu;
+        }
 
         const auto selected = resident ? Presentation::seamless : Presentation::loadingMenu;
         if (selected == Presentation::seamless) {
@@ -931,10 +1030,18 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         const auto destination = GetDestinationRect(a_desc);
-        DrawFullscreenLayer(a_context, frozenFrameView, destination, commonStates->Opaque(),
-            commonStates->LinearClamp(), GetFrozenFrameShader());
+        if (mainMenuLoadActive.load(std::memory_order_acquire)) {
+            // Never expose the captured Main Menu movie or its text. The solid shader ignores the
+            // retained texture and supplies the same black cover used for the post-load fade.
+            DrawFullscreenLayer(a_context, frozenFrameView, destination, commonStates->Opaque(), nullptr,
+                solidColorShader, TransitionColor(1.0F));
+        } else {
+            DrawFullscreenLayer(a_context, frozenFrameView, destination, commonStates->Opaque(),
+                commonStates->LinearClamp(), GetFrozenFrameShader());
+        }
 
-        if (transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color) {
+        if (!mainMenuLoadActive.load(std::memory_order_acquire) &&
+            transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color) {
             const auto now = CurrentTimeMilliseconds();
             auto       start = loadingTransitionStart.load(std::memory_order_acquire);
             if (start == 0) {
@@ -987,6 +1094,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (fadeElapsed >= duration) {
             postLoadFadeStart.store(0, std::memory_order_release);
             frozenFrameLocked.store(false, std::memory_order_release);
+            mainMenuLoadActive.store(false, std::memory_order_release);
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("post-load frozen-frame crossfade completed");
             }
@@ -1405,32 +1513,16 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
     }
 
-    // Advances MistMenu while disabling its mist and model rendering flags.
-    void CellTransitioner::MistMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
+    // Suppresses MistMenu presentation only while our loading compositor owns the screen. AdvanceMovie
+    // remains completely native: showMist and showLoadScreen are initialization guards, not visibility flags.
+    void CellTransitioner::MistMenuPostDisplay(RE::IMenu* a_menu)
     {
-        if (originalMistAdvanceMovie) {
-            originalMistAdvanceMovie(a_menu, a_interval, a_currentTime);
-        }
-        if (!hooksEnabled.load(std::memory_order_acquire) || !a_menu) {
-            return;
-        }
-
-        try {
-            auto* mistMenu = static_cast<RE::MistMenu*>(a_menu);
-            auto& runtimeData = mistMenu->GetRuntimeData();
-            runtimeData.showMist = false;
-            runtimeData.showLoadScreen = false;
-        } catch (const std::exception& error) {
-            DisableHooks(error.what());
-        } catch (...) {
-            DisableHooks("unknown exception in MistMenu::AdvanceMovie");
-        }
-    }
-
-    // Replaces MistMenu's post-display render pass with an intentional no-op.
-    void CellTransitioner::DisableMistMenuPostDisplay(RE::IMenu* a_menu)
-    {
-        if (!hooksEnabled.load(std::memory_order_acquire) && originalMistPostDisplay) {
+        const bool suppressPresentation =
+            hooksEnabled.load(std::memory_order_acquire) &&
+            (epochActive.load(std::memory_order_acquire) ||
+                postLoadFadeStart.load(std::memory_order_acquire) > 0 ||
+                newGameTransitionActive.load(std::memory_order_acquire));
+        if (!suppressPresentation && originalMistPostDisplay) {
             originalMistPostDisplay(a_menu);
         }
     }
@@ -1491,33 +1583,26 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 logger::info("installed load-owned FaderMenu tracking hooks");
             }
 
-            // Replaces both MistMenu gates: AdvanceMovie state and its native post-display render pass.
+            // Suppresses MistMenu drawing only while the transition compositor owns presentation.
             void InstallMistMenuHooks()
             {
-                // CommonLib's IMenu vtable maps slot 5 to AdvanceMovie and slot 6 to PostDisplay.
-                constexpr std::size_t           advanceMovieIndex = 0x05;
+                // AdvanceMovie remains native so MistMenu can initialize and update its scene graph normally.
                 constexpr std::size_t           postDisplayIndex = 0x06;
                 REL::Relocation<std::uintptr_t> vtable{ RE::MistMenu::VTABLE[0] };
                 if (!vtable.address()) {
                     throw std::runtime_error("could not resolve the MistMenu vtable");
                 }
 
-                const auto originalAddress = *reinterpret_cast<const std::uintptr_t*>(
-                    vtable.address() + advanceMovieIndex * sizeof(std::uintptr_t));
                 const auto postDisplayAddress = *reinterpret_cast<const std::uintptr_t*>(
                     vtable.address() + postDisplayIndex * sizeof(std::uintptr_t));
-                if (!CellTransitioner::IsExecutableAddress(originalAddress) ||
-                    !CellTransitioner::IsExecutableAddress(postDisplayAddress)) {
-                    throw std::runtime_error("MistMenu::AdvanceMovie had no original function");
+                if (!CellTransitioner::IsExecutableAddress(postDisplayAddress)) {
+                    throw std::runtime_error("MistMenu::PostDisplay had no original function");
                 }
 
-                CellTransitioner::originalMistAdvanceMovie =
-                    reinterpret_cast<CellTransitioner::AdvanceMovie_t>(originalAddress);
                 CellTransitioner::originalMistPostDisplay =
                     reinterpret_cast<CellTransitioner::PostDisplay_t>(postDisplayAddress);
-                vtable.write_vfunc(advanceMovieIndex, CellTransitioner::MistMenuAdvanceMovie);
-                vtable.write_vfunc(postDisplayIndex, CellTransitioner::DisableMistMenuPostDisplay);
-                logger::info("disabled MistMenu mist, background, and load-screen model rendering");
+                vtable.write_vfunc(postDisplayIndex, CellTransitioner::MistMenuPostDisplay);
+                logger::info("installed load-scoped MistMenu presentation hook");
             }
 
             // Observes the normal world-render call without changing when Skyrim is allowed to render.

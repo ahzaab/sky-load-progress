@@ -40,6 +40,10 @@ namespace load_progress
         static void              EndLoad();
         static void              BeginNewGameTransition();
         static void              CancelNewGameTransition();
+        static void              ObserveMainMenuOpening();
+        static void              ObserveHUDMenuOpening();
+        static void              HideHUDForLoad();
+        static void              RestoreHUDVisibility() noexcept;
         static bool              IsSeamless();
         static void              DisableHooks(std::string_view) noexcept;
         static bool              IsExecutableAddress(std::uintptr_t) noexcept;
@@ -88,8 +92,7 @@ namespace load_progress
         static void              CaptureAfterScaleformBegin(void*);
         static RE::UI_MESSAGE_RESULTS FaderMenuProcessMessage(RE::IMenu*, RE::UIMessage&);
         static void              FaderMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
-        static void              MistMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
-        static void              DisableMistMenuPostDisplay(RE::IMenu*);
+        static void              MistMenuPostDisplay(RE::IMenu*);
         static void              CloseResidualLoadingMenus();
 
         inline static std::atomic_bool                      epochActive{ false };
@@ -106,6 +109,10 @@ namespace load_progress
         inline static std::atomic_int64_t                   loadingTransitionStart{};
         inline static std::atomic_bool                      dominantColorPending{ false };
         inline static std::atomic_uint32_t                  transitionColor{ 0xFFFFFF };
+        inline static std::atomic_bool                      hudVisibilityOwned{ false };
+        inline static std::atomic_bool                      hudWasVisible{ true };
+        inline static std::atomic_bool                      mainMenuLoadPending{ false };
+        inline static std::atomic_bool                      mainMenuLoadActive{ false };
         inline static std::atomic_bool                      newGameTransitionActive{ false };
         inline static std::atomic_bool                      newGameFadeRequestSeen{ false };
         inline static std::atomic_bool                      faderPresentAtLoadStart{ false };
@@ -119,7 +126,6 @@ namespace load_progress
 
         inline static RE::UI_MESSAGE_RESULTS (*originalFaderProcessMessage)(RE::IMenu*, RE::UIMessage&){};
         inline static AdvanceMovie_t                         originalFaderAdvanceMovie{};
-        inline static AdvanceMovie_t                         originalMistAdvanceMovie{};
         inline static PostDisplay_t                          originalMistPostDisplay{};
         inline static REL::Relocation<RenderWorld_t>         originalRenderWorld;
         inline static REL::Relocation<BeginScaleform_t>      originalBeginScaleform;

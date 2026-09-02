@@ -265,6 +265,9 @@ namespace load_progress
                 DrainLoadedEntries(true);
             }
 
+            // HUDMenu can be created or made visible after LoadingMenu opens on a Main Menu save load.
+            CellTransitioner::HideHUDForLoad();
+
             if (a_menu && a_menu->uiMovie) {
                 const bool seamless = CellTransitioner::IsSeamless();
                 a_menu->uiMovie->SetBackgroundAlpha(0.0F);
@@ -272,7 +275,7 @@ namespace load_progress
                 if (!seamless) {
                     const auto basisPoints = displayedBasisPoints.load(std::memory_order_acquire);
                     ProgressMeter::GetSingleton().Update(
-                        a_menu, static_cast<double>(basisPoints) / 100.0);
+                        a_menu, static_cast<double>(basisPoints) / 100.0, a_interval);
                 }
             }
         } catch (const std::exception& error) {
@@ -729,7 +732,17 @@ namespace load_progress
     {
         std::scoped_lock lock(stateLock);
 
-        epochActive.store(false, std::memory_order_release);
+        // Skyrim can broadcast a LoadingMenu close notification for a queued hide even when no
+        // corresponding menu-open event established a loading epoch. Treating that notification as a
+        // completed load starts CellTransitioner's post-load compositor with a stale retained frame.
+        // DA09's scripted same-cell MoveTo sequence exercises this path around its white IMODs.
+        if (!epochActive.exchange(false, std::memory_order_acq_rel)) {
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::info("ignored Loading Menu close without an active loading epoch");
+            }
+            return;
+        }
+
         for (std::size_t i = 0; i < queueCount; ++i) {
             pendingEnqueued[i].store(0, std::memory_order_relaxed);
             pendingCompleted[i].store(0, std::memory_order_relaxed);
@@ -750,7 +763,28 @@ namespace load_progress
         const RE::MenuOpenCloseEvent* a_event,
         RE::BSTEventSource<RE::MenuOpenCloseEvent>*)
     {
-        if (!a_event || a_event->menuName != RE::LoadingMenu::MENU_NAME) {
+        if (!a_event) {
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
+        if (a_event->menuName == RE::MainMenu::MENU_NAME && a_event->opening) {
+            CellTransitioner::ObserveMainMenuOpening();
+        }
+
+        if (a_event->menuName == RE::HUDMenu::MENU_NAME && a_event->opening) {
+            if (hooksEnabled.load(std::memory_order_acquire)) {
+                try {
+                    CellTransitioner::ObserveHUDMenuOpening();
+                } catch (const std::exception& error) {
+                    DisableHooks(error.what());
+                } catch (...) {
+                    DisableHooks("unknown exception while hiding a newly opened HUDMenu");
+                }
+            }
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
+        if (a_event->menuName != RE::LoadingMenu::MENU_NAME) {
             return RE::BSEventNotifyControl::kContinue;
         }
 

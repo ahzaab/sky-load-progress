@@ -22,6 +22,7 @@ namespace load_progress
         blurEnabled = true;
         blurAmount = defaultBlurAmount;
         progressBar = {};
+        showHUDDuringLoading = false;
         loadingLoggingEnabled = false;
         verboseQueueLoggingEnabled = false;
         loadedEntryLogging = {};
@@ -75,6 +76,12 @@ namespace load_progress
                     ReadPercent(meter, "width_percent", progressBar.widthPercent, maximumMeterWidthPercent));
             }
 
+            if (document.contains("interface")) {
+                const auto& interfaceTable = toml::find(document, "interface");
+                showHUDDuringLoading =
+                    toml::find_or<bool>(interfaceTable, "show_hud_during_loading", showHUDDuringLoading);
+            }
+
             if (document.contains("warm")) {
                 const auto& warm = toml::find(document, "warm");
                 warmTransition.holdAfterLoad =
@@ -93,6 +100,7 @@ namespace load_progress
             logger::info("loading meter: enabled={} x={:.1f}% y={:.1f}% width={:.1f}%",
                 progressBar.enabled, progressBar.xPercent, progressBar.yPercent,
                 progressBar.widthPercent);
+            logger::info("loading HUD: visible={}", showHUDDuringLoading);
             logger::info("loading diagnostics: enabled={} verbose queues={}",
                 loadingLoggingEnabled, IsVerboseQueueLoggingEnabled());
             logger::info("loaded-entry diagnostics: objects={} transfers={} distant={}",
@@ -108,6 +116,7 @@ namespace load_progress
             blurAmount = defaultBlurAmount;
             progressBar = {};
             loadingLoggingEnabled = false;
+            showHUDDuringLoading = false;
             verboseQueueLoggingEnabled = false;
             loadedEntryLogging = {};
         }
@@ -157,6 +166,12 @@ namespace load_progress
     const Settings::ProgressBar& Settings::GetProgressBar() const
     {
         return progressBar;
+    }
+
+    // Returns whether HUDMenu remains visible above the custom loading presentation.
+    bool Settings::ShowHUDDuringLoading() const
+    {
+        return showHUDDuringLoading;
     }
 
     // Returns whether per-load summaries and transition diagnostics may be written.

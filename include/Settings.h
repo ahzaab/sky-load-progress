@@ -68,6 +68,7 @@ namespace load_progress
         [[nodiscard]] bool                  IsBlurEnabled() const;
         [[nodiscard]] float                 GetBlurAmount() const;
         [[nodiscard]] const ProgressBar&    GetProgressBar() const;
+        [[nodiscard]] bool                  ShowHUDDuringLoading() const;
         [[nodiscard]] bool                  IsLoadingLoggingEnabled() const;
         [[nodiscard]] bool                  IsVerboseQueueLoggingEnabled() const;
         [[nodiscard]] const LoadedEntryLogging& GetLoadedEntryLogging() const;
@@ -98,6 +99,7 @@ namespace load_progress
         bool                  blurEnabled{ true };
         float                 blurAmount{ defaultBlurAmount };
         ProgressBar           progressBar;
+        bool                  showHUDDuringLoading{ false };
         bool                  loadingLoggingEnabled{ false };
         bool                  verboseQueueLoggingEnabled{ false };
         LoadedEntryLogging    loadedEntryLogging;
