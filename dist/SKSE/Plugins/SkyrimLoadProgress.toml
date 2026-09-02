@@ -17,6 +17,12 @@ loading = false
 # many lines during a cold load and only takes effect when loading is also true.
 verbose_queues = false
 
+[interface]
+# HUDMenu normally sits beneath Skyrim's opaque loading menus. Set this to true
+# to keep HUD elements such as health and stamina visible over custom loading
+# transitions. The default false matches vanilla presentation.
+show_hud_during_loading = false
+
 [logging.loaded_entries]
 # Log references when Skyrim actually enqueues their normal 3D or object-loading
 # work. Each entry includes the reference, base object, and cell Form IDs and

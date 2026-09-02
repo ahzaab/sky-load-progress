@@ -41,6 +41,9 @@ namespace load_progress
         static void              BeginNewGameTransition();
         static void              CancelNewGameTransition();
         static void              ObserveMainMenuOpening();
+        static void              ObserveHUDMenuOpening();
+        static void              HideHUDForLoad();
+        static void              RestoreHUDVisibility() noexcept;
         static bool              IsSeamless();
         static void              DisableHooks(std::string_view) noexcept;
         static bool              IsExecutableAddress(std::uintptr_t) noexcept;
@@ -106,6 +109,8 @@ namespace load_progress
         inline static std::atomic_int64_t                   loadingTransitionStart{};
         inline static std::atomic_bool                      dominantColorPending{ false };
         inline static std::atomic_uint32_t                  transitionColor{ 0xFFFFFF };
+        inline static std::atomic_bool                      hudVisibilityOwned{ false };
+        inline static std::atomic_bool                      hudWasVisible{ true };
         inline static std::atomic_bool                      mainMenuLoadPending{ false };
         inline static std::atomic_bool                      mainMenuLoadActive{ false };
         inline static std::atomic_bool                      newGameTransitionActive{ false };

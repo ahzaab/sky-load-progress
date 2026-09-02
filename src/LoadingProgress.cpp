@@ -265,6 +265,9 @@ namespace load_progress
                 DrainLoadedEntries(true);
             }
 
+            // HUDMenu can be created or made visible after LoadingMenu opens on a Main Menu save load.
+            CellTransitioner::HideHUDForLoad();
+
             if (a_menu && a_menu->uiMovie) {
                 const bool seamless = CellTransitioner::IsSeamless();
                 a_menu->uiMovie->SetBackgroundAlpha(0.0F);
@@ -756,6 +759,19 @@ namespace load_progress
 
         if (a_event->menuName == RE::MainMenu::MENU_NAME && a_event->opening) {
             CellTransitioner::ObserveMainMenuOpening();
+        }
+
+        if (a_event->menuName == RE::HUDMenu::MENU_NAME && a_event->opening) {
+            if (hooksEnabled.load(std::memory_order_acquire)) {
+                try {
+                    CellTransitioner::ObserveHUDMenuOpening();
+                } catch (const std::exception& error) {
+                    DisableHooks(error.what());
+                } catch (...) {
+                    DisableHooks("unknown exception while hiding a newly opened HUDMenu");
+                }
+            }
+            return RE::BSEventNotifyControl::kContinue;
         }
 
         if (a_event->menuName != RE::LoadingMenu::MENU_NAME) {

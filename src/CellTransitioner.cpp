@@ -80,6 +80,7 @@ namespace load_progress
         awaitingControlRestore.store(false, std::memory_order_release);
         newGameTransitionActive.store(false, std::memory_order_release);
         newGameFadeRequestSeen.store(false, std::memory_order_release);
+        RestoreHUDVisibility();
 
         if (!failureLogged.exchange(true, std::memory_order_acq_rel)) {
             try {
@@ -264,7 +265,10 @@ namespace load_progress
         const bool selectCapturedColor =
             transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&
             colorSource.load(std::memory_order_acquire) == Settings::ColorSource::dominant;
+
         dominantColorPending.store(selectCapturedColor, std::memory_order_release);
+
+        HideHUDForLoad();
 
         if (!a_menu) {
             logger::warn("could not update LoadingMenu flags because the menu pointer was null");
@@ -310,6 +314,7 @@ namespace load_progress
         // Opening the post-load gate lets Present composite over the destination cell as soon as it returns.
         epochActive.store(false, std::memory_order_release);
         postLoadFadeStart.store(newGame ? 0 : CurrentTimeMilliseconds(), std::memory_order_release);
+        RestoreHUDVisibility();
         if (newGame) {
             frozenFrameLocked.store(false, std::memory_order_release);
             logger::info("handed the new-game transition from the loading compositor to Skyrim's FaderMenu");
@@ -349,6 +354,68 @@ namespace load_progress
     void CellTransitioner::ObserveMainMenuOpening()
     {
         mainMenuLoadPending.store(true, std::memory_order_release);
+    }
+
+    // Reapplies the load-scoped HUD policy when Skyrim creates HUDMenu during a Main Menu save load.
+    void CellTransitioner::ObserveHUDMenuOpening()
+    {
+        if (frozenFrameLocked.load(std::memory_order_acquire) &&
+            postLoadFadeStart.load(std::memory_order_acquire) <= 0) {
+            HideHUDForLoad();
+        }
+    }
+
+    // Hides only the top-level HUD movie, preserving all child alpha and animation state.
+    // Main Menu save loads never expose gameplay HUD; the setting applies only to in-game transitions.
+    void CellTransitioner::HideHUDForLoad()
+    {
+        const bool showHUD = Settings::GetSingleton().ShowHUDDuringLoading();
+        const bool forceHidden = mainMenuLoadActive.load(std::memory_order_acquire);
+        if (showHUD && !forceHidden) {
+            return;
+        }
+
+        auto* ui = RE::UI::GetSingleton();
+        auto  movie = ui ? ui->GetMovieView(RE::HUDMenu::MENU_NAME) : nullptr;
+        if (!movie) {
+            return;
+        }
+
+        if (!hudVisibilityOwned.load(std::memory_order_acquire)) {
+            const bool wasVisible = movie->GetVisible();
+            hudWasVisible.store(wasVisible, std::memory_order_release);
+            hudVisibilityOwned.store(true, std::memory_order_release);
+
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::info("claimed HUDMenu visibility for loading; previous visibility={}", wasVisible);
+            }
+        }
+
+        movie->SetVisible(false);
+    }
+
+    // Restores exactly the movie visibility observed before this transition claimed it.
+    void CellTransitioner::RestoreHUDVisibility() noexcept
+    {
+        if (!hudVisibilityOwned.exchange(false, std::memory_order_acq_rel)) {
+            return;
+        }
+
+        try {
+            auto* ui = RE::UI::GetSingleton();
+            auto  movie = ui ? ui->GetMovieView(RE::HUDMenu::MENU_NAME) : nullptr;
+            if (movie) {
+                const bool wasVisible = mainMenuLoadActive.load(std::memory_order_acquire) ||
+                                        hudWasVisible.load(std::memory_order_acquire);
+                movie->SetVisible(wasVisible);
+                if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                    logger::info("restored HUDMenu visibility={}", wasVisible);
+                }
+            }
+        } catch (...) {
+            REX::W32::OutputDebugStringA(
+                "Skyrim Load Progress: could not restore HUDMenu visibility\n");
+        }
     }
 
     // Returns whether the current transition suppresses LoadingMenu Scaleform.
