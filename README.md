@@ -106,9 +106,9 @@ Build, validate, and create a Nexus-ready ZIP with a top-level `Data` directory:
 ```
 
 The version defaults to `PROJECT_VERSION` from `CMakeLists.txt`. The archive is written to
-`release/<version>/` and contains the GPL license, DLL, PDB, default TOML configuration, and both
-Interface movie paths required by the plugin. Use `-SkipBuild` to package an existing validated
-Release build.
+`release/<version>/` and contains only the top-level `Data` directory expected by mod managers,
+with the DLL, PDB, default TOML configuration, and both Interface movie paths required by the plugin.
+Use `-SkipBuild` to package an existing validated Release build.
 
 ## License
 
