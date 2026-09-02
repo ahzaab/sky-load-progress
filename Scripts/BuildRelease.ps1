@@ -15,7 +15,7 @@ $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if (-not $Version)
 {
     $cmakeText = Get-Content -LiteralPath (Join-Path $repositoryRoot 'CMakeLists.txt') -Raw
-    $match = [regex]::Match($cmakeText, '(?ms)project\s*\(\s*SkyrimLoadProgress\s+VERSION\s+(\d+\.\d+\.\d+\.\d+)')
+    $match = [regex]::Match($cmakeText, '(?ms)project\s*\(\s*SkyrimLoadProgress\s+VERSION\s+(\d+\.\d+\.\d+(?:\.\d+)?)')
     if (-not $match.Success)
     {
         throw 'Could not read the project version from CMakeLists.txt.'
@@ -24,9 +24,9 @@ if (-not $Version)
     $Version = $match.Groups[1].Value
 }
 
-if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$')
+if ($Version -notmatch '^\d+\.\d+\.\d+(?:\.\d+)?$')
 {
-    throw "Invalid four-part version: $Version"
+    throw "Invalid three- or four-part version: $Version"
 }
 
 if (-not $OutputDirectory)
@@ -70,15 +70,22 @@ foreach ($requiredFile in $requiredFiles)
     }
 }
 
+$versionParts = @($Version.Split('.') | ForEach-Object { [int]$_ })
+while ($versionParts.Count -lt 4)
+{
+    $versionParts += 0
+}
+$normalizedVersion = $versionParts -join '.'
+
 $dllVersion = (Get-Item -LiteralPath $pluginDll).VersionInfo.FileVersion
-if ($dllVersion -and $dllVersion -ne $Version)
+if ($dllVersion -and $dllVersion -ne $Version -and $dllVersion -ne $normalizedVersion)
 {
     throw "Release DLL version is $dllVersion, but package version is $Version."
 }
 
 # CommonLib embeds the authoritative SKSE plugin version in generated source. This project does not
 # currently add a Windows VERSIONINFO resource, so validate the generated source and header as well.
-$expectedPluginVersion = 'REL::Version{ ' + ($Version.Split('.') -join ', ') + ' }'
+$expectedPluginVersion = 'REL::Version{ ' + ($versionParts -join ', ') + ' }'
 $generatedPluginSource = Join-Path $repositoryRoot 'build\release-msvc\__SkyrimLoadProgressPlugin.cpp'
 $generatedVersionHeader = Join-Path $repositoryRoot 'build\release-msvc\include\Version.h'
 foreach ($generatedFile in @($generatedPluginSource, $generatedVersionHeader))

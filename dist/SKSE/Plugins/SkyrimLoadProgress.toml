@@ -110,25 +110,6 @@ fade_out_ms = 1000
 # case-insensitive. Rules are checked from top to bottom and the first match wins.
 # Use '*' for any number of characters and '?' for exactly one character.
 #
-# These two rules preserve the dominant-color transition used for Apocrypha.
-[[cell_rules]]
-pattern = "DLC2Book*"
-transition = "color"
-color = "dominant"
-fallback_color = "#FFFFFF"
-fade_in_ms = 750
-hold_after_load_ms = 250
-fade_out_ms = 1000
-
-[[cell_rules]]
-pattern = "DLC2POIBook*"
-transition = "color"
-color = "dominant"
-fallback_color = "#FFFFFF"
-fade_in_ms = 750
-hold_after_load_ms = 250
-fade_out_ms = 1000
-
 # Example fixed-color rule. Remove the leading '#' characters to enable it.
 # [[cell_rules]]
 # pattern = "MyMod_AshCell*"
