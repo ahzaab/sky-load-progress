@@ -18,7 +18,7 @@ namespace load_progress
     public:
         static ProgressMeter& GetSingleton();
 
-        void Update(RE::IMenu* a_menu, double a_percent);
+        void Update(RE::IMenu* a_menu, double a_percent, float a_interval);
 
     private:
         static void   SetNumber(RE::GFxValue&, const char*, double);
@@ -31,6 +31,7 @@ namespace load_progress
         static double CalculateMeterXScale(double, double, double);
         static bool   ApplyLayout(
               RE::GFxMovieView*, RE::GFxValue&, RE::GFxValue&, RE::GFxValue&, RE::GFxValue&, RE::GFxValue&);
+        static void ApplyFade(RE::GFxMovieView*, RE::GFxValue&, float);
         static bool Create(RE::GFxMovieView*);
         static bool SetPercent(RE::GFxValue&, double);
 

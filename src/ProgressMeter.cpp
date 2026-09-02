@@ -294,6 +294,32 @@ namespace load_progress
         return true;
     }
 
+    // Mirrors LoadingMenu's native Menu_mc fade, which carries the level meter. Replacement menus that
+    // omit that clip receive the same 20-frame, 30-FPS linear fade authored by Bethesda.
+    void ProgressMeter::ApplyFade(
+        RE::GFxMovieView* a_view, RE::GFxValue& a_container, float a_interval)
+    {
+        if (!a_view || !a_container.IsObject()) {
+            return;
+        }
+
+        double nativeAlpha = 0.0;
+        RE::GFxValue nativeMenu;
+        if (a_view->GetVariable(&nativeMenu, "_root.Menu_mc") && nativeMenu.IsObject() &&
+            GetNumber(nativeMenu, "_alpha", nativeAlpha)) {
+            SetNumber(a_container, "_alpha", std::clamp(nativeAlpha, 0.0, 100.0));
+            return;
+        }
+
+        constexpr double nativeFadeDuration = 20.0 / 30.0;
+        double elapsed = 0.0;
+        GetNumber(a_container, "_slpFadeElapsed", elapsed);
+        elapsed = std::min(nativeFadeDuration,
+            elapsed + std::max(0.0, static_cast<double>(a_interval)));
+        SetNumber(a_container, "_slpFadeElapsed", elapsed);
+        SetNumber(a_container, "_alpha", 100.0 * elapsed / nativeFadeDuration);
+    }
+
     // Loads and initializes the standalone progress-meter movie.
     bool ProgressMeter::Create(RE::GFxMovieView* a_view)
     {
@@ -324,6 +350,9 @@ namespace load_progress
             }
 
             RE::GFxValue moviePath;
+            SetNumber(container, "_alpha", 0.0);
+            SetNumber(container, "_slpFadeElapsed", 0.0);
+
             moviePath.SetString("SkyrimLoadProgress/LoadingProgressMeter.swf");
             RE::GFxValue ignored;
             if (!container.Invoke("loadMovie", &ignored, &moviePath, 1)) {
@@ -411,7 +440,7 @@ namespace load_progress
     }
 
     // Creates the progress meter on demand and applies the supplied aggregate percentage.
-    void ProgressMeter::Update(RE::IMenu* a_menu, double a_percent)
+    void ProgressMeter::Update(RE::IMenu* a_menu, double a_percent, float a_interval)
     {
         // Keep queue tracking active, but do not create the external movie when its UI is disabled.
         if (!Settings::GetSingleton().GetProgressBar().enabled ||
@@ -439,6 +468,13 @@ namespace load_progress
             return;
         }
 
+        RE::GFxValue container;
+        if (a_menu->uiMovie->GetVariable(
+                &container, "_root.SkyrimLoadProgress") &&
+            container.IsObject()) {
+            ApplyFade(a_menu->uiMovie.get(), container, a_interval);
+        }
+
         if (!SetPercent(progressBar, a_percent)) {
             static bool warned = false;
             if (!warned) {
@@ -447,5 +483,4 @@ namespace load_progress
             }
         }
     }
-
 }
