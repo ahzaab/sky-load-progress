@@ -92,6 +92,7 @@ namespace load_progress
         static void              ObserveRenderWorld(bool);
         static void              CaptureBoundWorldTarget();
         static void              CaptureAfterScaleformBegin(void*);
+        static void              RestoreFaderPresentation(RE::IMenu*);
         static RE::UI_MESSAGE_RESULTS FaderMenuProcessMessage(RE::IMenu*, RE::UIMessage&);
         static void              FaderMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
         static void              MistMenuPostDisplay(RE::IMenu*);
@@ -121,6 +122,9 @@ namespace load_progress
         inline static std::atomic_bool                      preLoadOwnedFader{ false };
         inline static std::atomic_bool                      loadOwnedFader{ false };
         inline static std::atomic_bool                      loadFaderCloseQueued{ false };
+        inline static std::atomic_bool                      faderPresentationSuppressed{ false };
+        inline static std::atomic_bool                      faderWasVisible{ true };
+        inline static std::atomic<float>                    faderBackgroundAlpha{ 0.0F };
         inline static std::atomic_int64_t                   sleepFadeRequestDeadline{};
         inline static std::atomic_bool                      sleepFaderActive{ false };
         inline static std::atomic_uint8_t                   renderObservationState{};

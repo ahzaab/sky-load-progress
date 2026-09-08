@@ -72,6 +72,20 @@ namespace
         return true;
     }
 
+    // FaderMenu suppression modes:
+    //
+    // - Ordinary loads: recognized door, fast-travel, and save-load faders keep advancing, but their
+    //   persistent movie is hidden while the retained-frame compositor owns the loading transition.
+    // - Sleep/wait: this path may open LoadingMenu while time advances, but SleepWaitMenu owns its
+    //   complete fade-out/fade-in sequence. Its callback-free fader is excluded from load suppression.
+    // - New game: the compositor supplies the initial black loading presentation, then hands visual
+    //   ownership to MQ101's native FadeOutGame sequence beneath TitleSequenceMenu until it completes.
+    // - Other consumers: non-load requests outside a loading window, including the skills-tree
+    //   transition, restore the visibility and background alpha captured before load suppression.
+    //
+    // Skyrim always retains control of FaderData, fade timing, callbacks, and menu lifetime; the
+    // transition hooks change presentation only when the custom loading compositor owns the screen.
+
     // Defers hook installation until Skyrim has finished loading game data.
     void MessageHandler(SKSE::MessagingInterface::Message* a_message)
     {

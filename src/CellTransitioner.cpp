@@ -1417,12 +1417,27 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
     }
 
+    // Restores only the persistent movie state changed by load-fader suppression.
+    void CellTransitioner::RestoreFaderPresentation(RE::IMenu* a_menu)
+    {
+        if (!a_menu || !a_menu->uiMovie ||
+            !faderPresentationSuppressed.exchange(false, std::memory_order_acq_rel)) {
+            return;
+        }
+
+        // FaderMenu is persistent. Restore the exact presentation state observed before suppression;
+        // forcing an opaque Scaleform background here produces a gray frame during StatsMenu tweens.
+        a_menu->uiMovie->SetBackgroundAlpha(faderBackgroundAlpha.load(std::memory_order_acquire));
+        a_menu->uiMovie->SetVisible(faderWasVisible.load(std::memory_order_acquire));
+    }
+
     // Observes native fade requests, protecting only our internal rolling capture while Skyrim fades out.
     // The original FaderData and menu behavior remain untouched for script-driven fades and image modifiers.
     RE::UI_MESSAGE_RESULTS CellTransitioner::FaderMenuProcessMessage(
         RE::IMenu* a_menu, RE::UIMessage& a_message)
     {
         bool queuePostLoadClose = false;
+        bool restorePresentation = false;
 
         if (hooksEnabled.load(std::memory_order_acquire)) {
             const bool activeEpoch = epochActive.load(std::memory_order_acquire);
@@ -1444,6 +1459,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     data->isFadingOut && data->isBlack && !data->pausesGame;
                 const bool preserveSleepFader =
                     sleepFadeRequest || sleepFaderActive.load(std::memory_order_acquire);
+                const bool nativeLoadFade = IsNativeLoadFade(*data) && data->isBlack;
 
                 if (sleepFadeRequest) {
                     sleepFadeRequestDeadline.store(0, std::memory_order_release);
@@ -1463,7 +1479,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     // Static xrefs show that native load fades carry one of four dedicated completion
                     // callbacks. Papyrus FadeOutGame uses the separate callback-free builder, so this
                     // claims the initiating fader without suppressing arbitrary scripted fades.
-                    if (IsNativeLoadFade(*data) && data->isBlack) {
+                    if (nativeLoadFade) {
                         loadOwnedFader.store(true, std::memory_order_release);
                         if (!activeEpoch && !postLoadTransition) {
                             preLoadOwnedFader.store(true, std::memory_order_release);
@@ -1488,6 +1504,12 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         loadOwnedFader.store(true, std::memory_order_release);
                     }
                 }
+
+                // A prior load can leave this persistent movie hidden. Restore only for a request
+                // outside the load-suppression window (or for explicitly preserved native flows).
+                restorePresentation = preserveSleepFader ||
+                                      newGameTransitionActive.load(std::memory_order_acquire) ||
+                                      (!activeEpoch && !postLoadTransition && !nativeLoadFade);
             } else if (a_message.type == RE::UI_MESSAGE_TYPE::kHide) {
                 sleepFadeRequestDeadline.store(0, std::memory_order_release);
                 sleepFaderActive.store(false, std::memory_order_release);
@@ -1504,6 +1526,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         const auto result = originalFaderProcessMessage ?
                                 originalFaderProcessMessage(a_menu, a_message) :
                                 RE::UI_MESSAGE_RESULTS::kPassOn;
+
+        if (restorePresentation) {
+            RestoreFaderPresentation(a_menu);
+        }
 
         if (queuePostLoadClose) {
             if (auto* messages = RE::UIMessageQueue::GetSingleton()) {
@@ -1529,6 +1555,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             if (a_menu && a_menu->uiMovie) {
                 if (newGameTransitionActive.load(std::memory_order_acquire)) {
                     // Keep Skyrim's native black fade at menu depth 3, below TitleSequenceMenu at depth 4.
+                    RestoreFaderPresentation(a_menu);
                     a_menu->uiMovie->SetVisible(true);
 
                     const bool requestSeen = newGameFadeRequestSeen.load(std::memory_order_acquire);
@@ -1545,6 +1572,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 if (sleepFaderActive.load(std::memory_order_acquire)) {
                     // A load-owned request may have left this persistent movie hidden. Sleeping owns
                     // the complete native fade-out/fade-in lifetime, so explicitly restore it.
+                    RestoreFaderPresentation(a_menu);
                     a_menu->uiMovie->SetVisible(true);
                     return;
                 }
@@ -1558,6 +1586,13 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     loadOwnedFader.load(std::memory_order_acquire) &&
                     (transitionWindow || preLoadOwnedFader.load(std::memory_order_acquire));
                 if (suppressLoadFader) {
+                    bool expected = false;
+                    if (faderPresentationSuppressed.compare_exchange_strong(
+                            expected, true, std::memory_order_acq_rel)) {
+                        faderWasVisible.store(a_menu->uiMovie->GetVisible(), std::memory_order_release);
+                        faderBackgroundAlpha.store(
+                            a_menu->uiMovie->GetBackgroundAlpha(), std::memory_order_release);
+                    }
                     a_menu->uiMovie->SetBackgroundAlpha(0.0F);
                     a_menu->uiMovie->SetVisible(false);
                 }
