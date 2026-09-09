@@ -18,6 +18,7 @@ namespace load_progress
     public:
         static ProgressMeter& GetSingleton();
 
+        void SetVisible(RE::IMenu* a_menu, bool a_visible);
         void Update(RE::IMenu* a_menu, double a_percent, float a_interval);
 
     private:

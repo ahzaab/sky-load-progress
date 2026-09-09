@@ -45,7 +45,14 @@ namespace load_progress
 
         struct ProgressBar
         {
-            bool   enabled{ true };
+            enum class Mode : std::uint8_t
+            {
+                all,
+                customOnly,
+                disabled
+            };
+
+            Mode   mode{ Mode::all };
             double xPercent{ 50.0 };
             double yPercent{ 25.0 };
             double widthPercent{ 100.0 };
@@ -69,6 +76,8 @@ namespace load_progress
         [[nodiscard]] float                 GetBlurAmount() const;
         [[nodiscard]] const ProgressBar&    GetProgressBar() const;
         [[nodiscard]] bool                  ShowHUDDuringLoading() const;
+        [[nodiscard]] bool                  UseTransitionsForFastTravel() const;
+        [[nodiscard]] bool                  UseTransitionsForSaveLoads() const;
         [[nodiscard]] bool                  IsLoadingLoggingEnabled() const;
         [[nodiscard]] bool                  IsVerboseQueueLoggingEnabled() const;
         [[nodiscard]] const LoadedEntryLogging& GetLoadedEntryLogging() const;
@@ -100,6 +109,8 @@ namespace load_progress
         float                 blurAmount{ defaultBlurAmount };
         ProgressBar           progressBar;
         bool                  showHUDDuringLoading{ false };
+        bool                  transitionsForFastTravel{ true };
+        bool                  transitionsForSaveLoads{ true };
         bool                  loadingLoggingEnabled{ false };
         bool                  verboseQueueLoggingEnabled{ false };
         LoadedEntryLogging    loadedEntryLogging;

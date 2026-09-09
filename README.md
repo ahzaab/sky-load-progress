@@ -24,7 +24,9 @@ Transition settings are read from:
 Data/SKSE/Plugins/SkyrimLoadProgress.toml
 ```
 
-The TOML file can disable the loading meter or control its safe-zone position and width. It also controls the blur shader, warm-cell fade timing, the default cold-cell transition, and ordered rules for cell editor IDs. Cell patterns are case-insensitive and support `*` and `?` wildcards. The first matching rule wins.
+The TOML file can control the loading meter with `progress_bar.mode`: `"all"` shows it during mod-owned and vanilla loads, `"custom_only"` restricts it to the mod's custom presentations, and `"disabled"` hides it everywhere. Existing configurations using `progress_bar.enabled` remain supported when `mode` is absent. The table also controls the meter's safe-zone position and width. Other settings control the blur shader, warm-cell fade timing, the default cold-cell transition, and ordered rules for cell editor IDs. Cell patterns are case-insensitive and support `*` and `?` wildcards. The first matching rule wins.
+
+The `[transitions]` table independently controls the mod's presentation for fast travel and loading from a save. Set `fast_travel = false` or `load_from_save = false` to retain Skyrim's vanilla LoadingMenu and FaderMenu for that path, with no retained-frame transition. The loading progress meter follows `progress_bar.mode`. Door transitions keep their existing behavior.
 
 Starting a new game uses a dedicated black loading presentation. When MQ101 closes Loading Menu,
 the plugin hands presentation back to Skyrim's native FaderMenu without modifying its FaderData.

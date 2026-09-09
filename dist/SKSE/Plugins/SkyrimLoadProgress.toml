@@ -23,6 +23,13 @@ verbose_queues = false
 # transitions. The default false matches vanilla presentation.
 show_hud_during_loading = false
 
+[transitions]
+# Use the mod's retained-frame transitions for fast travel and save loads. Set
+# either option to false to leave Skyrim's LoadingMenu and FaderMenu presentation
+# completely vanilla for that load path. The progress meter remains available.
+fast_travel = true
+load_from_save = true
+
 [logging.loaded_entries]
 # Log references when Skyrim actually enqueues their normal 3D or object-loading
 # work. Each entry includes the reference, base object, and cell Form IDs and
@@ -37,9 +44,12 @@ transferred_references = false
 distant_references = false
 
 [progress_bar]
-# Set this to false to disable the loading progress meter. Queue tracking stays
-# active, while diagnostic output follows the [logging] settings above.
-enabled = true
+# Controls where the loading progress meter is displayed:
+# "all"         = mod-owned and vanilla loading presentations
+# "custom_only" = only the mod's custom loading presentations
+# "disabled"    = never show the meter
+# Queue tracking stays active in every mode.
+mode = "all"
 
 # Position is measured inside the Loading Menu safe zone. The meter's visual
 # bounds are used, so its registration point does not affect placement.

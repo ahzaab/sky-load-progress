@@ -13,7 +13,8 @@ namespace load_progress
         enum class Presentation : std::uint8_t
         {
             loadingMenu,
-            seamless
+            seamless,
+            vanilla
         };
 
         struct ControlState
@@ -47,6 +48,7 @@ namespace load_progress
         static void              HideHUDForLoad();
         static void              RestoreHUDVisibility() noexcept;
         static bool              IsSeamless();
+        static bool              IsVanilla();
         static void              DisableHooks(std::string_view) noexcept;
         static bool              IsExecutableAddress(std::uintptr_t) noexcept;
         static std::uintptr_t    FindUniqueRelativeCall(
@@ -92,6 +94,8 @@ namespace load_progress
         static void              ObserveRenderWorld(bool);
         static void              CaptureBoundWorldTarget();
         static void              CaptureAfterScaleformBegin(void*);
+        static void              FastTravelFadeCallbackRun(void*);
+        static void              SaveLoadFadeCallbackRun(void*);
         static void              RestoreFaderPresentation(RE::IMenu*);
         static RE::UI_MESSAGE_RESULTS FaderMenuProcessMessage(RE::IMenu*, RE::UIMessage&);
         static void              FaderMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
@@ -116,6 +120,7 @@ namespace load_progress
         inline static std::atomic_bool                      hudWasVisible{ true };
         inline static std::atomic_bool                      mainMenuLoadPending{ false };
         inline static std::atomic_bool                      mainMenuLoadActive{ false };
+        inline static std::atomic_bool                      vanillaLoadPending{ false };
         inline static std::atomic_bool                      newGameTransitionActive{ false };
         inline static std::atomic_bool                      newGameFadeRequestSeen{ false };
         inline static std::atomic_bool                      faderPresentAtLoadStart{ false };
@@ -133,6 +138,8 @@ namespace load_progress
         inline static std::mutex                            controlStateLock;
 
         inline static RE::UI_MESSAGE_RESULTS (*originalFaderProcessMessage)(RE::IMenu*, RE::UIMessage&){};
+        inline static void (*originalFastTravelFadeCallbackRun)(void*){};
+        inline static void (*originalSaveLoadFadeCallbackRun)(void*){};
         inline static AdvanceMovie_t                         originalFaderAdvanceMovie{};
         inline static PostDisplay_t                          originalMistPostDisplay{};
         inline static REL::Relocation<RenderWorld_t>         originalRenderWorld;

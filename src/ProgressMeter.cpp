@@ -283,7 +283,7 @@ namespace load_progress
         }
 
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            logger::info(
+            logger::debug(
                 "positioned loading meter: x={:.1f}% y={:.1f}% width={:.1f}% "
                 "localPosition=({:.1f}, {:.1f})->({:.1f}, {:.1f}) "
                 "globalSafe=({:.1f}, {:.1f})-({:.1f}, {:.1f}) globalBounds=({:.1f}, {:.1f})-({:.1f}, {:.1f})",
@@ -361,7 +361,7 @@ namespace load_progress
             }
 
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                logger::info("requested SkyrimLoadProgress/LoadingProgressMeter.swf");
+                logger::debug("requested SkyrimLoadProgress/LoadingProgressMeter.swf");
             }
             return false;
         }
@@ -415,7 +415,7 @@ namespace load_progress
         }
 
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            logger::info("initialized standalone loading meter; frames empty={:.0f} full={:.0f}",
+            logger::debug("initialized standalone loading meter; frames empty={:.0f} full={:.0f}",
                 emptyFrame, fullFrame);
         }
         return true;
@@ -439,11 +439,29 @@ namespace load_progress
         return a_meter.Invoke("gotoAndStop", &ignored, &argument, 1);
     }
 
+    // Shows or hides a meter already attached to this LoadingMenu movie.
+    void ProgressMeter::SetVisible(RE::IMenu* a_menu, bool a_visible)
+    {
+        if (!a_menu || !a_menu->uiMovie) {
+            return;
+        }
+
+        RE::GFxValue container;
+        if (a_menu->uiMovie->GetVariable(
+                &container, "_root.SkyrimLoadProgress") &&
+            container.IsObject()) {
+            RE::GFxValue visible;
+            visible.SetBoolean(a_visible);
+            container.SetMember("_visible", visible);
+        }
+    }
+
     // Creates the progress meter on demand and applies the supplied aggregate percentage.
     void ProgressMeter::Update(RE::IMenu* a_menu, double a_percent, float a_interval)
     {
         // Keep queue tracking active, but do not create the external movie when its UI is disabled.
-        if (!Settings::GetSingleton().GetProgressBar().enabled ||
+        if (Settings::GetSingleton().GetProgressBar().mode ==
+                Settings::ProgressBar::Mode::disabled ||
             !a_menu || !a_menu->uiMovie) {
             return;
         }
@@ -472,6 +490,9 @@ namespace load_progress
         if (a_menu->uiMovie->GetVariable(
                 &container, "_root.SkyrimLoadProgress") &&
             container.IsObject()) {
+            RE::GFxValue visible;
+            visible.SetBoolean(true);
+            container.SetMember("_visible", visible);
             ApplyFade(a_menu->uiMovie.get(), container, a_interval);
         }
 

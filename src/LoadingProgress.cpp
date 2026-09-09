@@ -270,9 +270,17 @@ namespace load_progress
 
             if (a_menu && a_menu->uiMovie) {
                 const bool seamless = CellTransitioner::IsSeamless();
-                a_menu->uiMovie->SetBackgroundAlpha(0.0F);
-                a_menu->uiMovie->SetVisible(!seamless);
-                if (!seamless) {
+                const bool vanilla = CellTransitioner::IsVanilla();
+                const auto& progressBar = Settings::GetSingleton().GetProgressBar();
+                if (!vanilla) {
+                    a_menu->uiMovie->SetBackgroundAlpha(0.0F);
+                    a_menu->uiMovie->SetVisible(!seamless);
+                }
+                const bool showProgress =
+                    progressBar.mode != Settings::ProgressBar::Mode::disabled &&
+                    (!vanilla || progressBar.mode == Settings::ProgressBar::Mode::all);
+                ProgressMeter::GetSingleton().SetVisible(a_menu, showProgress);
+                if (!seamless && showProgress) {
                     const auto basisPoints = displayedBasisPoints.load(std::memory_order_acquire);
                     ProgressMeter::GetSingleton().Update(
                         a_menu, static_cast<double>(basisPoints) / 100.0, a_interval);

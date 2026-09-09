@@ -23,6 +23,8 @@ namespace load_progress
         blurAmount = defaultBlurAmount;
         progressBar = {};
         showHUDDuringLoading = false;
+        transitionsForFastTravel = true;
+        transitionsForSaveLoads = true;
         loadingLoggingEnabled = false;
         verboseQueueLoggingEnabled = false;
         loadedEntryLogging = {};
@@ -69,7 +71,24 @@ namespace load_progress
 
             if (document.contains("progress_bar")) {
                 const auto& meter = toml::find(document, "progress_bar");
-                progressBar.enabled = toml::find_or<bool>(meter, "enabled", progressBar.enabled);
+                if (meter.contains("mode")) {
+                    const auto mode = ToLower(toml::find<std::string>(meter, "mode"));
+                    if (mode == "all") {
+                        progressBar.mode = ProgressBar::Mode::all;
+                    } else if (mode == "custom_only") {
+                        progressBar.mode = ProgressBar::Mode::customOnly;
+                    } else if (mode == "disabled") {
+                        progressBar.mode = ProgressBar::Mode::disabled;
+                    } else {
+                        progressBar.mode = ProgressBar::Mode::all;
+                        logger::warn("unknown progress bar mode '{}'; using 'all'", mode);
+                    }
+                } else {
+                    const bool legacyEnabled = toml::find_or<bool>(meter, "enabled", true);
+                    progressBar.mode = legacyEnabled ?
+                                           ProgressBar::Mode::all :
+                                           ProgressBar::Mode::disabled;
+                }
                 progressBar.xPercent = ReadPercent(meter, "x_percent", progressBar.xPercent);
                 progressBar.yPercent = ReadPercent(meter, "y_percent", progressBar.yPercent);
                 progressBar.widthPercent = std::max(1.0,
@@ -80,6 +99,14 @@ namespace load_progress
                 const auto& interfaceTable = toml::find(document, "interface");
                 showHUDDuringLoading =
                     toml::find_or<bool>(interfaceTable, "show_hud_during_loading", showHUDDuringLoading);
+            }
+
+            if (document.contains("transitions")) {
+                const auto& transitions = toml::find(document, "transitions");
+                transitionsForFastTravel = toml::find_or<bool>(
+                    transitions, "fast_travel", transitionsForFastTravel);
+                transitionsForSaveLoads = toml::find_or<bool>(
+                    transitions, "load_from_save", transitionsForSaveLoads);
             }
 
             if (document.contains("warm")) {
@@ -97,10 +124,15 @@ namespace load_progress
             ReadCellRules(document);
             logger::info("loaded settings from {} with {} cell transition rule(s); blur={} amount={:.2f}",
                 path.string(), cellRules.size(), IsBlurEnabled(), blurAmount);
-            logger::info("loading meter: enabled={} x={:.1f}% y={:.1f}% width={:.1f}%",
-                progressBar.enabled, progressBar.xPercent, progressBar.yPercent,
+            const auto progressBarMode =
+                progressBar.mode == ProgressBar::Mode::all ? "all" :
+                progressBar.mode == ProgressBar::Mode::customOnly ? "custom_only" : "disabled";
+            logger::info("loading meter: mode={} x={:.1f}% y={:.1f}% width={:.1f}%",
+                progressBarMode, progressBar.xPercent, progressBar.yPercent,
                 progressBar.widthPercent);
             logger::info("loading HUD: visible={}", showHUDDuringLoading);
+            logger::info("custom transitions: fast travel={} load from save={}",
+                transitionsForFastTravel, transitionsForSaveLoads);
             logger::info("loading diagnostics: enabled={} verbose queues={}",
                 loadingLoggingEnabled, IsVerboseQueueLoggingEnabled());
             logger::info("loaded-entry diagnostics: objects={} transfers={} distant={}",
@@ -117,6 +149,8 @@ namespace load_progress
             progressBar = {};
             loadingLoggingEnabled = false;
             showHUDDuringLoading = false;
+            transitionsForFastTravel = true;
+            transitionsForSaveLoads = true;
             verboseQueueLoggingEnabled = false;
             loadedEntryLogging = {};
         }
@@ -140,7 +174,7 @@ namespace load_progress
         for (const auto& rule : cellRules) {
             if (MatchesPattern(a_editorID, rule.pattern)) {
                 if (IsLoadingLoggingEnabled()) {
-                    logger::info(
+                    logger::debug(
                         "cell transition rule matched: editorID='{}' pattern='{}'", a_editorID, rule.pattern);
                 }
                 return rule.transition;
@@ -172,6 +206,18 @@ namespace load_progress
     bool Settings::ShowHUDDuringLoading() const
     {
         return showHUDDuringLoading;
+    }
+
+    // Returns whether fast travel uses the retained-frame transition instead of Skyrim's native presentation.
+    bool Settings::UseTransitionsForFastTravel() const
+    {
+        return transitionsForFastTravel;
+    }
+
+    // Returns whether loading a save uses the retained-frame transition instead of Skyrim's native presentation.
+    bool Settings::UseTransitionsForSaveLoads() const
+    {
+        return transitionsForSaveLoads;
     }
 
     // Returns whether per-load summaries and transition diagnostics may be written.
