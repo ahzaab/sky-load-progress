@@ -103,6 +103,7 @@ namespace load_progress
         frozenFrameLocked.store(false, std::memory_order_release);
         preLoadOwnedFader.store(false, std::memory_order_release);
         vanillaLoadPending.store(false, std::memory_order_release);
+        fastTravelBlackPending.store(false, std::memory_order_release);
         loadOwnedFader.store(false, std::memory_order_release);
         loadFaderCloseQueued.store(false, std::memory_order_release);
         sleepFadeRequestDeadline.store(0, std::memory_order_release);
@@ -330,6 +331,7 @@ namespace load_progress
     {
         if (presentation.load(std::memory_order_acquire) == Presentation::vanilla) {
             preLoadOwnedFader.store(false, std::memory_order_release);
+            fastTravelBlackPending.store(false, std::memory_order_release);
             loadOwnedFader.store(false, std::memory_order_release);
             loadFaderCloseQueued.store(false, std::memory_order_release);
             epochActive.store(false, std::memory_order_release);
@@ -349,6 +351,7 @@ namespace load_progress
 
         // Present uses this gate to choose an active loading presentation instead of the post-load fade.
         epochActive.store(true, std::memory_order_release);
+        fastTravelBlackPending.store(false, std::memory_order_release);
         renderObservationState.store(1, std::memory_order_release);
     }
 
@@ -437,12 +440,17 @@ namespace load_progress
         }
 
         if (!hudVisibilityOwned.load(std::memory_order_acquire)) {
-            const bool wasVisible = movie->GetVisible();
-            hudWasVisible.store(wasVisible, std::memory_order_release);
+            // Dialogue and other modal menus can temporarily hide HUDMenu before initiating a load.
+            // Do not claim an already-hidden movie: Skyrim may restore it while LoadingMenu is open,
+            // and writing the stale hidden state back at EndLoad would leave the gameplay HUD disabled.
+            if (!movie->GetVisible()) {
+                return;
+            }
+
             hudVisibilityOwned.store(true, std::memory_order_release);
 
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                logger::debug("claimed HUDMenu visibility for loading; previous visibility={}", wasVisible);
+                logger::debug("claimed visible HUDMenu for loading");
             }
         }
 
@@ -460,11 +468,10 @@ namespace load_progress
             auto* ui = RE::UI::GetSingleton();
             auto  movie = ui ? ui->GetMovieView(RE::HUDMenu::MENU_NAME) : nullptr;
             if (movie) {
-                const bool wasVisible = mainMenuLoadActive.load(std::memory_order_acquire) ||
-                                        hudWasVisible.load(std::memory_order_acquire);
-                movie->SetVisible(wasVisible);
+                // Ownership is acquired only when this class changes the movie from visible to hidden.
+                movie->SetVisible(true);
                 if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                    logger::debug("restored HUDMenu visibility={}", wasVisible);
+                    logger::debug("restored HUDMenu visibility=true");
                 }
             }
         } catch (...) {
@@ -693,11 +700,31 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                 (fromMainMenu &&
                                     !Settings::GetSingleton().UseTransitionsForSaveLoads());
         if (useVanilla) {
+            fastTravelBlackPending.store(false, std::memory_order_release);
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::debug("selected Skyrim's vanilla loading presentation: cell={:08X} editorID='{}'",
                     cell ? cell->GetFormID() : 0, editorID);
             }
             return Presentation::vanilla;
+        }
+        if (fastTravelBlackPending.load(std::memory_order_acquire)) {
+            // MapMenu's 3D scene can be only partially rendered when its fast-travel fade closes it.
+            // Continue the native black fade with an opaque compositor cover instead of exposing or
+            // blurring that last captured map frame.
+            const auto& cold = Settings::GetSingleton().GetColdTransition(editorID);
+            transitionType.store(Settings::TransitionType::color, std::memory_order_release);
+            colorSource.store(Settings::ColorSource::fixed, std::memory_order_release);
+            transitionColor.store(0x000000, std::memory_order_release);
+            fadeInDuration.store(0, std::memory_order_release);
+            holdAfterLoad.store(cold.holdAfterLoad.count(), std::memory_order_release);
+            fadeOutDuration.store(cold.fadeOut.count(), std::memory_order_release);
+
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::debug(
+                    "selected fixed black map fast-travel presentation: cell={:08X} editorID='{}' hold={}ms fadeOut={}ms",
+                    cell ? cell->GetFormID() : 0, editorID, holdAfterLoad.load(), fadeOutDuration.load());
+            }
+            return Presentation::loadingMenu;
         }
         if (fromMainMenu) {
             // A menu movie is not a useful retained gameplay frame. Keep Skyrim's native fade to black,
@@ -1496,6 +1523,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             const bool useCustomTransition =
                 Settings::GetSingleton().UseTransitionsForFastTravel();
             vanillaLoadPending.store(!useCustomTransition, std::memory_order_release);
+            fastTravelBlackPending.store(useCustomTransition, std::memory_order_release);
             if (!useCustomTransition) {
                 preLoadOwnedFader.store(false, std::memory_order_release);
                 loadOwnedFader.store(false, std::memory_order_release);
@@ -1515,6 +1543,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     void CellTransitioner::SaveLoadFadeCallbackRun(void* a_callback)
     {
         if (hooksEnabled.load(std::memory_order_acquire)) {
+            fastTravelBlackPending.store(false, std::memory_order_release);
             const bool useCustomTransition =
                 Settings::GetSingleton().UseTransitionsForSaveLoads();
             vanillaLoadPending.store(!useCustomTransition, std::memory_order_release);
@@ -1578,6 +1607,14 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 const auto nativeLoadPath = GetNativeLoadPath(*data);
                 const bool nativeLoadFade = nativeLoadPath != NativeLoadPath::none && data->isBlack;
                 const bool vanillaLoadFade = nativeLoadFade && !UsesCustomTransition(nativeLoadPath);
+                if (nativeLoadFade) {
+                    fastTravelBlackPending.store(
+                        nativeLoadPath == NativeLoadPath::fastTravel && !vanillaLoadFade,
+                        std::memory_order_release);
+                }
+                auto* ui = RE::UI::GetSingleton();
+                const bool mapMenuFade = !nativeLoadFade && ui &&
+                                         ui->IsMenuOpen(RE::MapMenu::MENU_NAME);
                 if (vanillaLoadFade && data->isFadingOut) {
                     vanillaLoadPending.store(true, std::memory_order_release);
                     preLoadOwnedFader.store(false, std::memory_order_release);
@@ -1594,12 +1631,20 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     loadOwnedFader.store(false, std::memory_order_release);
                     loadFaderCloseQueued.store(false, std::memory_order_release);
                 }
+                if (mapMenuFade) {
+                    // MapMenu uses FaderMenu for its own camera transitions when opening and closing.
+                    // Do not let stale or fallback load ownership hide that menu-owned fade. A real
+                    // fast-travel request remains load-owned because it has a native load callback.
+                    preLoadOwnedFader.store(false, std::memory_order_release);
+                    loadOwnedFader.store(false, std::memory_order_release);
+                    loadFaderCloseQueued.store(false, std::memory_order_release);
+                }
 
                 if (newGameTransitionActive.load(std::memory_order_acquire)) {
                     if (!data->isFadingOut && data->isBlack && data->fadeDuration > 0.0F) {
                         newGameFadeRequestSeen.store(true, std::memory_order_release);
                     }
-                } else if (!preserveSleepFader) {
+                } else if (!preserveSleepFader && !mapMenuFade) {
                     // Static xrefs show that native load fades carry one of four dedicated completion
                     // callbacks. Papyrus FadeOutGame uses the separate callback-free builder, so this
                     // claims the initiating fader without suppressing arbitrary scripted fades.
@@ -1632,7 +1677,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
                 // A prior load can leave this persistent movie hidden. Restore only for a request
                 // outside the load-suppression window (or for explicitly preserved native flows).
-                restorePresentation = preserveSleepFader || vanillaLoadFade ||
+                restorePresentation = preserveSleepFader || mapMenuFade || vanillaLoadFade ||
                                       newGameTransitionActive.load(std::memory_order_acquire) ||
                                       (!activeEpoch && !postLoadTransition && !nativeLoadFade);
             } else if (a_message.type == RE::UI_MESSAGE_TYPE::kHide) {
@@ -1712,7 +1757,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 // flash black in the short gap before the captured-frame transition takes over.
                 const bool suppressLoadFader =
                     loadOwnedFader.load(std::memory_order_acquire) &&
-                    (transitionWindow || preLoadOwnedFader.load(std::memory_order_acquire));
+                    (transitionWindow || preLoadOwnedFader.load(std::memory_order_acquire)) &&
+                    !(fastTravelBlackPending.load(std::memory_order_acquire) && !transitionWindow);
                 if (suppressLoadFader) {
                     bool expected = false;
                     if (faderPresentationSuppressed.compare_exchange_strong(

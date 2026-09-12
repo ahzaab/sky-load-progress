@@ -117,10 +117,10 @@ namespace load_progress
         inline static std::atomic_bool                      dominantColorPending{ false };
         inline static std::atomic_uint32_t                  transitionColor{ 0xFFFFFF };
         inline static std::atomic_bool                      hudVisibilityOwned{ false };
-        inline static std::atomic_bool                      hudWasVisible{ true };
         inline static std::atomic_bool                      mainMenuLoadPending{ false };
         inline static std::atomic_bool                      mainMenuLoadActive{ false };
         inline static std::atomic_bool                      vanillaLoadPending{ false };
+        inline static std::atomic_bool                      fastTravelBlackPending{ false };
         inline static std::atomic_bool                      newGameTransitionActive{ false };
         inline static std::atomic_bool                      newGameFadeRequestSeen{ false };
         inline static std::atomic_bool                      faderPresentAtLoadStart{ false };
