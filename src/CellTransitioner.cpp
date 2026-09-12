@@ -686,11 +686,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return Presentation::loadingMenu;
         }
 
-        auto*                  cell = GetQueuedDestinationCell();
-        const bool             resident = cell && cell->GetRuntimeData().loadedData;
-        const auto*            editorIDText = cell ? cell->GetFormEditorID() : nullptr;
-        const std::string_view editorID = editorIDText ? editorIDText : "";
-
         auto*      ui = RE::UI::GetSingleton();
         const bool fromMainMenu = mainMenuLoadPending.exchange(false, std::memory_order_acq_rel) ||
                                   (ui && ui->IsMenuOpen(RE::MainMenu::MENU_NAME));
@@ -702,16 +697,16 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (useVanilla) {
             fastTravelBlackPending.store(false, std::memory_order_release);
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                logger::debug("selected Skyrim's vanilla loading presentation: cell={:08X} editorID='{}'",
-                    cell ? cell->GetFormID() : 0, editorID);
+                logger::debug("selected Skyrim's vanilla loading presentation");
             }
             return Presentation::vanilla;
         }
         if (fastTravelBlackPending.load(std::memory_order_acquire)) {
             // MapMenu's 3D scene can be only partially rendered when its fast-travel fade closes it.
             // Continue the native black fade with an opaque compositor cover instead of exposing or
-            // blurring that last captured map frame.
-            const auto& cold = Settings::GetSingleton().GetColdTransition(editorID);
+            // blurring that last captured map frame. Do not inspect the queued destination's worldspace
+            // cell map here: the engine may still be materializing that map for scripted fast travel.
+            const auto& cold = Settings::GetSingleton().GetColdTransition({});
             transitionType.store(Settings::TransitionType::color, std::memory_order_release);
             colorSource.store(Settings::ColorSource::fixed, std::memory_order_release);
             transitionColor.store(0x000000, std::memory_order_release);
@@ -721,11 +716,17 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::debug(
-                    "selected fixed black map fast-travel presentation: cell={:08X} editorID='{}' hold={}ms fadeOut={}ms",
-                    cell ? cell->GetFormID() : 0, editorID, holdAfterLoad.load(), fadeOutDuration.load());
+                    "selected fixed black fast-travel presentation: hold={}ms fadeOut={}ms",
+                    holdAfterLoad.load(), fadeOutDuration.load());
             }
             return Presentation::loadingMenu;
         }
+
+        auto*                  cell = GetQueuedDestinationCell();
+        const bool             resident = cell && cell->GetRuntimeData().loadedData;
+        const auto*            editorIDText = cell ? cell->GetFormEditorID() : nullptr;
+        const std::string_view editorID = editorIDText ? editorIDText : "";
+
         if (fromMainMenu) {
             // A menu movie is not a useful retained gameplay frame. Keep Skyrim's native fade to black,
             // then hold that same fixed black beneath LoadingMenu and fade it into the loaded save.
