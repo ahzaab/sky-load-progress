@@ -406,6 +406,36 @@ namespace load_progress
         OnComplete(Queue::tasks);
     }
 
+    void LoadingProgress::PostProcessingEnqueue(void* a_queue) noexcept
+    {
+        if (originalPostProcessingEnqueue) {
+            originalPostProcessingEnqueue(a_queue);
+        }
+        const auto* manager = RE::IOManager::GetSingleton();
+        const auto* postProcessing = manager ?
+                                         *reinterpret_cast<void* const*>(
+                                             reinterpret_cast<std::uintptr_t>(manager) + 0xE0) :
+                                         nullptr;
+        if (a_queue == postProcessing) {
+            OnEnqueue(Queue::postProcessing);
+        }
+    }
+
+    void LoadingProgress::PostProcessingComplete(void* a_queue) noexcept
+    {
+        if (originalPostProcessingComplete) {
+            originalPostProcessingComplete(a_queue);
+        }
+        const auto* manager = RE::IOManager::GetSingleton();
+        const auto* postProcessing = manager ?
+                                         *reinterpret_cast<void* const*>(
+                                             reinterpret_cast<std::uintptr_t>(manager) + 0xE0) :
+                                         nullptr;
+        if (a_queue == postProcessing) {
+            OnComplete(Queue::postProcessing);
+        }
+    }
+
     namespace
     {
         using ContextCallback = void (*)(CONTEXT&) noexcept;
@@ -627,6 +657,62 @@ namespace load_progress
             vtable.write_vfunc(enqueueIndex, LoadingProgress::IOTaskEnqueue);
             vtable.write_vfunc(completeIndex, LoadingProgress::IOTaskComplete);
             logger::info("installed IOManager task enqueue/completion vtable hooks");
+        }
+
+        // Skyrim's final IOTask priority queue uses the same four-byte counter methods. Its vtable
+        // is shared by other instances, so the callbacks count only IOManager's +0xE0 queue.
+        void InstallPostProcessingHooks()
+        {
+            using namespace Xbyak::util;
+
+            const auto enqueue = REL::Relocation<std::uintptr_t>(IDs::PostProcessingEnqueue).address();
+            const auto complete = REL::Relocation<std::uintptr_t>(IDs::PostProcessingComplete).address();
+            const auto count = REL::Relocation<std::uintptr_t>(IDs::PostProcessingCount).address();
+            const auto enqueueSignature = BuildCounterSignature(CounterOperation::increment, rcx, 0x14);
+            const auto completeSignature = BuildCounterSignature(CounterOperation::decrement, rcx, 0x14);
+            constexpr auto countSignature = std::to_array<std::uint8_t>({ 0x8B, 0x41, 0x14, 0xC3 });
+            if (!enqueue || !complete || !count ||
+                std::memcmp(reinterpret_cast<const void*>(enqueue), enqueueSignature.data(), enqueueSignature.size()) != 0 ||
+                std::memcmp(reinterpret_cast<const void*>(complete), completeSignature.data(), completeSignature.size()) != 0 ||
+                *reinterpret_cast<const std::uint8_t*>(enqueue + enqueueSignature.size()) != 0xC3 ||
+                *reinterpret_cast<const std::uint8_t*>(complete + completeSignature.size()) != 0xC3 ||
+                std::memcmp(reinterpret_cast<const void*>(count), countSignature.data(), countSignature.size()) != 0) {
+                throw std::runtime_error("post-processing counter hook bytes did not match this runtime");
+            }
+
+            constexpr std::size_t enqueueIndex = 1;
+            constexpr std::size_t completeIndex = 2;
+            constexpr std::size_t countIndex = 3;
+            REL::Relocation<std::uintptr_t> vtable{
+                RE::VTABLE_SynchronizedPriorityQueue_NiPointer_IOTask__[0]
+            };
+            const auto currentEnqueue = *reinterpret_cast<const std::uintptr_t*>(
+                vtable.address() + enqueueIndex * sizeof(std::uintptr_t));
+            const auto currentComplete = *reinterpret_cast<const std::uintptr_t*>(
+                vtable.address() + completeIndex * sizeof(std::uintptr_t));
+            const auto currentCount = *reinterpret_cast<const std::uintptr_t*>(
+                vtable.address() + countIndex * sizeof(std::uintptr_t));
+            if (currentEnqueue != enqueue || currentComplete != complete || currentCount != count) {
+                throw std::runtime_error(
+                    "post-processing vtable did not reference the validated counter methods");
+            }
+
+            auto* manager = RE::IOManager::GetSingleton();
+            const auto postProcessing = manager ?
+                                            *reinterpret_cast<void**>(
+                                                reinterpret_cast<std::uintptr_t>(manager) + 0xE0) :
+                                            nullptr;
+            if (!postProcessing || *reinterpret_cast<const std::uintptr_t*>(postProcessing) != vtable.address()) {
+                throw std::runtime_error("could not validate IOManager's post-processing queue instance");
+            }
+
+            LoadingProgress::originalPostProcessingEnqueue =
+                reinterpret_cast<LoadingProgress::PostProcessingMutation_t>(currentEnqueue);
+            LoadingProgress::originalPostProcessingComplete =
+                reinterpret_cast<LoadingProgress::PostProcessingMutation_t>(currentComplete);
+            vtable.write_vfunc(enqueueIndex, LoadingProgress::PostProcessingEnqueue);
+            vtable.write_vfunc(completeIndex, LoadingProgress::PostProcessingComplete);
+            logger::info("installed IOManager post-processing enqueue/completion vtable hooks");
         }
 
         // Resolves the original counter callees that semantic hooks must invoke in place of E8 calls.
@@ -995,6 +1081,7 @@ namespace load_progress
 
         InstallMutationHooks();
         InstallIOTaskHooks();
+        InstallPostProcessingHooks();
         InstallLoadedEntryHooks();
         InstallLoadingMenuHook();
 

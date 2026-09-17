@@ -77,6 +77,7 @@ namespace load_progress
         using ReferenceEnqueue_t = std::uintptr_t (*)(RE::TESObjectCELL*);
         using DistantReferenceEnqueue_t = std::uintptr_t (*)(RE::TESObjectCELL*, RE::TESObjectREFR*);
         using IOTaskMutation_t = void (*)(RE::IOManager*);
+        using PostProcessingMutation_t = void (*)(void*);
 
         static LoadingProgress& GetSingleton();
         static std::uint64_t    GetLiveRemaining();
@@ -108,6 +109,8 @@ namespace load_progress
         static void                   BackgroundComplete(CONTEXT&) noexcept;
         static void                   IOTaskEnqueue(RE::IOManager*) noexcept;
         static void                   IOTaskComplete(RE::IOManager*) noexcept;
+        static void                   PostProcessingEnqueue(void*) noexcept;
+        static void                   PostProcessingComplete(void*) noexcept;
         static void                   SeedQueuedWork();
         static void                   BeginLoadingEpoch();
         static void                   EndLoadingEpoch();
@@ -144,6 +147,8 @@ namespace load_progress
         inline static DistantReferenceEnqueue_t                    originalDistantReferenceEnqueue{};
         inline static IOTaskMutation_t                              originalIOTaskEnqueue{};
         inline static IOTaskMutation_t                              originalIOTaskComplete{};
+        inline static PostProcessingMutation_t                      originalPostProcessingEnqueue{};
+        inline static PostProcessingMutation_t                      originalPostProcessingComplete{};
 
     private:
         LoadingProgress() = default;

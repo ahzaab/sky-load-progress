@@ -33,6 +33,11 @@ namespace load_progress
         constexpr REL::RelocationID IOTasksEnqueue{ 75683, 75683 };
         constexpr REL::RelocationID IOTasksComplete{ 75674, 75674 };
 
+        // IOManager's +0xE0 priority queue supplies Skyrim's post-processing diagnostic value.
+        constexpr REL::RelocationID PostProcessingEnqueue{ 13095, 13241 };
+        constexpr REL::RelocationID PostProcessingComplete{ 13073, 13222 };
+        constexpr REL::RelocationID PostProcessingCount{ 13089, 13235 };
+
         // These callers own the semantic enqueue operations used by loaded-entry diagnostics. The
         // hook installer finds their unique calls to the counter helpers above, so these sites do not
         // depend on fragile function-relative offsets.

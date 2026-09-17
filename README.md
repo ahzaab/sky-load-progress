@@ -4,7 +4,7 @@ Skyrim Load Progress adds a progress meter to the loading screen. The meter uses
 
 > **Experimental branch:** `seamless-loading-experiment` keeps Skyrim's loading, fader, and mist update loops running but disables their presentation. This hides both Scaleform movies and suppresses MistMenu's native mist, background, and load-screen NIF rendering. It also disables form-backed image-space modifiers, including their cross-fades. The last completed frame is kept in a GPU texture and presented while the Loading Menu is open. Expect a frozen image followed by normal pop-in when rendering resumes.
 
-This is still a proof of concept. The plugin currently tracks the reference, critical reference, distant reference, and loading-task work used while cells are loading. Optional diagnostics can write the queue activity and calculated progress to `SkyrimLoadProgress.log`.
+This is still a proof of concept. The plugin currently tracks the reference, critical reference, distant reference, background, IO task, and post-processing work used while cells are loading. Optional diagnostics can write the queue activity and calculated progress to `SkyrimLoadProgress.log`.
 
 ## How it Works
 
@@ -41,7 +41,7 @@ Settings are read once when Skyrim finishes loading game data. Restart the game 
 
 ## Current Limitations
 
-Skyrim also reports background processing, tasks, and post-processing work in its loading diagnostics. The background-worker batches and IOManager resource tasks are now tracked. Post-processing remains excluded because its diagnostic value combines a virtual queue query with multiple producer paths that do not yet have a proven one-to-one enqueue/completion pairing.
+Skyrim also reports background processing, tasks, and post-processing work in its loading diagnostics. The plugin now tracks the same three values through their paired counter mutations, including the final IOManager priority queue used for post-processing.
 
 The Loading Menu can also remain open after the tracked cell queues are finished. More loading stages may need to be added before the meter represents the entire load process.
 
