@@ -388,6 +388,23 @@ namespace load_progress
     void LoadingProgress::ReferenceComplete(CONTEXT&) noexcept { OnComplete(Queue::references); }
     void LoadingProgress::DistantEnqueue(CONTEXT&) noexcept { OnEnqueue(Queue::distantReferences); }
     void LoadingProgress::DistantComplete(CONTEXT&) noexcept { OnComplete(Queue::distantReferences); }
+    void LoadingProgress::BackgroundEnqueue(CONTEXT&) noexcept { OnEnqueue(Queue::backgroundProcessing); }
+    void LoadingProgress::BackgroundComplete(CONTEXT&) noexcept { OnComplete(Queue::backgroundProcessing); }
+    void LoadingProgress::IOTaskEnqueue(RE::IOManager* a_manager) noexcept
+    {
+        if (originalIOTaskEnqueue) {
+            originalIOTaskEnqueue(a_manager);
+        }
+        OnEnqueue(Queue::tasks);
+    }
+
+    void LoadingProgress::IOTaskComplete(RE::IOManager* a_manager) noexcept
+    {
+        if (originalIOTaskComplete) {
+            originalIOTaskComplete(a_manager);
+        }
+        OnComplete(Queue::tasks);
+    }
 
     namespace
     {
@@ -477,7 +494,16 @@ namespace load_progress
                     BuildCounterSignature(CounterOperation::increment, rcx, 0x174) },
                 { IDs::DistantReferencesComplete, Offsets::DistantReferencesComplete,
                     LoadingProgress::DistantComplete, "distant completion",
-                    BuildCounterSignature(CounterOperation::decrement, rax, 0x174) }
+                    BuildCounterSignature(CounterOperation::decrement, rax, 0x174) },
+                { IDs::BackgroundTasksProcess, Offsets::BackgroundTasksEnqueue,
+                    LoadingProgress::BackgroundEnqueue, "background-task enqueue",
+                    BuildCounterSignature(CounterOperation::increment,
+                        REL::Module::get().version() < Runtimes::SkyrimAEStart ? rsi : r15, 0x68) },
+                { IDs::BackgroundTasksProcess, Offsets::BackgroundTasksComplete,
+                    LoadingProgress::BackgroundComplete, "background-task completion",
+                    BuildCounterSignature(CounterOperation::decrement,
+                        REL::Module::get().version() < Runtimes::SkyrimAEStart ? rsi : r15, 0x68) },
+
             });
         }
 
@@ -551,7 +577,7 @@ namespace load_progress
             logger::info("installed direct {} hook at {:X}", definition.name, a_hook.address);
         }
 
-        // Installs direct hooks on the three decoded reference queue mutations.
+        // Installs direct hooks on the decoded reference queues and loading-task worker.
         void InstallMutationHooks()
         {
             RequireQueueHookTrampolineSpace();
@@ -563,6 +589,44 @@ namespace load_progress
             for (const auto& hook : resolved) {
                 InstallMutationHook(hook);
             }
+        }
+
+        // The IOManager counter methods are only four bytes plus RET, too short for a context hook.
+        // Validate the exact bodies, then replace their virtual slots and chain the originals.
+        void InstallIOTaskHooks()
+        {
+            using namespace Xbyak::util;
+
+            const auto enqueue = REL::Relocation<std::uintptr_t>(IDs::IOTasksEnqueue).address();
+            const auto complete = REL::Relocation<std::uintptr_t>(IDs::IOTasksComplete).address();
+            const auto enqueueSignature = BuildCounterSignature(CounterOperation::increment, rcx, 0x30);
+            const auto completeSignature = BuildCounterSignature(CounterOperation::decrement, rcx, 0x30);
+            if (!enqueue || !complete ||
+                std::memcmp(reinterpret_cast<const void*>(enqueue), enqueueSignature.data(), enqueueSignature.size()) != 0 ||
+                std::memcmp(reinterpret_cast<const void*>(complete), completeSignature.data(), completeSignature.size()) != 0 ||
+                *reinterpret_cast<const std::uint8_t*>(enqueue + enqueueSignature.size()) != 0xC3 ||
+                *reinterpret_cast<const std::uint8_t*>(complete + completeSignature.size()) != 0xC3) {
+                throw std::runtime_error("IOManager task-counter hook bytes did not match this runtime");
+            }
+
+            constexpr std::size_t enqueueIndex = 14;
+            constexpr std::size_t completeIndex = 15;
+            REL::Relocation<std::uintptr_t> vtable{ RE::VTABLE_IOManager[0] };
+            const auto currentEnqueue = *reinterpret_cast<const std::uintptr_t*>(
+                vtable.address() + enqueueIndex * sizeof(std::uintptr_t));
+            const auto currentComplete = *reinterpret_cast<const std::uintptr_t*>(
+                vtable.address() + completeIndex * sizeof(std::uintptr_t));
+            if (currentEnqueue != enqueue || currentComplete != complete) {
+                throw std::runtime_error("IOManager task-counter vtable did not reference the validated methods");
+            }
+
+            LoadingProgress::originalIOTaskEnqueue =
+                reinterpret_cast<LoadingProgress::IOTaskMutation_t>(currentEnqueue);
+            LoadingProgress::originalIOTaskComplete =
+                reinterpret_cast<LoadingProgress::IOTaskMutation_t>(currentComplete);
+            vtable.write_vfunc(enqueueIndex, LoadingProgress::IOTaskEnqueue);
+            vtable.write_vfunc(completeIndex, LoadingProgress::IOTaskComplete);
+            logger::info("installed IOManager task enqueue/completion vtable hooks");
         }
 
         // Resolves the original counter callees that semantic hooks must invoke in place of E8 calls.
@@ -930,6 +994,7 @@ namespace load_progress
         }
 
         InstallMutationHooks();
+        InstallIOTaskHooks();
         InstallLoadedEntryHooks();
         InstallLoadingMenuHook();
 

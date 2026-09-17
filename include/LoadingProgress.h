@@ -76,6 +76,7 @@ namespace load_progress
         using ProcessMessage_t = RE::UI_MESSAGE_RESULTS (*)(RE::IMenu*, RE::UIMessage&);
         using ReferenceEnqueue_t = std::uintptr_t (*)(RE::TESObjectCELL*);
         using DistantReferenceEnqueue_t = std::uintptr_t (*)(RE::TESObjectCELL*, RE::TESObjectREFR*);
+        using IOTaskMutation_t = void (*)(RE::IOManager*);
 
         static LoadingProgress& GetSingleton();
         static std::uint64_t    GetLiveRemaining();
@@ -103,6 +104,10 @@ namespace load_progress
         static void                   ReferenceComplete(CONTEXT&) noexcept;
         static void                   DistantEnqueue(CONTEXT&) noexcept;
         static void                   DistantComplete(CONTEXT&) noexcept;
+        static void                   BackgroundEnqueue(CONTEXT&) noexcept;
+        static void                   BackgroundComplete(CONTEXT&) noexcept;
+        static void                   IOTaskEnqueue(RE::IOManager*) noexcept;
+        static void                   IOTaskComplete(RE::IOManager*) noexcept;
         static void                   SeedQueuedWork();
         static void                   BeginLoadingEpoch();
         static void                   EndLoadingEpoch();
@@ -137,6 +142,8 @@ namespace load_progress
         inline static AdvanceMovie_t                               originalAdvanceMovie{};
         inline static ReferenceEnqueue_t                           originalReferenceEnqueue{};
         inline static DistantReferenceEnqueue_t                    originalDistantReferenceEnqueue{};
+        inline static IOTaskMutation_t                              originalIOTaskEnqueue{};
+        inline static IOTaskMutation_t                              originalIOTaskComplete{};
 
     private:
         LoadingProgress() = default;

@@ -25,6 +25,14 @@ namespace load_progress
         constexpr REL::RelocationID DistantReferencesEnqueue{ 18677, 19159 };
         constexpr REL::RelocationID DistantReferencesComplete{ 18678, 19160 };
 
+        // BackgroundProcessThread brackets each dispatched loading-task batch with this counter.
+        // The value is one of the two task sources used by Skyrim's own loading diagnostic.
+        constexpr REL::RelocationID BackgroundTasksProcess{ 12902, 13049 };
+
+        // IOManager's outstanding-task counter is used directly by Skyrim's loading diagnostic.
+        constexpr REL::RelocationID IOTasksEnqueue{ 75683, 75683 };
+        constexpr REL::RelocationID IOTasksComplete{ 75674, 75674 };
+
         // These callers own the semantic enqueue operations used by loaded-entry diagnostics. The
         // hook installer finds their unique calls to the counter helpers above, so these sites do not
         // depend on fragile function-relative offsets.
@@ -74,6 +82,10 @@ namespace load_progress
         constexpr RuntimeOffset ReferencesComplete{ 0x0C, 0x0C, 0x0C };
         constexpr RuntimeOffset DistantReferencesEnqueue{ 0x4E, 0x4E, 0x4E };
         constexpr RuntimeOffset DistantReferencesComplete{ 0x69, 0x69, 0x69 };
+
+        // The SE worker has a shorter dispatch loop. AE and GOG share the same two mutations.
+        constexpr RuntimeOffset BackgroundTasksEnqueue{ 0x96, 0xA0, 0xA0 };
+        constexpr RuntimeOffset BackgroundTasksComplete{ 0x179, 0x363, 0x363 };
 
         // Verified fallback locations for chaining render hooks that another plugin has already
         // redirected. Vanilla installs still use semantic caller/callee discovery first.
