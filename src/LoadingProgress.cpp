@@ -323,11 +323,23 @@ namespace load_progress
 
     void LoadingProgress::LogProgress(const Progress& a_progress)
     {
-        const auto candidate = a_progress.total ?
-                                   static_cast<std::uint32_t>(std::clamp(a_progress.fraction * 10000.0, 0.0, 10000.0)) :
-                                   0u;
+        constexpr std::uint32_t finalLoadingBasisPoints = 9900;
+        constexpr std::uint64_t initialRampMilliseconds = 500;
+        const auto rawCandidate = a_progress.total ?
+                                      static_cast<std::uint32_t>(
+                                          std::clamp(a_progress.fraction * 10000.0, 0.0, 10000.0)) :
+                                      0u;
+        const auto now = MonotonicMilliseconds();
+        const auto epochStarted = traceEpochStartedMs.load(std::memory_order_relaxed);
+        const auto elapsed = epochStarted && now >= epochStarted ? now - epochStarted : 0;
+        const auto rampCeiling = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            finalLoadingBasisPoints,
+            elapsed * finalLoadingBasisPoints / initialRampMilliseconds));
+        const auto candidate = std::min({ rawCandidate, rampCeiling, finalLoadingBasisPoints });
         auto       displayed = displayedBasisPoints.load(std::memory_order_relaxed);
-        // Newly queued work can lower the raw fraction, but the meter should not move backward.
+        // New work can appear after a queue temporarily drains. The initial time ceiling prevents an
+        // early completed batch from committing a misleading high value, and LoadingMenu owns the
+        // final one percent so the meter cannot report completion while the menu is still visible.
         bool advanced = false;
         while (candidate > displayed) {
             if (displayedBasisPoints.compare_exchange_weak(
