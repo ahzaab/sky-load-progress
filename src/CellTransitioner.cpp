@@ -54,13 +54,17 @@ namespace load_progress
             const auto callbackVtable =
                 *reinterpret_cast<const std::uintptr_t*>(a_data.unk10);
             static REL::Relocation<std::uintptr_t> normalDoor{
-                RE::VTABLE___NormalDoorFadeCallback[0] };
+                RE::VTABLE___NormalDoorFadeCallback[0]
+            };
             static REL::Relocation<std::uintptr_t> autoDoor{
-                RE::VTABLE___AutoDoorFadeCallback[0] };
+                RE::VTABLE___AutoDoorFadeCallback[0]
+            };
             static REL::Relocation<std::uintptr_t> fastTravel{
-                RE::VTABLE___FadeThenFastTravelCallback[0] };
+                RE::VTABLE___FadeThenFastTravelCallback[0]
+            };
             static REL::Relocation<std::uintptr_t> loadSave{
-                RE::VTABLE___FadeThenLoadCallback[0] };
+                RE::VTABLE___FadeThenLoadCallback[0]
+            };
 
             if (callbackVtable == normalDoor.address() || callbackVtable == autoDoor.address()) {
                 return NativeLoadPath::door;
@@ -237,8 +241,8 @@ namespace load_progress
     std::pair<std::uintptr_t, std::uintptr_t> CellTransitioner::FindChainableRelativeCall(
         REL::RelocationID a_callerID,
         REL::RelocationID a_calleeID,
-        std::ptrdiff_t     a_verifiedOffset,
-        std::string_view   a_name)
+        std::ptrdiff_t    a_verifiedOffset,
+        std::string_view  a_name)
     {
         try {
             const auto callSite = FindUniqueRelativeCall(a_callerID, a_calleeID, a_name);
@@ -597,7 +601,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     void CellTransitioner::ObserveSleepWaitMenuClosing()
     {
         constexpr std::int64_t sleepFadeRequestWindow = 5000;
-        const auto deadline = CurrentTimeMilliseconds() + sleepFadeRequestWindow;
+        const auto             deadline = CurrentTimeMilliseconds() + sleepFadeRequestWindow;
         sleepFadeRequestDeadline.store(deadline, std::memory_order_release);
     }
 
@@ -969,7 +973,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             const auto* row = static_cast<const std::uint8_t*>(a_mapped.data) + y * a_mapped.rowPitch;
 
             for (std::uint32_t x = 0; x < frozenFrameDesc.width; x += sampleStep) {
-                const auto* pixel = row + x * 4;
+                const auto*   pixel = row + x * 4;
                 std::uint32_t red = 0;
                 std::uint32_t green = 0;
                 std::uint32_t blue = 0;
@@ -1285,93 +1289,95 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             try {
                 ObserveControlRestore();
 
-                REX::W32::ComPtr<REX::W32::ID3D11Texture2D> backBuffer;
-                const auto                                  result = a_swapChain->GetBuffer(0, REX::W32::IID_ID3D11Texture2D,
-                                                     reinterpret_cast<void**>(backBuffer.GetAddressOf()));
-                if (result >= 0 && backBuffer.Get()) {
-                    auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
-                    auto* device = RE::BSGraphics::Renderer::GetDevice();
-                    auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
+                if (!compositeBeforePostProcessing) {
+                    REX::W32::ComPtr<REX::W32::ID3D11Texture2D> backBuffer;
+                    const auto                                  result = a_swapChain->GetBuffer(0, REX::W32::IID_ID3D11Texture2D,
+                                                         reinterpret_cast<void**>(backBuffer.GetAddressOf()));
+                    if (result >= 0 && backBuffer.Get()) {
+                        auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+                        auto* device = RE::BSGraphics::Renderer::GetDevice();
+                        auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
 
-                    if (device && context) {
-                        const bool transitionActive =
-                            epochActive.load(std::memory_order_acquire) ||
-                            postLoadFadeStart.load(std::memory_order_acquire) > 0;
+                        if (device && context) {
+                            const bool transitionActive =
+                                epochActive.load(std::memory_order_acquire) ||
+                                postLoadFadeStart.load(std::memory_order_acquire) > 0;
 
-                        auto& framebuffer = renderer->GetRuntimeData().renderTargets[
-                            RE::RENDER_TARGET::kFRAMEBUFFER];
+                            auto& framebuffer = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 
-                        REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> boundView;
-                        REX::W32::ComPtr<REX::W32::ID3D11DepthStencilView> boundDepth;
-                        REX::W32::ComPtr<REX::W32::ID3D11Resource> boundResource;
-                        REX::W32::ComPtr<REX::W32::ID3D11Texture2D> boundTexture;
-                        REX::W32::ComPtr<REX::W32::ID3D11Resource> sceneResource;
-                        REX::W32::ComPtr<REX::W32::ID3D11Texture2D> sceneTexture;
-                        context->OMGetRenderTargets(
-                            1, boundView.GetAddressOf(), boundDepth.GetAddressOf());
-                        if (boundView.Get()) {
-                            boundView->GetResource(boundResource.GetAddressOf());
-                            if (boundResource.Get()) {
-                                boundResource->QueryInterface(
-                                    REX::W32::IID_ID3D11Texture2D,
-                                    reinterpret_cast<void**>(boundTexture.GetAddressOf()));
-                            }
-                        }
-                        if (framebuffer.SRV) {
-                            reinterpret_cast<REX::W32::ID3D11ShaderResourceView*>(
-                                framebuffer.SRV)->GetResource(sceneResource.GetAddressOf());
-                            if (sceneResource.Get()) {
-                                sceneResource->QueryInterface(
-                                    REX::W32::IID_ID3D11Texture2D,
-                                    reinterpret_cast<void**>(sceneTexture.GetAddressOf()));
-                            }
-                        }
-
-                        // Community Shaders redirects Scaleform to a separate transparent UI target while
-                        // retaining the scene in kFRAMEBUFFER.SRV. Composite into the scene so its
-                        // HDR/frame-generation present chain can combine our transition with that UI.
-                        const bool separateUI =
-                            transitionActive && sceneTexture.Get() && boundTexture.Get() &&
-                            sceneTexture.Get() != boundTexture.Get();
-                        if (separateUI) {
-                            REX::W32::D3D11_TEXTURE2D_DESC sceneDesc{};
-                            sceneTexture->GetDesc(&sceneDesc);
-
-                            REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> sceneView;
-                            if (device->CreateRenderTargetView(
-                                    sceneTexture.Get(), nullptr, sceneView.GetAddressOf()) >= 0 &&
-                                sceneView.Get()) {
-                                std::array<REX::W32::D3D11_VIEWPORT,
-                                    D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE>
-                                    previousViewports{};
-                                std::uint32_t viewportCount =
-                                    static_cast<std::uint32_t>(previousViewports.size());
-                                context->RSGetViewports(&viewportCount, previousViewports.data());
-
-                                auto* target = sceneView.Get();
-                                context->OMSetRenderTargets(1, &target, nullptr);
-                                const REX::W32::D3D11_VIEWPORT viewport{
-                                    0.0F, 0.0F, static_cast<float>(sceneDesc.width),
-                                    static_cast<float>(sceneDesc.height), 0.0F, 1.0F };
-                                context->RSSetViewports(1, &viewport);
-
-                                CompositeLoadingFrame(context, sceneTexture.Get(), sceneDesc, true);
-
-                                auto* previousTarget = boundView.Get();
-                                context->OMSetRenderTargets(
-                                    previousTarget ? 1U : 0U,
-                                    previousTarget ? &previousTarget : nullptr, boundDepth.Get());
-                                if (viewportCount > 0) {
-                                    context->RSSetViewports(
-                                        viewportCount, previousViewports.data());
+                            REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> boundView;
+                            REX::W32::ComPtr<REX::W32::ID3D11DepthStencilView> boundDepth;
+                            REX::W32::ComPtr<REX::W32::ID3D11Resource>         boundResource;
+                            REX::W32::ComPtr<REX::W32::ID3D11Texture2D>        boundTexture;
+                            REX::W32::ComPtr<REX::W32::ID3D11Resource>         sceneResource;
+                            REX::W32::ComPtr<REX::W32::ID3D11Texture2D>        sceneTexture;
+                            context->OMGetRenderTargets(
+                                1, boundView.GetAddressOf(), boundDepth.GetAddressOf());
+                            if (boundView.Get()) {
+                                boundView->GetResource(boundResource.GetAddressOf());
+                                if (boundResource.Get()) {
+                                    boundResource->QueryInterface(
+                                        REX::W32::IID_ID3D11Texture2D,
+                                        reinterpret_cast<void**>(boundTexture.GetAddressOf()));
                                 }
-
                             }
-                        } else {
-                            // Vanilla path: the completed back buffer contains both scene and Scaleform.
-                            REX::W32::D3D11_TEXTURE2D_DESC desc{};
-                            backBuffer->GetDesc(&desc);
-                            CompositeLoadingFrame(context, backBuffer.Get(), desc);
+                            if (framebuffer.SRV) {
+                                reinterpret_cast<REX::W32::ID3D11ShaderResourceView*>(
+                                    framebuffer.SRV)
+                                    ->GetResource(sceneResource.GetAddressOf());
+                                if (sceneResource.Get()) {
+                                    sceneResource->QueryInterface(
+                                        REX::W32::IID_ID3D11Texture2D,
+                                        reinterpret_cast<void**>(sceneTexture.GetAddressOf()));
+                                }
+                            }
+
+                            // Community Shaders redirects Scaleform to a separate transparent UI target while
+                            // retaining the scene in kFRAMEBUFFER.SRV. Composite into the scene so its
+                            // HDR/frame-generation present chain can combine our transition with that UI.
+                            const bool separateUI =
+                                transitionActive && sceneTexture.Get() && boundTexture.Get() &&
+                                sceneTexture.Get() != boundTexture.Get();
+                            if (separateUI) {
+                                REX::W32::D3D11_TEXTURE2D_DESC sceneDesc{};
+                                sceneTexture->GetDesc(&sceneDesc);
+
+                                REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> sceneView;
+                                if (device->CreateRenderTargetView(
+                                        sceneTexture.Get(), nullptr, sceneView.GetAddressOf()) >= 0 &&
+                                    sceneView.Get()) {
+                                    std::array<REX::W32::D3D11_VIEWPORT,
+                                        D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE>
+                                                  previousViewports{};
+                                    std::uint32_t viewportCount =
+                                        static_cast<std::uint32_t>(previousViewports.size());
+                                    context->RSGetViewports(&viewportCount, previousViewports.data());
+
+                                    auto* target = sceneView.Get();
+                                    context->OMSetRenderTargets(1, &target, nullptr);
+                                    const REX::W32::D3D11_VIEWPORT viewport{
+                                        0.0F, 0.0F, static_cast<float>(sceneDesc.width),
+                                        static_cast<float>(sceneDesc.height), 0.0F, 1.0F
+                                    };
+                                    context->RSSetViewports(1, &viewport);
+
+                                    CompositeLoadingFrame(context, sceneTexture.Get(), sceneDesc, true);
+
+                                    auto* previousTarget = boundView.Get();
+                                    context->OMSetRenderTargets(
+                                        previousTarget ? 1U : 0U,
+                                        previousTarget ? &previousTarget : nullptr, boundDepth.Get());
+                                    if (viewportCount > 0) {
+                                        context->RSSetViewports(
+                                            viewportCount, previousViewports.data());
+                                    }
+                                }
+                            } else {
+                                // Vanilla path: the completed back buffer contains both scene and Scaleform.
+                                REX::W32::D3D11_TEXTURE2D_DESC desc{};
+                                backBuffer->GetDesc(&desc);
+                                CompositeLoadingFrame(context, backBuffer.Get(), desc);
+                            }
                         }
                     }
                 }
@@ -1450,13 +1456,13 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (!isTexture) {
             logger::warn("bound UI render target was not a texture");
         } else {
-            auto& framebuffer = renderer->GetRuntimeData().renderTargets[
-                RE::RENDER_TARGET::kFRAMEBUFFER];
-            REX::W32::ComPtr<REX::W32::ID3D11Resource> framebufferResource;
+            auto&                                       framebuffer = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
+            REX::W32::ComPtr<REX::W32::ID3D11Resource>  framebufferResource;
             REX::W32::ComPtr<REX::W32::ID3D11Texture2D> framebufferScene;
             if (framebuffer.SRV) {
                 reinterpret_cast<REX::W32::ID3D11ShaderResourceView*>(
-                    framebuffer.SRV)->GetResource(framebufferResource.GetAddressOf());
+                    framebuffer.SRV)
+                    ->GetResource(framebufferResource.GetAddressOf());
                 if (framebufferResource.Get()) {
                     framebufferResource->QueryInterface(
                         REX::W32::IID_ID3D11Texture2D,
@@ -1505,7 +1511,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (hooksEnabled.load(std::memory_order_acquire)) {
             try {
                 // Locking preserves the last complete world frame throughout the loading epoch.
-                if (!frozenFrameLocked.load(std::memory_order_acquire)) {
+                if (!compositeBeforePostProcessing &&
+                    !frozenFrameLocked.load(std::memory_order_acquire)) {
                     CaptureBoundWorldTarget();
                 }
             } catch (const std::exception& error) {
@@ -1514,7 +1521,83 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 DisableHooks("unknown exception in the world-frame capture");
             }
         }
+    }
 
+    // Feeds the retained transition through Community Shaders before it upscales and HDR-maps kMAIN.
+    void CellTransitioner::CompositeBeforePostProcessing(
+        RE::ImageSpaceManager* a_manager, std::uint32_t a_3, RE::RENDER_TARGET a_target,
+        void* a_4, bool a_5)
+    {
+        if (hooksEnabled.load(std::memory_order_acquire)) {
+            try {
+                auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+                auto* device = RE::BSGraphics::Renderer::GetDevice();
+                auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
+                if (device && context) {
+                    auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN];
+                    auto* mainTexture = reinterpret_cast<REX::W32::ID3D11Texture2D*>(main.texture);
+                    auto* mainView = reinterpret_cast<REX::W32::ID3D11RenderTargetView*>(main.RTV);
+                    if (mainTexture && mainView) {
+                        REX::W32::D3D11_TEXTURE2D_DESC desc{};
+                        mainTexture->GetDesc(&desc);
+
+                        if (!frozenFrameLocked.load(std::memory_order_acquire) &&
+                            PrepareFrozenFrame(device, desc)) {
+                            context->CopyResource(frozenFrame, mainTexture);
+                            loggedFrozenPresentation = false;
+                            if (!loggedFrozenFrame) {
+                                if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                                    logger::debug(
+                                        "capturing rolling {}x{} world frames before CS upscaling",
+                                        desc.width, desc.height);
+                                }
+                                loggedFrozenFrame = true;
+                            }
+                        }
+
+                        const bool transitionActive = epochActive.load(std::memory_order_acquire) ||
+                                                      postLoadFadeStart.load(std::memory_order_acquire) > 0;
+                        if (transitionActive) {
+                            REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> previousView;
+                            REX::W32::ComPtr<REX::W32::ID3D11DepthStencilView> previousDepth;
+                            context->OMGetRenderTargets(
+                                1, previousView.GetAddressOf(), previousDepth.GetAddressOf());
+
+                            std::array<REX::W32::D3D11_VIEWPORT,
+                                D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE>
+                                          previousViewports{};
+                            std::uint32_t viewportCount =
+                                static_cast<std::uint32_t>(previousViewports.size());
+                            context->RSGetViewports(&viewportCount, previousViewports.data());
+
+                            context->OMSetRenderTargets(1, &mainView, nullptr);
+                            const REX::W32::D3D11_VIEWPORT viewport{
+                                0.0F, 0.0F, static_cast<float>(desc.width),
+                                static_cast<float>(desc.height), 0.0F, 1.0F
+                            };
+                            context->RSSetViewports(1, &viewport);
+                            CompositeLoadingFrame(context, mainTexture, desc, true);
+
+                            auto* restoreView = previousView.Get();
+                            context->OMSetRenderTargets(
+                                restoreView ? 1U : 0U, restoreView ? &restoreView : nullptr,
+                                previousDepth.Get());
+                            if (viewportCount > 0) {
+                                context->RSSetViewports(viewportCount, previousViewports.data());
+                            }
+                        }
+                    }
+                }
+            } catch (const std::exception& error) {
+                DisableHooks(error.what());
+            } catch (...) {
+                DisableHooks("unknown exception in pre-upscale transition compositor");
+            }
+        }
+
+        if (originalImageSpacePostProcessing) {
+            originalImageSpacePostProcessing(a_manager, a_3, a_target, a_4, a_5);
+        }
     }
 
     // Records every engine fast-travel fade completion before its shared callback starts the load.
@@ -1613,7 +1696,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         nativeLoadPath == NativeLoadPath::fastTravel && !vanillaLoadFade,
                         std::memory_order_release);
                 }
-                auto* ui = RE::UI::GetSingleton();
+                auto*      ui = RE::UI::GetSingleton();
                 const bool mapMenuFade = !nativeLoadFade && ui &&
                                          ui->IsMenuOpen(RE::MapMenu::MENU_NAME);
                 if (vanillaLoadFade && data->isFadingOut) {
@@ -1953,6 +2036,39 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     callSite, currentTarget);
             }
 
+            // Community Shaders consumes kMAIN before its HDR/FG Present chain. Composite at that input
+            // boundary so DLSS, HDR mapping, and the D3D12 proxy all carry the transition to the screen.
+            void InstallCommunityShadersCompositeHook()
+            {
+                if (!GetModuleHandleW(L"CommunityShaders.dll")) {
+                    return;
+                }
+
+                constexpr std::size_t           relativeCallSize = 5;
+                REL::Relocation<std::uintptr_t> caller{ IDs::ImageSpacePostProcessingCaller };
+                const auto                      callSite = caller.address() + Offsets::ImageSpacePostProcessingCall.Get();
+                if (!caller.address() || *reinterpret_cast<const std::uint8_t*>(callSite) != 0xE8) {
+                    throw std::runtime_error("Community Shaders post-processing site was not a relative call");
+                }
+
+                std::int32_t displacement = 0;
+                std::memcpy(&displacement,
+                    reinterpret_cast<const void*>(callSite + 1), sizeof(displacement));
+                const auto currentTarget = callSite + relativeCallSize + displacement;
+                if (!CellTransitioner::IsExecutableAddress(currentTarget)) {
+                    throw std::runtime_error("Community Shaders post-processing call had no executable target");
+                }
+
+                CellTransitioner::originalImageSpacePostProcessing =
+                    reinterpret_cast<CellTransitioner::ImageSpacePostProcessing_t>(currentTarget);
+                SKSE::GetTrampoline().write_call<relativeCallSize>(
+                    callSite, CellTransitioner::CompositeBeforePostProcessing);
+                CellTransitioner::compositeBeforePostProcessing = true;
+                logger::info(
+                    "installed pre-upscale Community Shaders transition compositor at {:X}; chained target {:X}",
+                    callSite, currentTarget);
+            }
+
             // Installs the final compositor gate and creates the shaders/state reused by every presented frame.
             void InstallFrozenFrameHook()
             {
@@ -2021,6 +2137,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
             InstallRenderObservationHook();
             InstallWorldCaptureHook();
+            InstallCommunityShadersCompositeHook();
             InstallFrozenFrameHook();
             InstallFastTravelFadeCallbackHook();
             InstallSaveLoadFadeCallbackHook();

@@ -32,6 +32,8 @@ namespace load_progress
         using AdvanceMovie_t = void (*)(RE::IMenu*, float, std::uint32_t);
         using RenderWorld_t = void (*)(bool);
         using BeginScaleform_t = void (*)(void*);
+        using ImageSpacePostProcessing_t = void (*)(
+            RE::ImageSpaceManager*, std::uint32_t, RE::RENDER_TARGET, void*, bool);
         using Present_t = REX::W32::HRESULT (*)(REX::W32::IDXGISwapChain*, std::uint32_t, std::uint32_t);
         using PostDisplay_t = void (*)(RE::IMenu*);
 
@@ -94,13 +96,15 @@ namespace load_progress
         static void              ObserveRenderWorld(bool);
         static void              CaptureBoundWorldTarget();
         static void              CaptureAfterScaleformBegin(void*);
-        static void              FastTravelFadeCallbackRun(void*);
-        static void              SaveLoadFadeCallbackRun(void*);
-        static void              RestoreFaderPresentation(RE::IMenu*);
+        static void              CompositeBeforePostProcessing(
+                         RE::ImageSpaceManager*, std::uint32_t, RE::RENDER_TARGET, void*, bool);
+        static void                   FastTravelFadeCallbackRun(void*);
+        static void                   SaveLoadFadeCallbackRun(void*);
+        static void                   RestoreFaderPresentation(RE::IMenu*);
         static RE::UI_MESSAGE_RESULTS FaderMenuProcessMessage(RE::IMenu*, RE::UIMessage&);
-        static void              FaderMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
-        static void              MistMenuPostDisplay(RE::IMenu*);
-        static void              CloseResidualLoadingMenus();
+        static void                   FaderMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
+        static void                   MistMenuPostDisplay(RE::IMenu*);
+        static void                   CloseResidualLoadingMenus();
 
         inline static std::atomic_bool                      epochActive{ false };
         inline static std::atomic_bool                      hooksEnabled{ false };
@@ -144,7 +148,9 @@ namespace load_progress
         inline static PostDisplay_t                          originalMistPostDisplay{};
         inline static REL::Relocation<RenderWorld_t>         originalRenderWorld;
         inline static REL::Relocation<BeginScaleform_t>      originalBeginScaleform;
+        inline static ImageSpacePostProcessing_t             originalImageSpacePostProcessing{};
         inline static Present_t                              originalPresent{};
+        inline static bool                                   compositeBeforePostProcessing{};
         inline static REX::W32::ID3D11Texture2D*             frozenFrame{};
         inline static REX::W32::ID3D11ShaderResourceView*    frozenFrameView{};
         inline static REX::W32::ID3D11Texture2D*             dominantColorReadback{};

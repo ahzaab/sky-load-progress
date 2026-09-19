@@ -50,6 +50,11 @@ namespace load_progress
         constexpr REL::RelocationID NormalWorldRenderCaller{ 35560, 36559 };
         constexpr REL::RelocationID NormalWorldRenderer{ 100424, 107142 };
 
+        // Main's image-space pass owns the call Community Shaders chains to perform upscaling before
+        // Skyrim's post processing. Hooking the same call after CS lets the transition feed its retained
+        // frame through DLSS, HDR mapping, and the D3D12 frame-generation proxy.
+        constexpr REL::RelocationID ImageSpacePostProcessingCaller{ 100430, 107148 };
+
         // The UI renderer owns one call to this helper after binding the Scaleform render target and
         // before drawing any movies. Hooking that specific call preserves the world-only capture point.
         constexpr REL::RelocationID ScaleformRenderCaller{ 79947, 82084 };
@@ -96,5 +101,6 @@ namespace load_progress
         // redirected. Vanilla installs still use semantic caller/callee discovery first.
         constexpr RuntimeOffset NormalWorldRenderCall{ 0x831, 0x841, 0x85E };
         constexpr RuntimeOffset ScaleformBeginCall{ 0x17F, 0x18A, 0x18A };
+        constexpr RuntimeOffset ImageSpacePostProcessingCall{ 0x1F0, 0x1E7, 0x1E7 };
     }
 }
