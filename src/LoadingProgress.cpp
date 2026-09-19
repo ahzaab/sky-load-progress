@@ -29,6 +29,13 @@ namespace load_progress
         return remaining;
     }
 
+    std::uint64_t LoadingProgress::MonotonicMilliseconds() noexcept
+    {
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+                                              .count());
+    }
+
     // Applies queue deltas outside the engine's queue-mutation call paths.
     void LoadingProgress::DrainQueueMutations()
     {
@@ -268,6 +275,8 @@ namespace load_progress
             // HUDMenu can be created or made visible after LoadingMenu opens on a Main Menu save load.
             CellTransitioner::HideHUDForLoad();
 
+            LogProgressTrace(aggregator.Current(), a_interval);
+
             if (a_menu && a_menu->uiMovie) {
                 const bool seamless = CellTransitioner::IsSeamless();
                 const bool vanilla = CellTransitioner::IsVanilla();
@@ -319,9 +328,17 @@ namespace load_progress
                                    0u;
         auto       displayed = displayedBasisPoints.load(std::memory_order_relaxed);
         // Newly queued work can lower the raw fraction, but the meter should not move backward.
-        while (candidate > displayed &&
-               !displayedBasisPoints.compare_exchange_weak(
-                   displayed, candidate, std::memory_order_release, std::memory_order_relaxed)) {}
+        bool advanced = false;
+        while (candidate > displayed) {
+            if (displayedBasisPoints.compare_exchange_weak(
+                    displayed, candidate, std::memory_order_release, std::memory_order_relaxed)) {
+                advanced = true;
+                break;
+            }
+        }
+        if (advanced) {
+            traceLastProgressAdvanceMs.store(MonotonicMilliseconds(), std::memory_order_relaxed);
+        }
         if (a_progress.total == lastLogged.total && a_progress.completed == lastLogged.completed &&
             a_progress.remaining == lastLogged.remaining) {
             return;
@@ -332,6 +349,45 @@ namespace load_progress
                 a_progress.fraction * 100.0);
         }
         lastLogged = a_progress;
+    }
+
+    // Writes a low-frequency timeline sample even when no queue mutation changes the meter. This
+    // distinguishes untracked work from a stalled LoadingMenu update callback in test logs.
+    void LoadingProgress::LogProgressTrace(const Progress& a_progress, float a_interval)
+    {
+        if (!Settings::GetSingleton().IsVerboseQueueLoggingEnabled() ||
+            !epochActive.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        constexpr std::uint64_t samplePeriodMs = 250;
+        const auto now = MonotonicMilliseconds();
+        const auto previousSample = traceLastSampleMs.load(std::memory_order_relaxed);
+        if (previousSample != 0 && now - previousSample < samplePeriodMs) {
+            return;
+        }
+        traceLastSampleMs.store(now, std::memory_order_relaxed);
+
+        const auto epochStarted = traceEpochStartedMs.load(std::memory_order_relaxed);
+        const auto queueActivity = traceLastQueueActivityMs.load(std::memory_order_relaxed);
+        const auto progressAdvance = traceLastProgressAdvanceMs.load(std::memory_order_relaxed);
+        const auto displayed = displayedBasisPoints.load(std::memory_order_acquire);
+        const auto rawBasisPoints = a_progress.total ?
+                                        static_cast<std::uint32_t>(
+                                            std::clamp(a_progress.fraction * 10000.0, 0.0, 10000.0)) :
+                                        0u;
+
+        std::array<std::uint64_t, queueCount> live{};
+        for (std::size_t i = 0; i < queueCount; ++i) {
+            live[i] = liveRemaining[i].load(std::memory_order_relaxed);
+        }
+
+        logger::info(
+            "progress trace: epoch_ms={} sample_delta_ms={} frame_interval_ms={:.3f} displayed={:.2f}% raw={:.2f}% completed={} remaining={} total={} progress_idle_ms={} queue_idle_ms={} live=[critical-refs:{}, refs:{}, distant-refs:{}, background:{}, tasks:{}, post-processing:{}]",
+            now - epochStarted, previousSample ? now - previousSample : 0, a_interval * 1000.0F,
+            static_cast<double>(displayed) / 100.0, static_cast<double>(rawBasisPoints) / 100.0,
+            a_progress.completed, a_progress.remaining, a_progress.total, now - progressAdvance,
+            now - queueActivity, live[0], live[1], live[2], live[3], live[4], live[5]);
     }
 
     // Disables plugin behavior while leaving every installed hook as a pass-through.
@@ -360,6 +416,7 @@ namespace load_progress
 
         liveRemaining[index].fetch_add(1, std::memory_order_relaxed);
         if (epochActive.load(std::memory_order_relaxed)) {
+            traceLastQueueActivityMs.store(MonotonicMilliseconds(), std::memory_order_relaxed);
             pendingEnqueued[index].fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -377,6 +434,7 @@ namespace load_progress
         // Saturate at zero because the plugin may begin observing after Skyrim queued the work.
         while (value != 0 && !live.compare_exchange_weak(value, value - 1, std::memory_order_relaxed)) {}
         if (epochActive.load(std::memory_order_relaxed)) {
+            traceLastQueueActivityMs.store(MonotonicMilliseconds(), std::memory_order_relaxed);
             pendingCompleted[index].fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -866,6 +924,11 @@ namespace load_progress
         BeginLoadedEntryCapture();
 
         displayedBasisPoints.store(0, std::memory_order_release);
+        const auto now = MonotonicMilliseconds();
+        traceEpochStartedMs.store(now, std::memory_order_relaxed);
+        traceLastSampleMs.store(0, std::memory_order_relaxed);
+        traceLastQueueActivityMs.store(now, std::memory_order_relaxed);
+        traceLastProgressAdvanceMs.store(now, std::memory_order_relaxed);
         for (std::size_t i = 0; i < queueCount; ++i) {
             pendingEnqueued[i].store(0, std::memory_order_relaxed);
             pendingCompleted[i].store(0, std::memory_order_relaxed);
@@ -910,7 +973,13 @@ namespace load_progress
 
         const auto final = aggregator.Current();
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            logger::info("loading epoch ended: Loading Menu closed; completed={} remaining={} total={}",
+            const auto now = MonotonicMilliseconds();
+            logger::info(
+                "loading epoch ended: Loading Menu closed; epoch_ms={} progress_idle_ms={} queue_idle_ms={} displayed={:.2f}% completed={} remaining={} total={}",
+                now - traceEpochStartedMs.load(std::memory_order_relaxed),
+                now - traceLastProgressAdvanceMs.load(std::memory_order_relaxed),
+                now - traceLastQueueActivityMs.load(std::memory_order_relaxed),
+                static_cast<double>(displayedBasisPoints.load(std::memory_order_acquire)) / 100.0,
                 final.completed, final.remaining, final.total);
         }
         aggregator.End();

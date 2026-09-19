@@ -54,6 +54,7 @@ The log contains:
 * Loading Menu open and close events.
 * Queue enqueue and completion activity.
 * Completed, remaining, and total work.
+* A 250 ms progress heartbeat with callback, queue-idle, and meter-idle timing.
 * Cell fully loaded events.
 
 ## Installation
