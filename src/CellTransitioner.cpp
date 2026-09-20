@@ -90,6 +90,57 @@ namespace load_progress
             return true;
         }
 
+        bool TransitionOwnsPresentation()
+        {
+            return CellTransitioner::hooksEnabled.load(std::memory_order_acquire) &&
+                   (CellTransitioner::epochActive.load(std::memory_order_acquire) ||
+                       CellTransitioner::postLoadFadePending.load(std::memory_order_acquire) ||
+                       CellTransitioner::postLoadFadeStart.load(std::memory_order_acquire) > 0);
+        }
+
+        // Community Shaders gates frame generation on UI::GameIsPaused(). Spoof that value only
+        // while executing its post-processing or proxy-Present callback, then restore it before
+        // returning to Skyrim. This suppresses generated frames that cannot contain our D3D11
+        // transition overlay without pausing simulation or changing the user's persistent setting.
+        class ScopedFrameGenerationPause final
+        {
+        public:
+            explicit ScopedFrameGenerationPause(bool a_enable)
+            {
+                if (!a_enable || !CellTransitioner::communityShadersFrameGenerationProxy ||
+                    !TransitionOwnsPresentation()) {
+                    return;
+                }
+
+                ui = RE::UI::GetSingleton();
+                if (!ui || ui->numPausesGame != 0) {
+                    ui = nullptr;
+                    return;
+                }
+
+                ui->numPausesGame = 1;
+                if (!CellTransitioner::frameGenerationSuppressionLogged.exchange(
+                        true, std::memory_order_acq_rel) &&
+                    Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                    logger::info(
+                        "temporarily suppressing Community Shaders frame generation for the active transition");
+                }
+            }
+
+            ~ScopedFrameGenerationPause()
+            {
+                if (ui) {
+                    ui->numPausesGame = 0;
+                }
+            }
+
+            ScopedFrameGenerationPause(const ScopedFrameGenerationPause&) = delete;
+            ScopedFrameGenerationPause& operator=(const ScopedFrameGenerationPause&) = delete;
+
+        private:
+            RE::UI* ui{};
+        };
+
     }
 
     // Returns the singleton that owns all cell-transition state.
@@ -293,6 +344,9 @@ namespace load_progress
         if (selected == Presentation::vanilla) {
             frozenFrameLocked.store(false, std::memory_order_release);
             postLoadFadeStart.store(0, std::memory_order_release);
+            postLoadFadePending.store(false, std::memory_order_release);
+            postLoadFadeRequestedAt.store(0, std::memory_order_release);
+            postLoadPresentFallback.store(false, std::memory_order_release);
             loadingTransitionStart.store(0, std::memory_order_release);
             dominantColorPending.store(false, std::memory_order_release);
             RestoreHUDVisibility();
@@ -302,6 +356,11 @@ namespace load_progress
         // This is the capture gate. Once closed, the rolling texture remains the last pre-load world frame.
         frozenFrameLocked.store(true, std::memory_order_release);
         postLoadFadeStart.store(0, std::memory_order_release);
+        postLoadFadePending.store(false, std::memory_order_release);
+        postLoadFadeRequestedAt.store(0, std::memory_order_release);
+        postLoadPresentFallback.store(false, std::memory_order_release);
+        frameGenerationSuppressionLogged.store(false, std::memory_order_release);
+        postProcessingPassesSincePresent.store(0, std::memory_order_release);
         // Menu construction and renderer suspension can consume the configured fade before the first
         // loading frame is presented. Start the visible color fade from Present instead.
         loadingTransitionStart.store(0, std::memory_order_release);
@@ -369,7 +428,14 @@ namespace load_progress
 
         // Opening the post-load gate lets Present composite over the destination cell as soon as it returns.
         epochActive.store(false, std::memory_order_release);
-        postLoadFadeStart.store(newGame || vanilla ? 0 : CurrentTimeMilliseconds(), std::memory_order_release);
+        const auto now = CurrentTimeMilliseconds();
+        const bool deferToPostProcessing = !newGame && !vanilla && compositeAfterPostProcessing;
+        postLoadFadeStart.store(
+            newGame || vanilla || deferToPostProcessing ? 0 : now, std::memory_order_release);
+        postLoadFadeRequestedAt.store(deferToPostProcessing ? now : 0, std::memory_order_release);
+        postLoadFadePending.store(deferToPostProcessing, std::memory_order_release);
+        postLoadPresentFallback.store(false, std::memory_order_release);
+        postProcessingPassesSincePresent.store(0, std::memory_order_release);
         RestoreHUDVisibility();
         if (newGame || vanilla) {
             frozenFrameLocked.store(false, std::memory_order_release);
@@ -1204,17 +1270,22 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         const auto fadeStart = postLoadFadeStart.load(std::memory_order_acquire);
-        if (fadeStart <= 0) {
+        const bool fadePending = postLoadFadePending.load(std::memory_order_acquire);
+        if (fadeStart <= 0 && !fadePending) {
             return;
         }
 
-        // Cold loads briefly hold the cover after the menu closes. Warm loads begin blending immediately.
+        // While the preferred CS compositor has not resumed yet, keep the retained frame fully opaque.
+        // This closes the handoff between LoadingMenu's last Present and the first post-load fade pass.
         const auto delay = holdAfterLoad.load(std::memory_order_acquire);
-        const auto fadeElapsed = CurrentTimeMilliseconds() - fadeStart - delay;
+        const auto fadeElapsed = fadePending ? 0 : CurrentTimeMilliseconds() - fadeStart - delay;
         const auto duration = fadeOutDuration.load(std::memory_order_acquire);
 
-        if (fadeElapsed >= duration) {
+        if (!fadePending && fadeElapsed >= duration) {
             postLoadFadeStart.store(0, std::memory_order_release);
+            postLoadFadePending.store(false, std::memory_order_release);
+            postLoadFadeRequestedAt.store(0, std::memory_order_release);
+            postLoadPresentFallback.store(false, std::memory_order_release);
             frozenFrameLocked.store(false, std::memory_order_release);
             mainMenuLoadActive.store(false, std::memory_order_release);
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
@@ -1223,7 +1294,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return;
         }
 
-        if (!MatchesFrozenFrame(a_desc) || !frozenFrameView) {
+        if (!frozenFrameView) {
             return;
         }
 
@@ -1289,7 +1360,43 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             try {
                 ObserveControlRestore();
 
-                if (!compositeBeforePostProcessing) {
+                // The image-space call is not guaranteed to run for every frame Skyrim presents,
+                // particularly while menu/loading render paths are changing. Treat it as the preferred
+                // CS/Upscaler path, but retain this final compositor as a watchdog for any frame it misses.
+                const bool loading = epochActive.load(std::memory_order_acquire);
+                bool       fadePending = postLoadFadePending.load(std::memory_order_acquire);
+                bool       transitionActive = loading || fadePending ||
+                                        postLoadFadeStart.load(std::memory_order_acquire) > 0;
+                const auto postProcessingPasses = compositeAfterPostProcessing ?
+                                                      postProcessingPassesSincePresent.exchange(
+                                                          0, std::memory_order_acq_rel) :
+                                                      0;
+                const bool postProcessingComposited = postProcessingPasses > 0;
+                bool       waitingForPostProcessing =
+                    compositeAfterPostProcessing && !loading && fadePending;
+                if (waitingForPostProcessing) {
+                    constexpr std::int64_t postProcessingResumeTimeout = 2000;
+                    const auto requestedAt = postLoadFadeRequestedAt.load(std::memory_order_acquire);
+                    if (requestedAt > 0 &&
+                        CurrentTimeMilliseconds() - requestedAt >= postProcessingResumeTimeout &&
+                        postLoadFadePending.exchange(false, std::memory_order_acq_rel)) {
+                        postLoadFadeStart.store(CurrentTimeMilliseconds(), std::memory_order_release);
+                        postLoadPresentFallback.store(true, std::memory_order_release);
+                        waitingForPostProcessing = false;
+                        fadePending = false;
+                        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                            logger::warn(
+                                "post-CS compositor did not resume within {}ms; using Present for the fade",
+                                postProcessingResumeTimeout);
+                        }
+                    }
+                }
+                const bool usePresentFallback = !compositeAfterPostProcessing || loading ||
+                                                waitingForPostProcessing ||
+                                                postLoadPresentFallback.load(std::memory_order_acquire);
+                const bool fallbackNeeded = transitionActive && usePresentFallback &&
+                                            !postProcessingComposited;
+                if (fallbackNeeded) {
                     REX::W32::ComPtr<REX::W32::ID3D11Texture2D> backBuffer;
                     const auto                                  result = a_swapChain->GetBuffer(0, REX::W32::IID_ID3D11Texture2D,
                                                          reinterpret_cast<void**>(backBuffer.GetAddressOf()));
@@ -1299,10 +1406,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
 
                         if (device && context) {
-                            const bool transitionActive =
-                                epochActive.load(std::memory_order_acquire) ||
-                                postLoadFadeStart.load(std::memory_order_acquire) > 0;
-
                             auto& framebuffer = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 
                             REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> boundView;
@@ -1332,11 +1435,12 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                 }
                             }
 
-                            // Community Shaders redirects Scaleform to a separate transparent UI target while
-                            // retaining the scene in kFRAMEBUFFER.SRV. Composite into the scene so its
-                            // HDR/frame-generation present chain can combine our transition with that UI.
+                            // While LoadingMenu is active, Community Shaders redirects Scaleform to a
+                            // separate transparent UI target and retains the scene in kFRAMEBUFFER.SRV.
+                            // Once the menu closes, the watchdog must instead bind the real swap buffer:
+                            // CS can leave its lower-resolution internal target and viewport bound here.
                             const bool separateUI =
-                                transitionActive && sceneTexture.Get() && boundTexture.Get() &&
+                                (loading || waitingForPostProcessing) && sceneTexture.Get() && boundTexture.Get() &&
                                 sceneTexture.Get() != boundTexture.Get();
                             if (separateUI) {
                                 REX::W32::D3D11_TEXTURE2D_DESC sceneDesc{};
@@ -1373,10 +1477,42 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                     }
                                 }
                             } else {
-                                // Vanilla path: the completed back buffer contains both scene and Scaleform.
+                                // The completed swap buffer contains the final scene and Scaleform output.
+                                // Bind it explicitly; drawing with CS's internal viewport still active clips
+                                // the cover to the upper-left portion of the output-sized destination rect.
                                 REX::W32::D3D11_TEXTURE2D_DESC desc{};
                                 backBuffer->GetDesc(&desc);
-                                CompositeLoadingFrame(context, backBuffer.Get(), desc);
+
+                                REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> backBufferView;
+                                if (device->CreateRenderTargetView(
+                                        backBuffer.Get(), nullptr, backBufferView.GetAddressOf()) >= 0 &&
+                                    backBufferView.Get()) {
+                                    std::array<REX::W32::D3D11_VIEWPORT,
+                                        D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE>
+                                                  previousViewports{};
+                                    std::uint32_t viewportCount =
+                                        static_cast<std::uint32_t>(previousViewports.size());
+                                    context->RSGetViewports(&viewportCount, previousViewports.data());
+
+                                    auto* target = backBufferView.Get();
+                                    context->OMSetRenderTargets(1, &target, nullptr);
+                                    const REX::W32::D3D11_VIEWPORT viewport{
+                                        0.0F, 0.0F, static_cast<float>(desc.width),
+                                        static_cast<float>(desc.height), 0.0F, 1.0F
+                                    };
+                                    context->RSSetViewports(1, &viewport);
+
+                                    CompositeLoadingFrame(context, backBuffer.Get(), desc);
+
+                                    auto* previousTarget = boundView.Get();
+                                    context->OMSetRenderTargets(
+                                        previousTarget ? 1U : 0U,
+                                        previousTarget ? &previousTarget : nullptr, boundDepth.Get());
+                                    if (viewportCount > 0) {
+                                        context->RSSetViewports(
+                                            viewportCount, previousViewports.data());
+                                    }
+                                }
                             }
                         }
                     }
@@ -1388,6 +1524,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             }
         }
 
+        ScopedFrameGenerationPause suppressGeneratedFrame{ true };
         return originalPresent(a_swapChain, a_syncInterval, a_flags);
     }
 
@@ -1511,7 +1648,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (hooksEnabled.load(std::memory_order_acquire)) {
             try {
                 // Locking preserves the last complete world frame throughout the loading epoch.
-                if (!compositeBeforePostProcessing &&
+                if (!compositeAfterPostProcessing &&
                     !frozenFrameLocked.load(std::memory_order_acquire)) {
                     CaptureBoundWorldTarget();
                 }
@@ -1523,46 +1660,74 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
     }
 
-    // Feeds the retained transition through Community Shaders before it upscales and HDR-maps kMAIN.
-    void CellTransitioner::CompositeBeforePostProcessing(
+    // Lets Community Shaders finish upscaling/HDR work, then composites into the final image-space
+    // target it leaves bound. This keeps the captured frame and destination in the same temporal and
+    // viewport space instead of feeding a retained color image through live DLSS motion data.
+    void CellTransitioner::CompositeAfterPostProcessing(
         RE::ImageSpaceManager* a_manager, std::uint32_t a_3, RE::RENDER_TARGET a_target,
         void* a_4, bool a_5)
     {
+        if (originalImageSpacePostProcessing) {
+            ScopedFrameGenerationPause suppressGeneratedFrame{ true };
+            originalImageSpacePostProcessing(a_manager, a_3, a_target, a_4, a_5);
+        }
+
         if (hooksEnabled.load(std::memory_order_acquire)) {
             try {
                 auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
                 auto* device = RE::BSGraphics::Renderer::GetDevice();
                 auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
                 if (device && context) {
-                    auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN];
-                    auto* mainTexture = reinterpret_cast<REX::W32::ID3D11Texture2D*>(main.texture);
-                    auto* mainView = reinterpret_cast<REX::W32::ID3D11RenderTargetView*>(main.RTV);
-                    if (mainTexture && mainView) {
+                    REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> targetView;
+                    REX::W32::ComPtr<REX::W32::ID3D11DepthStencilView> targetDepth;
+                    REX::W32::ComPtr<REX::W32::ID3D11Resource>         targetResource;
+                    REX::W32::ComPtr<REX::W32::ID3D11Texture2D>        targetTexture;
+                    context->OMGetRenderTargets(
+                        1, targetView.GetAddressOf(), targetDepth.GetAddressOf());
+                    if (targetView.Get()) {
+                        targetView->GetResource(targetResource.GetAddressOf());
+                    }
+                    if (targetResource.Get()) {
+                        targetResource->QueryInterface(
+                            REX::W32::IID_ID3D11Texture2D,
+                            reinterpret_cast<void**>(targetTexture.GetAddressOf()));
+                    }
+
+                    if (targetView.Get() && targetTexture.Get()) {
                         REX::W32::D3D11_TEXTURE2D_DESC desc{};
-                        mainTexture->GetDesc(&desc);
+                        targetTexture->GetDesc(&desc);
 
                         if (!frozenFrameLocked.load(std::memory_order_acquire) &&
                             PrepareFrozenFrame(device, desc)) {
-                            context->CopyResource(frozenFrame, mainTexture);
+                            context->CopyResource(frozenFrame, targetTexture.Get());
                             loggedFrozenPresentation = false;
                             if (!loggedFrozenFrame) {
                                 if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                                     logger::debug(
-                                        "capturing rolling {}x{} world frames before CS upscaling",
+                                        "capturing rolling {}x{} world frames after CS post-processing",
                                         desc.width, desc.height);
                                 }
                                 loggedFrozenFrame = true;
                             }
                         }
 
-                        const bool transitionActive = epochActive.load(std::memory_order_acquire) ||
-                                                      postLoadFadeStart.load(std::memory_order_acquire) > 0;
-                        if (transitionActive) {
-                            REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> previousView;
-                            REX::W32::ComPtr<REX::W32::ID3D11DepthStencilView> previousDepth;
-                            context->OMGetRenderTargets(
-                                1, previousView.GetAddressOf(), previousDepth.GetAddressOf());
+                        if (!epochActive.load(std::memory_order_acquire) &&
+                            !postLoadPresentFallback.load(std::memory_order_acquire) &&
+                            postLoadFadePending.exchange(false, std::memory_order_acq_rel)) {
+                            const auto now = CurrentTimeMilliseconds();
+                            postLoadFadeStart.store(now, std::memory_order_release);
+                            postLoadFadeRequestedAt.store(0, std::memory_order_release);
+                            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                                logger::debug("post-CS compositor resumed; starting post-load fade");
+                            }
+                        }
 
+                        const bool transitionActive =
+                            epochActive.load(std::memory_order_acquire) ||
+                            postLoadFadePending.load(std::memory_order_acquire) ||
+                            postLoadFadeStart.load(std::memory_order_acquire) > 0;
+                        if (transitionActive &&
+                            !postLoadPresentFallback.load(std::memory_order_acquire)) {
                             std::array<REX::W32::D3D11_VIEWPORT,
                                 D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE>
                                           previousViewports{};
@@ -1570,18 +1735,17 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                 static_cast<std::uint32_t>(previousViewports.size());
                             context->RSGetViewports(&viewportCount, previousViewports.data());
 
-                            context->OMSetRenderTargets(1, &mainView, nullptr);
+                            auto* outputView = targetView.Get();
+                            context->OMSetRenderTargets(1, &outputView, nullptr);
                             const REX::W32::D3D11_VIEWPORT viewport{
                                 0.0F, 0.0F, static_cast<float>(desc.width),
                                 static_cast<float>(desc.height), 0.0F, 1.0F
                             };
                             context->RSSetViewports(1, &viewport);
-                            CompositeLoadingFrame(context, mainTexture, desc, true);
+                            CompositeLoadingFrame(context, targetTexture.Get(), desc, true);
+                            postProcessingPassesSincePresent.fetch_add(1, std::memory_order_acq_rel);
 
-                            auto* restoreView = previousView.Get();
-                            context->OMSetRenderTargets(
-                                restoreView ? 1U : 0U, restoreView ? &restoreView : nullptr,
-                                previousDepth.Get());
+                            context->OMSetRenderTargets(1, &outputView, targetDepth.Get());
                             if (viewportCount > 0) {
                                 context->RSSetViewports(viewportCount, previousViewports.data());
                             }
@@ -1591,12 +1755,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             } catch (const std::exception& error) {
                 DisableHooks(error.what());
             } catch (...) {
-                DisableHooks("unknown exception in pre-upscale transition compositor");
+                DisableHooks("unknown exception in post-CS transition compositor");
             }
-        }
-
-        if (originalImageSpacePostProcessing) {
-            originalImageSpacePostProcessing(a_manager, a_3, a_target, a_4, a_5);
         }
     }
 
@@ -1671,6 +1831,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (hooksEnabled.load(std::memory_order_acquire)) {
             const bool activeEpoch = epochActive.load(std::memory_order_acquire);
             const bool postLoadTransition =
+                postLoadFadePending.load(std::memory_order_acquire) ||
                 postLoadFadeStart.load(std::memory_order_acquire) > 0;
 
             if (a_message.data &&
@@ -1835,6 +1996,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 }
 
                 const bool transitionWindow = epochActive.load(std::memory_order_acquire) ||
+                                              postLoadFadePending.load(std::memory_order_acquire) ||
                                               postLoadFadeStart.load(std::memory_order_acquire) > 0;
                 // Native door, fast-travel, and save-load callbacks submit their fader before
                 // LoadingMenu opens. Hide that already-identified load cover immediately so it cannot
@@ -1869,6 +2031,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         const bool suppressPresentation =
             hooksEnabled.load(std::memory_order_acquire) &&
             (epochActive.load(std::memory_order_acquire) ||
+                postLoadFadePending.load(std::memory_order_acquire) ||
                 postLoadFadeStart.load(std::memory_order_acquire) > 0 ||
                 newGameTransitionActive.load(std::memory_order_acquire));
         if (!suppressPresentation && originalMistPostDisplay) {
@@ -2036,8 +2199,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     callSite, currentTarget);
             }
 
-            // Community Shaders consumes kMAIN before its HDR/FG Present chain. Composite at that input
-            // boundary so DLSS, HDR mapping, and the D3D12 proxy all carry the transition to the screen.
+            // Chain Community Shaders first, then composite on the completed image-space target it
+            // leaves bound. The Present watchdog covers frames where that render path is suspended.
             void InstallCommunityShadersCompositeHook()
             {
                 if (!GetModuleHandleW(L"CommunityShaders.dll")) {
@@ -2062,10 +2225,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 CellTransitioner::originalImageSpacePostProcessing =
                     reinterpret_cast<CellTransitioner::ImageSpacePostProcessing_t>(currentTarget);
                 SKSE::GetTrampoline().write_call<relativeCallSize>(
-                    callSite, CellTransitioner::CompositeBeforePostProcessing);
-                CellTransitioner::compositeBeforePostProcessing = true;
+                    callSite, CellTransitioner::CompositeAfterPostProcessing);
+                CellTransitioner::compositeAfterPostProcessing = true;
                 logger::info(
-                    "installed pre-upscale Community Shaders transition compositor at {:X}; chained target {:X}",
+                    "installed post-CS Community Shaders transition compositor at {:X}; chained target {:X}",
                     callSite, currentTarget);
             }
 
@@ -2122,9 +2285,21 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
                 CellTransitioner::originalPresent =
                     reinterpret_cast<CellTransitioner::Present_t>(originalAddress);
+
+                REX::W32::MEMORY_BASIC_INFORMATION presentMemory{};
+                const auto communityShaders = GetModuleHandleW(L"CommunityShaders.dll");
+                if (communityShaders &&
+                    REX::W32::VirtualQuery(
+                        reinterpret_cast<const void*>(originalAddress), &presentMemory,
+                        sizeof(presentMemory)) != 0) {
+                    CellTransitioner::communityShadersFrameGenerationProxy =
+                        presentMemory.allocationBase == communityShaders;
+                }
                 vtable.write_vfunc(presentIndex, CellTransitioner::PresentFrozenFrame);
 
-                logger::info("installed frozen-frame swap-chain Present hook");
+                logger::info(
+                    "installed frozen-frame swap-chain Present hook; CS frame-generation proxy={}",
+                    CellTransitioner::communityShadersFrameGenerationProxy);
             }
 
         }

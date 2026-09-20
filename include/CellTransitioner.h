@@ -96,7 +96,7 @@ namespace load_progress
         static void              ObserveRenderWorld(bool);
         static void              CaptureBoundWorldTarget();
         static void              CaptureAfterScaleformBegin(void*);
-        static void              CompositeBeforePostProcessing(
+        static void              CompositeAfterPostProcessing(
                          RE::ImageSpaceManager*, std::uint32_t, RE::RENDER_TARGET, void*, bool);
         static void                   FastTravelFadeCallbackRun(void*);
         static void                   SaveLoadFadeCallbackRun(void*);
@@ -111,6 +111,9 @@ namespace load_progress
         inline static std::atomic_bool                      failureLogged{ false };
         inline static std::atomic_bool                      frozenFrameLocked{ false };
         inline static std::atomic_int64_t                   postLoadFadeStart{};
+        inline static std::atomic_bool                      postLoadFadePending{};
+        inline static std::atomic_int64_t                   postLoadFadeRequestedAt{};
+        inline static std::atomic_bool                      postLoadPresentFallback{};
         inline static std::atomic<Presentation>             presentation{ Presentation::loadingMenu };
         inline static std::atomic<Settings::TransitionType> transitionType{ Settings::TransitionType::blur };
         inline static std::atomic<Settings::ColorSource>    colorSource{ Settings::ColorSource::dominant };
@@ -150,7 +153,10 @@ namespace load_progress
         inline static REL::Relocation<BeginScaleform_t>      originalBeginScaleform;
         inline static ImageSpacePostProcessing_t             originalImageSpacePostProcessing{};
         inline static Present_t                              originalPresent{};
-        inline static bool                                   compositeBeforePostProcessing{};
+        inline static bool                                   compositeAfterPostProcessing{};
+        inline static bool                                   communityShadersFrameGenerationProxy{};
+        inline static std::atomic_bool                       frameGenerationSuppressionLogged{};
+        inline static std::atomic_uint32_t                   postProcessingPassesSincePresent{};
         inline static REX::W32::ID3D11Texture2D*             frozenFrame{};
         inline static REX::W32::ID3D11ShaderResourceView*    frozenFrameView{};
         inline static REX::W32::ID3D11Texture2D*             dominantColorReadback{};
