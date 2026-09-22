@@ -159,6 +159,7 @@ namespace load_progress
         preLoadOwnedFader.store(false, std::memory_order_release);
         vanillaLoadPending.store(false, std::memory_order_release);
         fastTravelBlackPending.store(false, std::memory_order_release);
+        fastTravelBlackActive.store(false, std::memory_order_release);
         loadOwnedFader.store(false, std::memory_order_release);
         loadFaderCloseQueued.store(false, std::memory_order_release);
         sleepFadeRequestDeadline.store(0, std::memory_order_release);
@@ -395,6 +396,7 @@ namespace load_progress
         if (presentation.load(std::memory_order_acquire) == Presentation::vanilla) {
             preLoadOwnedFader.store(false, std::memory_order_release);
             fastTravelBlackPending.store(false, std::memory_order_release);
+            fastTravelBlackActive.store(false, std::memory_order_release);
             loadOwnedFader.store(false, std::memory_order_release);
             loadFaderCloseQueued.store(false, std::memory_order_release);
             epochActive.store(false, std::memory_order_release);
@@ -425,19 +427,22 @@ namespace load_progress
         // our loading cover without adding the ordinary post-load compositor above those title cards.
         const bool newGame = newGameTransitionActive.load(std::memory_order_acquire);
         const bool vanilla = presentation.load(std::memory_order_acquire) == Presentation::vanilla;
+        const bool nativeFastTravelFade = fastTravelBlackActive.load(std::memory_order_acquire);
 
         // Opening the post-load gate lets Present composite over the destination cell as soon as it returns.
         epochActive.store(false, std::memory_order_release);
         const auto now = CurrentTimeMilliseconds();
-        const bool deferToPostProcessing = !newGame && !vanilla && compositeAfterPostProcessing;
+        const bool deferToPostProcessing =
+            !newGame && !vanilla && !nativeFastTravelFade && compositeAfterPostProcessing;
         postLoadFadeStart.store(
-            newGame || vanilla || deferToPostProcessing ? 0 : now, std::memory_order_release);
+            newGame || vanilla || nativeFastTravelFade || deferToPostProcessing ? 0 : now,
+            std::memory_order_release);
         postLoadFadeRequestedAt.store(deferToPostProcessing ? now : 0, std::memory_order_release);
         postLoadFadePending.store(deferToPostProcessing, std::memory_order_release);
         postLoadPresentFallback.store(false, std::memory_order_release);
         postProcessingPassesSincePresent.store(0, std::memory_order_release);
         RestoreHUDVisibility();
-        if (newGame || vanilla) {
+        if (newGame || vanilla || nativeFastTravelFade) {
             frozenFrameLocked.store(false, std::memory_order_release);
         }
         if (newGame) {
@@ -455,7 +460,7 @@ namespace load_progress
         }
         awaitingControlRestore.store(true, std::memory_order_release);
         if (!newGame && !vanilla) {
-            CloseResidualLoadingMenus();
+            CloseResidualLoadingMenus(nativeFastTravelFade);
         }
     }
 
@@ -737,6 +742,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     CellTransitioner::Presentation CellTransitioner::ChoosePresentation()
     {
         mainMenuLoadActive.store(false, std::memory_order_release);
+        fastTravelBlackActive.store(false, std::memory_order_release);
 
         if (newGameTransitionActive.load(std::memory_order_acquire)) {
             mainMenuLoadPending.store(false, std::memory_order_release);
@@ -783,12 +789,16 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             fadeInDuration.store(0, std::memory_order_release);
             holdAfterLoad.store(cold.holdAfterLoad.count(), std::memory_order_release);
             fadeOutDuration.store(cold.fadeOut.count(), std::memory_order_release);
+            fastTravelBlackActive.store(true, std::memory_order_release);
 
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::debug(
                     "selected fixed black fast-travel presentation: hold={}ms fadeOut={}ms",
                     holdAfterLoad.load(), fadeOutDuration.load());
             }
+            // FaderMenu is the only black layer guaranteed to survive the upscaler's final
+            // presentation path. Keep LoadingMenu active for its UI, suppress MistMenu separately,
+            // and let Skyrim own the native black hold and destination fade-in.
             return Presentation::loadingMenu;
         }
 
@@ -1207,8 +1217,13 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         const REX::W32::D3D11_TEXTURE2D_DESC& a_desc,
         bool                                  a_separateUI)
     {
-        if (!a_context || !a_backBuffer || !commonStates || !MatchesFrozenFrame(a_desc) ||
-            !frozenFrameView || (!a_separateUI && (!loadingOverlay || !loadingOverlayView))) {
+        const bool opaqueFixedColor =
+            transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&
+            colorSource.load(std::memory_order_acquire) == Settings::ColorSource::fixed &&
+            fadeInDuration.load(std::memory_order_acquire) <= 0;
+        if (!a_context || !a_backBuffer || !commonStates || !frozenFrameView ||
+            (!opaqueFixedColor && !MatchesFrozenFrame(a_desc)) ||
+            (!a_separateUI && (!loadingOverlay || !loadingOverlayView))) {
             return;
         }
 
@@ -1218,9 +1233,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         const auto destination = GetDestinationRect(a_desc);
-        if (mainMenuLoadActive.load(std::memory_order_acquire)) {
-            // Never expose the captured Main Menu movie or its text. The solid shader ignores the
-            // retained texture and supplies the same black cover used for the post-load fade.
+        if (mainMenuLoadActive.load(std::memory_order_acquire) || opaqueFixedColor) {
+            // Immediate fixed-color transitions do not sample the retained texture. This also lets
+            // them cover an upscaler's internal loading target when its format differs from the
+            // post-processed frame captured before the load.
             DrawFullscreenLayer(a_context, frozenFrameView, destination, commonStates->Opaque(), nullptr,
                 solidColorShader, TransitionColor(1.0F));
         } else {
@@ -1228,7 +1244,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 commonStates->LinearClamp(), GetFrozenFrameShader());
         }
 
-        if (!mainMenuLoadActive.load(std::memory_order_acquire) &&
+        if (!mainMenuLoadActive.load(std::memory_order_acquire) && !opaqueFixedColor &&
             transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color) {
             const auto now = CurrentTimeMilliseconds();
             auto       start = loadingTransitionStart.load(std::memory_order_acquire);
@@ -1935,6 +1951,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     preLoadOwnedFader.store(false, std::memory_order_release);
                     loadOwnedFader.store(false, std::memory_order_release);
                     loadFaderCloseQueued.store(false, std::memory_order_release);
+                    fastTravelBlackActive.store(false, std::memory_order_release);
                 }
             }
         }
@@ -1995,6 +2012,16 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     return;
                 }
 
+                if (fastTravelBlackActive.load(std::memory_order_acquire)) {
+                    // Map fast travel keeps Skyrim's native FaderMenu above the loading presentation.
+                    // Once loading ends, allow the same native movie to perform its destination fade-in.
+                    RestoreFaderPresentation(a_menu);
+                    if (epochActive.load(std::memory_order_acquire)) {
+                        a_menu->uiMovie->SetVisible(true);
+                    }
+                    return;
+                }
+
                 const bool transitionWindow = epochActive.load(std::memory_order_acquire) ||
                                               postLoadFadePending.load(std::memory_order_acquire) ||
                                               postLoadFadeStart.load(std::memory_order_acquire) > 0;
@@ -2004,7 +2031,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 const bool suppressLoadFader =
                     loadOwnedFader.load(std::memory_order_acquire) &&
                     (transitionWindow || preLoadOwnedFader.load(std::memory_order_acquire)) &&
-                    !(fastTravelBlackPending.load(std::memory_order_acquire) && !transitionWindow);
+                    !(fastTravelBlackPending.load(std::memory_order_acquire) && !transitionWindow) &&
+                    !(fastTravelBlackActive.load(std::memory_order_acquire) &&
+                        (epochActive.load(std::memory_order_acquire) ||
+                            postLoadFadePending.load(std::memory_order_acquire)));
                 if (suppressLoadFader) {
                     bool expected = false;
                     if (faderPresentationSuppressed.compare_exchange_strong(
@@ -2033,6 +2063,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             (epochActive.load(std::memory_order_acquire) ||
                 postLoadFadePending.load(std::memory_order_acquire) ||
                 postLoadFadeStart.load(std::memory_order_acquire) > 0 ||
+                fastTravelBlackActive.load(std::memory_order_acquire) ||
                 newGameTransitionActive.load(std::memory_order_acquire));
         if (!suppressPresentation && originalMistPostDisplay) {
             originalMistPostDisplay(a_menu);
@@ -2040,7 +2071,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     }
 
     // Closes only the FaderMenu claimed by this load, plus the load-specific MistMenu.
-    void CellTransitioner::CloseResidualLoadingMenus()
+    void CellTransitioner::CloseResidualLoadingMenus(bool a_preserveFader)
     {
         auto* ui = RE::UI::GetSingleton();
         auto* messages = RE::UIMessageQueue::GetSingleton();
@@ -2049,9 +2080,12 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return;
         }
 
-        const bool closeFader = loadOwnedFader.exchange(false, std::memory_order_acq_rel);
+        const bool closeFader = !a_preserveFader &&
+                                loadOwnedFader.exchange(false, std::memory_order_acq_rel);
         preLoadOwnedFader.store(false, std::memory_order_release);
-        faderPresentAtLoadStart.store(false, std::memory_order_release);
+        if (!a_preserveFader) {
+            faderPresentAtLoadStart.store(false, std::memory_order_release);
+        }
         if (closeFader && ui->IsMenuOpen(RE::FaderMenu::MENU_NAME) &&
             !loadFaderCloseQueued.exchange(true, std::memory_order_acq_rel)) {
             messages->AddMessage(RE::FaderMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);

@@ -104,7 +104,7 @@ namespace load_progress
         static RE::UI_MESSAGE_RESULTS FaderMenuProcessMessage(RE::IMenu*, RE::UIMessage&);
         static void                   FaderMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
         static void                   MistMenuPostDisplay(RE::IMenu*);
-        static void                   CloseResidualLoadingMenus();
+        static void                   CloseResidualLoadingMenus(bool = false);
 
         inline static std::atomic_bool                      epochActive{ false };
         inline static std::atomic_bool                      hooksEnabled{ false };
@@ -128,6 +128,7 @@ namespace load_progress
         inline static std::atomic_bool                      mainMenuLoadActive{ false };
         inline static std::atomic_bool                      vanillaLoadPending{ false };
         inline static std::atomic_bool                      fastTravelBlackPending{ false };
+        inline static std::atomic_bool                      fastTravelBlackActive{ false };
         inline static std::atomic_bool                      newGameTransitionActive{ false };
         inline static std::atomic_bool                      newGameFadeRequestSeen{ false };
         inline static std::atomic_bool                      faderPresentAtLoadStart{ false };
