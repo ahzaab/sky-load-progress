@@ -68,8 +68,11 @@ namespace load_progress
         static std::optional<ControlState>     GetControlState();
         static void                            ObserveControlRestore();
         static bool                            MatchesFrozenFrame(const REX::W32::D3D11_TEXTURE2D_DESC&);
+        static bool                            MatchesSceneFrame(const REX::W32::D3D11_TEXTURE2D_DESC&);
         static void                            ReleaseFrameResources();
+        static void                            ReleaseSceneFrameResources();
         static bool                            PrepareFrozenFrame(REX::W32::ID3D11Device*, const REX::W32::D3D11_TEXTURE2D_DESC&);
+        static bool                            PrepareSceneFrame(REX::W32::ID3D11Device*, const REX::W32::D3D11_TEXTURE2D_DESC&);
         static bool                            IsBgraFormat(REX::W32::DXGI_FORMAT);
         static bool                            IsRgbaFormat(REX::W32::DXGI_FORMAT);
         static std::array<std::uint32_t, 4096> BuildColorHistogram(
@@ -110,6 +113,8 @@ namespace load_progress
         inline static std::atomic_bool                      hooksEnabled{ false };
         inline static std::atomic_bool                      failureLogged{ false };
         inline static std::atomic_bool                      frozenFrameLocked{ false };
+        inline static std::atomic_bool                      preLoadDoorCaptureLocked{ false };
+        inline static std::atomic_bool                      preLoadDoorTransitionActive{ false };
         inline static std::atomic_int64_t                   postLoadFadeStart{};
         inline static std::atomic_bool                      postLoadFadePending{};
         inline static std::atomic_int64_t                   postLoadFadeRequestedAt{};
@@ -160,10 +165,17 @@ namespace load_progress
         inline static std::atomic_uint32_t                   postProcessingPassesSincePresent{};
         inline static REX::W32::ID3D11Texture2D*             frozenFrame{};
         inline static REX::W32::ID3D11ShaderResourceView*    frozenFrameView{};
+        inline static REX::W32::ID3D11Texture2D*             sceneFrame{};
+        inline static REX::W32::ID3D11ShaderResourceView*    sceneFrameView{};
+        inline static REX::W32::ID3D11Texture2D*             communityShadersHdrTarget{};
+        inline static REX::W32::ID3D11RenderTargetView*      communityShadersHdrTargetView{};
         inline static REX::W32::ID3D11Texture2D*             dominantColorReadback{};
         inline static REX::W32::ID3D11Texture2D*             loadingOverlay{};
         inline static REX::W32::ID3D11ShaderResourceView*    loadingOverlayView{};
         inline static REX::W32::D3D11_TEXTURE2D_DESC         frozenFrameDesc{};
+        inline static REX::W32::D3D11_TEXTURE2D_DESC         sceneFrameDesc{};
+        inline static REX::W32::D3D11_TEXTURE2D_DESC         communityShadersHdrTargetDesc{};
+        inline static std::atomic_bool                       sceneFrameContainsFinalOutput{};
         inline static std::unique_ptr<DirectX::SpriteBatch>  spriteBatch;
         inline static std::unique_ptr<DirectX::CommonStates> commonStates;
         inline static ::ID3D11PixelShader*                   frozenFrameBlurShader{};

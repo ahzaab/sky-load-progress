@@ -8,6 +8,7 @@
 #include "ProgressMeter.h"
 #include "Settings.h"
 
+#include <hde64.h>
 #include <xbyak/xbyak.h>
 
 namespace load_progress
@@ -530,6 +531,7 @@ namespace load_progress
         {
             const MutationHookDefinition* definition;
             std::uintptr_t                 address;
+            std::size_t                    patchSize;
         };
 
         struct LoadedEntryHookDefinition
@@ -645,7 +647,27 @@ namespace load_progress
                     REL::Module::get().version().string("."), address));
             }
 
-            return { std::addressof(a_hook), address };
+            // A near branch needs five bytes. Skyrim SE's background counter mutations are only
+            // four bytes, so extend the patch across complete following instructions and replay the
+            // entire span in the trampoline. Reject position-dependent instructions because their
+            // displacement would not remain valid after relocation.
+            std::size_t patchSize = instructionSize;
+            while (patchSize < 5) {
+                hde64s decoded{};
+                const auto length = hde64_disasm(
+                    reinterpret_cast<const void*>(address + patchSize), &decoded);
+                if (length == 0 || (decoded.flags & F_ERROR) != 0 ||
+                    address + patchSize + length > textEnd ||
+                    (decoded.flags & F_RELATIVE) != 0 ||
+                    ((decoded.flags & F_MODRM) != 0 && decoded.modrm_mod == 0 && decoded.modrm_rm == 5)) {
+                    throw std::runtime_error(fmt::format(
+                        "could not safely extend the {} hook to a five-byte patch at {:X}",
+                        a_hook.name, address));
+                }
+                patchSize += length;
+            }
+
+            return { std::addressof(a_hook), address, patchSize };
         }
 
         // Resolves all counter sites first so a bad runtime cannot leave a partially installed set.
@@ -666,15 +688,15 @@ namespace load_progress
         void InstallMutationHook(const ResolvedMutationHook& a_hook)
         {
             const auto& definition = *a_hook.definition;
-            const auto  instructionSize = definition.signature.size();
             if (!SKSE::stl::install_context_hook(
-                    a_hook.address, static_cast<int>(instructionSize), definition.callback,
-                    static_cast<int>(instructionSize))) {
+                    a_hook.address, static_cast<int>(a_hook.patchSize), definition.callback,
+                    static_cast<int>(a_hook.patchSize))) {
                 throw std::runtime_error(
                     fmt::format("could not install {} hook at {:X}", definition.name, a_hook.address));
             }
 
-            logger::info("installed direct {} hook at {:X}", definition.name, a_hook.address);
+            logger::info("installed direct {} hook at {:X} ({}-byte patch)",
+                definition.name, a_hook.address, a_hook.patchSize);
         }
 
         // Installs direct hooks on the decoded reference queues and loading-task worker.
@@ -697,8 +719,13 @@ namespace load_progress
         {
             using namespace Xbyak::util;
 
-            const auto enqueue = REL::Relocation<std::uintptr_t>(IDs::IOTasksEnqueue).address();
-            const auto complete = REL::Relocation<std::uintptr_t>(IDs::IOTasksComplete).address();
+            constexpr std::size_t enqueueIndex = 14;
+            constexpr std::size_t completeIndex = 15;
+            REL::Relocation<std::uintptr_t> vtable{ RE::VTABLE_IOManager[0] };
+            const auto enqueue = *reinterpret_cast<const std::uintptr_t*>(
+                vtable.address() + enqueueIndex * sizeof(std::uintptr_t));
+            const auto complete = *reinterpret_cast<const std::uintptr_t*>(
+                vtable.address() + completeIndex * sizeof(std::uintptr_t));
             const auto enqueueSignature = BuildCounterSignature(CounterOperation::increment, rcx, 0x30);
             const auto completeSignature = BuildCounterSignature(CounterOperation::decrement, rcx, 0x30);
             if (!enqueue || !complete ||
@@ -709,24 +736,14 @@ namespace load_progress
                 throw std::runtime_error("IOManager task-counter hook bytes did not match this runtime");
             }
 
-            constexpr std::size_t enqueueIndex = 14;
-            constexpr std::size_t completeIndex = 15;
-            REL::Relocation<std::uintptr_t> vtable{ RE::VTABLE_IOManager[0] };
-            const auto currentEnqueue = *reinterpret_cast<const std::uintptr_t*>(
-                vtable.address() + enqueueIndex * sizeof(std::uintptr_t));
-            const auto currentComplete = *reinterpret_cast<const std::uintptr_t*>(
-                vtable.address() + completeIndex * sizeof(std::uintptr_t));
-            if (currentEnqueue != enqueue || currentComplete != complete) {
-                throw std::runtime_error("IOManager task-counter vtable did not reference the validated methods");
-            }
-
             LoadingProgress::originalIOTaskEnqueue =
-                reinterpret_cast<LoadingProgress::IOTaskMutation_t>(currentEnqueue);
+                reinterpret_cast<LoadingProgress::IOTaskMutation_t>(enqueue);
             LoadingProgress::originalIOTaskComplete =
-                reinterpret_cast<LoadingProgress::IOTaskMutation_t>(currentComplete);
+                reinterpret_cast<LoadingProgress::IOTaskMutation_t>(complete);
             vtable.write_vfunc(enqueueIndex, LoadingProgress::IOTaskEnqueue);
             vtable.write_vfunc(completeIndex, LoadingProgress::IOTaskComplete);
-            logger::info("installed IOManager task enqueue/completion vtable hooks");
+            logger::info("installed IOManager task enqueue/completion vtable hooks at {:X}/{:X}",
+                enqueue, complete);
         }
 
         // Skyrim's final IOTask priority queue uses the same four-byte counter methods. Its vtable

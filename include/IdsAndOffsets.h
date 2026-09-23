@@ -29,10 +29,6 @@ namespace load_progress
         // The value is one of the two task sources used by Skyrim's own loading diagnostic.
         constexpr REL::RelocationID BackgroundTasksProcess{ 12902, 13049 };
 
-        // IOManager's outstanding-task counter is used directly by Skyrim's loading diagnostic.
-        constexpr REL::RelocationID IOTasksEnqueue{ 75683, 75683 };
-        constexpr REL::RelocationID IOTasksComplete{ 75674, 75674 };
-
         // IOManager's +0xE0 priority queue supplies Skyrim's post-processing diagnostic value.
         constexpr REL::RelocationID PostProcessingEnqueue{ 13095, 13241 };
         constexpr REL::RelocationID PostProcessingComplete{ 13073, 13222 };

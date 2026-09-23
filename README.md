@@ -120,7 +120,7 @@ later](COPYING), matching CommonLibSSE-NG. See `COPYING` for the complete licens
 
 ## Reverse Engineering Notes
 
-The current queue hooks were verified against Skyrim 1.6.1170, 1.7.99, and 1.7.104.
+The current queue hooks were verified against Skyrim 1.5.97, 1.6.1170, 1.7.99, and 1.7.104.
 Other runtimes supported by Address Library are attempted on a best-effort basis using
 runtime-family offsets and hook-site validation rather than a fixed runtime whitelist.
 
@@ -130,4 +130,6 @@ runtime-family offsets and hook-site validation rather than a fixed runtime whit
 | Critical references | ID 19155 + `0x07` | ID 19156 + `0x0C` |
 | Distant references | ID 19159 + `0x4E` | ID 19160 + `0x69` |
 
-Each hook replaces a seven-byte `lock inc` or `lock dec` instruction with a CommonLib context hook.
+Each hook validates the complete `lock inc` or `lock dec` instruction before installation. When a
+runtime uses an instruction shorter than the branch needed by the hook, the installer safely extends
+the patch across complete relocatable instructions and replays the full original sequence.

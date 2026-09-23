@@ -93,7 +93,8 @@ namespace load_progress
         bool TransitionOwnsPresentation()
         {
             return CellTransitioner::hooksEnabled.load(std::memory_order_acquire) &&
-                   (CellTransitioner::epochActive.load(std::memory_order_acquire) ||
+                   (CellTransitioner::preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
+                       CellTransitioner::epochActive.load(std::memory_order_acquire) ||
                        CellTransitioner::postLoadFadePending.load(std::memory_order_acquire) ||
                        CellTransitioner::postLoadFadeStart.load(std::memory_order_acquire) > 0);
         }
@@ -156,6 +157,8 @@ namespace load_progress
         hooksEnabled.store(false, std::memory_order_release);
         epochActive.store(false, std::memory_order_release);
         frozenFrameLocked.store(false, std::memory_order_release);
+        preLoadDoorCaptureLocked.store(false, std::memory_order_release);
+        preLoadDoorTransitionActive.store(false, std::memory_order_release);
         preLoadOwnedFader.store(false, std::memory_order_release);
         vanillaLoadPending.store(false, std::memory_order_release);
         fastTravelBlackPending.store(false, std::memory_order_release);
@@ -344,6 +347,8 @@ namespace load_progress
 
         if (selected == Presentation::vanilla) {
             frozenFrameLocked.store(false, std::memory_order_release);
+            preLoadDoorCaptureLocked.store(false, std::memory_order_release);
+            preLoadDoorTransitionActive.store(false, std::memory_order_release);
             postLoadFadeStart.store(0, std::memory_order_release);
             postLoadFadePending.store(false, std::memory_order_release);
             postLoadFadeRequestedAt.store(0, std::memory_order_release);
@@ -356,6 +361,7 @@ namespace load_progress
 
         // This is the capture gate. Once closed, the rolling texture remains the last pre-load world frame.
         frozenFrameLocked.store(true, std::memory_order_release);
+        preLoadDoorCaptureLocked.store(false, std::memory_order_release);
         postLoadFadeStart.store(0, std::memory_order_release);
         postLoadFadePending.store(false, std::memory_order_release);
         postLoadFadeRequestedAt.store(0, std::memory_order_release);
@@ -400,6 +406,7 @@ namespace load_progress
             loadOwnedFader.store(false, std::memory_order_release);
             loadFaderCloseQueued.store(false, std::memory_order_release);
             epochActive.store(false, std::memory_order_release);
+            preLoadDoorTransitionActive.store(false, std::memory_order_release);
             renderObservationState.store(0, std::memory_order_release);
             return;
         }
@@ -416,6 +423,7 @@ namespace load_progress
 
         // Present uses this gate to choose an active loading presentation instead of the post-load fade.
         epochActive.store(true, std::memory_order_release);
+        preLoadDoorTransitionActive.store(false, std::memory_order_release);
         fastTravelBlackPending.store(false, std::memory_order_release);
         renderObservationState.store(1, std::memory_order_release);
     }
@@ -431,6 +439,7 @@ namespace load_progress
 
         // Opening the post-load gate lets Present composite over the destination cell as soon as it returns.
         epochActive.store(false, std::memory_order_release);
+        preLoadDoorTransitionActive.store(false, std::memory_order_release);
         const auto now = CurrentTimeMilliseconds();
         const bool deferToPostProcessing =
             !newGame && !vanilla && !nativeFastTravelFade && compositeAfterPostProcessing;
@@ -930,9 +939,28 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                frozenFrameDesc.sampleDesc.quality == a_desc.sampleDesc.quality;
     }
 
+    // Checks whether the pre-upscale scene capture matches Community Shaders' active scene target.
+    bool CellTransitioner::MatchesSceneFrame(const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
+    {
+        return sceneFrame && sceneFrameDesc.width == a_desc.width && sceneFrameDesc.height == a_desc.height &&
+               sceneFrameDesc.format == a_desc.format && sceneFrameDesc.sampleDesc.count == a_desc.sampleDesc.count &&
+               sceneFrameDesc.sampleDesc.quality == a_desc.sampleDesc.quality;
+    }
+
     // Releases textures that must be recreated when the render target changes.
     void CellTransitioner::ReleaseFrameResources()
     {
+        if (communityShadersHdrTargetView) {
+            communityShadersHdrTargetView->Release();
+            communityShadersHdrTargetView = nullptr;
+        }
+
+        if (communityShadersHdrTarget) {
+            communityShadersHdrTarget->Release();
+            communityShadersHdrTarget = nullptr;
+        }
+        communityShadersHdrTargetDesc = {};
+
         if (frozenFrame) {
             frozenFrame->Release();
             frozenFrame = nullptr;
@@ -957,6 +985,21 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             loadingOverlay->Release();
             loadingOverlay = nullptr;
         }
+    }
+
+    // Releases the separate rolling scene capture used while the CS upscaler owns presentation.
+    void CellTransitioner::ReleaseSceneFrameResources()
+    {
+        if (sceneFrameView) {
+            sceneFrameView->Release();
+            sceneFrameView = nullptr;
+        }
+        if (sceneFrame) {
+            sceneFrame->Release();
+            sceneFrame = nullptr;
+        }
+        sceneFrameDesc = {};
+        sceneFrameContainsFinalOutput.store(false, std::memory_order_release);
     }
 
     // Allocates the frozen frame, CPU readback, and Scaleform overlay textures.
@@ -1009,6 +1052,34 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         frozenFrameDesc = a_backBufferDesc;
         loggedFrozenFrame = false;
 
+        return true;
+    }
+
+    // Allocates a shader-readable copy in the native scene format consumed by the CS Present proxy.
+    bool CellTransitioner::PrepareSceneFrame(
+        REX::W32::ID3D11Device* a_device, const REX::W32::D3D11_TEXTURE2D_DESC& a_sceneDesc)
+    {
+        if (!a_device || a_sceneDesc.width == 0 || a_sceneDesc.height == 0) {
+            return false;
+        }
+        if (MatchesSceneFrame(a_sceneDesc)) {
+            return true;
+        }
+
+        ReleaseSceneFrameResources();
+        auto desc = a_sceneDesc;
+        desc.usage = REX::W32::D3D11_USAGE_DEFAULT;
+        desc.bindFlags = REX::W32::D3D11_BIND_SHADER_RESOURCE;
+        desc.cpuAccessFlags = 0;
+        desc.miscFlags = 0;
+        if (a_device->CreateTexture2D(&desc, nullptr, &sceneFrame) < 0 ||
+            a_device->CreateShaderResourceView(sceneFrame, nullptr, &sceneFrameView) < 0) {
+            logger::error("could not allocate the pre-upscale scene capture texture");
+            ReleaseSceneFrameResources();
+            return false;
+        }
+
+        sceneFrameDesc = a_sceneDesc;
         return true;
     }
 
@@ -1190,21 +1261,36 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         spriteBatch->End();
     }
 
-    // Replaces the loading frame with the unmodified pre-load world image.
+    // Replaces the loading frame with the captured pre-load world image and configured blur.
     void CellTransitioner::PresentSeamlessFrame(
         REX::W32::ID3D11DeviceContext*        a_context,
         REX::W32::ID3D11Texture2D*            a_backBuffer,
         const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
     {
-        if (!a_context || !a_backBuffer || !MatchesFrozenFrame(a_desc)) {
+        if (!a_context || !a_backBuffer || !commonStates) {
             return;
         }
 
-        a_context->CopyResource(a_backBuffer, frozenFrame);
+        // While CS owns Present, use the scene-format capture so its upscaler and HDR pipeline receive
+        // the same lit image they would have received during normal rendering. The post-CS capture is
+        // retained separately for the output-space fade after LoadingMenu closes.
+        // The final swap-chain capture includes render-extension lighting that may be applied after
+        // the native scene target. Prefer it whenever it is compatible; the scene capture is only a
+        // fallback for configurations whose output surface does not match the loading target.
+        const bool finalSceneCapture =
+            sceneFrameContainsFinalOutput.load(std::memory_order_acquire) && MatchesSceneFrame(a_desc);
+        auto* sourceView = finalSceneCapture ?
+                               sceneFrameView :
+                               (MatchesFrozenFrame(a_desc) ? frozenFrameView : sceneFrameView);
+        if (!sourceView) {
+            return;
+        }
+        DrawFullscreenLayer(a_context, sourceView, GetDestinationRect(a_desc),
+            commonStates->Opaque(), commonStates->LinearClamp(), GetFrozenFrameShader());
 
         if (!loggedFrozenPresentation) {
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                logger::debug("presenting the frozen pre-load frame");
+                logger::debug("presenting the blurred frozen pre-load frame");
             }
             loggedFrozenPresentation = true;
         }
@@ -1217,12 +1303,15 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         const REX::W32::D3D11_TEXTURE2D_DESC& a_desc,
         bool                                  a_separateUI)
     {
+        const bool finalSceneCapture =
+            sceneFrameContainsFinalOutput.load(std::memory_order_acquire) && MatchesSceneFrame(a_desc);
+        auto* sourceView = finalSceneCapture ? sceneFrameView : frozenFrameView;
         const bool opaqueFixedColor =
             transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&
             colorSource.load(std::memory_order_acquire) == Settings::ColorSource::fixed &&
             fadeInDuration.load(std::memory_order_acquire) <= 0;
-        if (!a_context || !a_backBuffer || !commonStates || !frozenFrameView ||
-            (!opaqueFixedColor && !MatchesFrozenFrame(a_desc)) ||
+        if (!a_context || !a_backBuffer || !commonStates || !sourceView ||
+            (!opaqueFixedColor && !finalSceneCapture && !MatchesFrozenFrame(a_desc)) ||
             (!a_separateUI && (!loadingOverlay || !loadingOverlayView))) {
             return;
         }
@@ -1237,10 +1326,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             // Immediate fixed-color transitions do not sample the retained texture. This also lets
             // them cover an upscaler's internal loading target when its format differs from the
             // post-processed frame captured before the load.
-            DrawFullscreenLayer(a_context, frozenFrameView, destination, commonStates->Opaque(), nullptr,
+            DrawFullscreenLayer(a_context, sourceView, destination, commonStates->Opaque(), nullptr,
                 solidColorShader, TransitionColor(1.0F));
         } else {
-            DrawFullscreenLayer(a_context, frozenFrameView, destination, commonStates->Opaque(),
+            DrawFullscreenLayer(a_context, sourceView, destination, commonStates->Opaque(),
                 commonStates->LinearClamp(), GetFrozenFrameShader());
         }
 
@@ -1266,7 +1355,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                         1.0F;
 
             // Color transitions move from the captured world toward their fixed or sampled color.
-            DrawFullscreenLayer(a_context, frozenFrameView, destination, commonStates->NonPremultiplied(), nullptr,
+            DrawFullscreenLayer(a_context, sourceView, destination, commonStates->NonPremultiplied(), nullptr,
                 solidColorShader, TransitionColor(colorAlpha));
         }
 
@@ -1342,7 +1431,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         // epochActive is the main loading gate. postLoadFadeStart handles the short tail after it closes.
-        const bool loading = epochActive.load(std::memory_order_acquire);
+        const bool loading = preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
+                             epochActive.load(std::memory_order_acquire);
 
         if (loading && transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&
             dominantColorPending.exchange(false, std::memory_order_acq_rel)) {
@@ -1376,10 +1466,34 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             try {
                 ObserveControlRestore();
 
+                // Preserve the final swap-chain image only for the CS post-processing path, where it
+                // is kept separately from the HDR/world capture. Vanilla's completed swap buffer
+                // already contains Scaleform, so copying it would bake HUD text into the transition.
+                if (compositeAfterPostProcessing &&
+                    !frozenFrameLocked.load(std::memory_order_acquire)) {
+                    REX::W32::ComPtr<REX::W32::ID3D11Texture2D> displayedFrame;
+                    if (a_swapChain->GetBuffer(0, REX::W32::IID_ID3D11Texture2D,
+                            reinterpret_cast<void**>(displayedFrame.GetAddressOf())) >= 0 &&
+                        displayedFrame.Get()) {
+                        auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+                        auto* device = RE::BSGraphics::Renderer::GetDevice();
+                        auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
+                        REX::W32::D3D11_TEXTURE2D_DESC displayedDesc{};
+                        displayedFrame->GetDesc(&displayedDesc);
+                        const bool prepared = PrepareSceneFrame(device, displayedDesc);
+                        if (device && context && prepared) {
+                            context->CopyResource(sceneFrame, displayedFrame.Get());
+                            sceneFrameContainsFinalOutput.store(true, std::memory_order_release);
+                            loggedFrozenPresentation = false;
+                        }
+                    }
+                }
+
                 // The image-space call is not guaranteed to run for every frame Skyrim presents,
                 // particularly while menu/loading render paths are changing. Treat it as the preferred
                 // CS/Upscaler path, but retain this final compositor as a watchdog for any frame it misses.
-                const bool loading = epochActive.load(std::memory_order_acquire);
+                const bool loading = preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
+                                     epochActive.load(std::memory_order_acquire);
                 bool       fadePending = postLoadFadePending.load(std::memory_order_acquire);
                 bool       transitionActive = loading || fadePending ||
                                         postLoadFadeStart.load(std::memory_order_acquire) > 0;
@@ -1451,14 +1565,61 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                 }
                             }
 
+                            // Community Shaders keeps its lit scene in a floating-point HDR target and
+                            // converts that target into the proxy swap chain from its Present hook. During
+                            // loading, Skyrim stops running image-space processing, but CS still performs
+                            // this final conversion. Refill the retained CS target here so the preserved
+                            // HDR lighting goes through the same output transform as a normal frame.
+                            bool compositedIntoCommunityShadersHdr = false;
+                            if (loading && communityShadersHdrTarget && communityShadersHdrTargetView &&
+                                MatchesFrozenFrame(communityShadersHdrTargetDesc)) {
+                                std::array<REX::W32::D3D11_VIEWPORT,
+                                    D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE>
+                                              previousViewports{};
+                                std::uint32_t viewportCount =
+                                    static_cast<std::uint32_t>(previousViewports.size());
+                                context->RSGetViewports(&viewportCount, previousViewports.data());
+
+                                auto* target = communityShadersHdrTargetView;
+                                context->OMSetRenderTargets(1, &target, nullptr);
+                                const REX::W32::D3D11_VIEWPORT viewport{
+                                    0.0F, 0.0F,
+                                    static_cast<float>(communityShadersHdrTargetDesc.width),
+                                    static_cast<float>(communityShadersHdrTargetDesc.height),
+                                    0.0F, 1.0F
+                                };
+                                context->RSSetViewports(1, &viewport);
+                                CompositeLoadingFrame(context, communityShadersHdrTarget,
+                                    communityShadersHdrTargetDesc, true);
+                                compositedIntoCommunityShadersHdr = true;
+
+                                auto* previousTarget = boundView.Get();
+                                context->OMSetRenderTargets(
+                                    previousTarget ? 1U : 0U,
+                                    previousTarget ? &previousTarget : nullptr, boundDepth.Get());
+                                if (viewportCount > 0) {
+                                    context->RSSetViewports(viewportCount, previousViewports.data());
+                                }
+                            }
+
                             // While LoadingMenu is active, Community Shaders redirects Scaleform to a
                             // separate transparent UI target and retains the scene in kFRAMEBUFFER.SRV.
                             // Once the menu closes, the watchdog must instead bind the real swap buffer:
                             // CS can leave its lower-resolution internal target and viewport bound here.
-                            const bool separateUI =
+                            REX::W32::D3D11_TEXTURE2D_DESC backBufferDesc{};
+                            backBuffer->GetDesc(&backBufferDesc);
+                            const bool separateUIAvailable =
                                 (loading || waitingForPostProcessing) && sceneTexture.Get() && boundTexture.Get() &&
                                 sceneTexture.Get() != boundTexture.Get();
-                            if (separateUI) {
+                            const bool finalCaptureMatchesBackBuffer =
+                                sceneFrameContainsFinalOutput.load(std::memory_order_acquire) &&
+                                MatchesSceneFrame(backBufferDesc);
+                            const bool compositeIntoScene =
+                                presentation.load(std::memory_order_acquire) != Presentation::seamless &&
+                                separateUIAvailable && !finalCaptureMatchesBackBuffer;
+                            if (compositedIntoCommunityShadersHdr) {
+                                // CS's Present hook consumes the HDR target after this hook returns.
+                            } else if (compositeIntoScene) {
                                 REX::W32::D3D11_TEXTURE2D_DESC sceneDesc{};
                                 sceneTexture->GetDesc(&sceneDesc);
 
@@ -1496,8 +1657,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                 // The completed swap buffer contains the final scene and Scaleform output.
                                 // Bind it explicitly; drawing with CS's internal viewport still active clips
                                 // the cover to the upper-left portion of the output-sized destination rect.
-                                REX::W32::D3D11_TEXTURE2D_DESC desc{};
-                                backBuffer->GetDesc(&desc);
+                                const auto& desc = backBufferDesc;
 
                                 REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> backBufferView;
                                 if (device->CreateRenderTargetView(
@@ -1518,7 +1678,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                     };
                                     context->RSSetViewports(1, &viewport);
 
-                                    CompositeLoadingFrame(context, backBuffer.Get(), desc);
+                                    // Scaleform remains in CS's separate UI texture. Draw only the retained
+                                    // background here; the proxy composites that UI texture during Present.
+                                    CompositeLoadingFrame(
+                                        context, backBuffer.Get(), desc, separateUIAvailable);
 
                                     auto* previousTarget = boundView.Get();
                                     context->OMSetRenderTargets(
@@ -1631,20 +1794,28 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             REX::W32::D3D11_TEXTURE2D_DESC desc{};
             renderTarget->GetDesc(&desc);
 
-            if (PrepareFrozenFrame(device, desc)) {
-                // With a redirected UI target, kFRAMEBUFFER.SRV retains the completed scene.
-                context->CopyResource(frozenFrame, renderTarget);
+            const bool useSceneCapture = compositeAfterPostProcessing;
+            const bool prepared = useSceneCapture ?
+                                      PrepareSceneFrame(device, desc) :
+                                      PrepareFrozenFrame(device, desc);
+            if (prepared) {
+                // With a redirected UI target, kFRAMEBUFFER.SRV retains the completed lit scene.
+                context->CopyResource(useSceneCapture ? sceneFrame : frozenFrame, renderTarget);
+                if (useSceneCapture) {
+                    sceneFrameContainsFinalOutput.store(false, std::memory_order_release);
+                }
                 loggedFrozenPresentation = false;
 
                 if (!loggedFrozenFrame) {
                     if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                         logger::debug(
-                            "capturing rolling {}x{} world frames before Scaleform ({})",
+                            "capturing rolling {}x{} world frames before Scaleform ({}; {})",
                             desc.width, desc.height,
                             renderTarget == framebufferScene.Get() &&
                                     framebufferScene.Get() != boundTarget.Get() ?
                                 "separate scene target" :
-                                "bound target");
+                                "bound target",
+                            useSceneCapture ? "CS scene copy" : "primary copy");
                     }
                     loggedFrozenFrame = true;
                 }
@@ -1664,8 +1835,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (hooksEnabled.load(std::memory_order_acquire)) {
             try {
                 // Locking preserves the last complete world frame throughout the loading epoch.
-                if (!compositeAfterPostProcessing &&
-                    !frozenFrameLocked.load(std::memory_order_acquire)) {
+                if (!frozenFrameLocked.load(std::memory_order_acquire)) {
                     CaptureBoundWorldTarget();
                 }
             } catch (const std::exception& error) {
@@ -1725,6 +1895,21 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                 }
                                 loggedFrozenFrame = true;
                             }
+                        }
+
+                        if (desc.format == REX::W32::DXGI_FORMAT_R16G16B16A16_FLOAT &&
+                            communityShadersHdrTarget != targetTexture.Get()) {
+                            if (communityShadersHdrTargetView) {
+                                communityShadersHdrTargetView->Release();
+                            }
+                            if (communityShadersHdrTarget) {
+                                communityShadersHdrTarget->Release();
+                            }
+                            communityShadersHdrTarget = targetTexture.Get();
+                            communityShadersHdrTarget->AddRef();
+                            communityShadersHdrTargetView = targetView.Get();
+                            communityShadersHdrTargetView->AddRef();
+                            communityShadersHdrTargetDesc = desc;
                         }
 
                         if (!epochActive.load(std::memory_order_acquire) &&
@@ -1914,6 +2099,19 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         loadOwnedFader.store(true, std::memory_order_release);
                         if (!activeEpoch && !postLoadTransition) {
                             preLoadOwnedFader.store(true, std::memory_order_release);
+                            if (nativeLoadPath == NativeLoadPath::door) {
+                                bool expected = false;
+                                if (preLoadDoorCaptureLocked.compare_exchange_strong(
+                                        expected, true, std::memory_order_acq_rel)) {
+                                    // The door callback can detach or disable a carried/dynamic light
+                                    // before LoadingMenu opens. Retain the last fully presented frame
+                                    // while the light is still visible, rather than locking several
+                                    // frames later during LoadingMenu construction.
+                                    frozenFrameLocked.store(true, std::memory_order_release);
+                                    presentation.store(ChoosePresentation(), std::memory_order_release);
+                                    preLoadDoorTransitionActive.store(true, std::memory_order_release);
+                                }
+                            }
                         }
                     }
 
