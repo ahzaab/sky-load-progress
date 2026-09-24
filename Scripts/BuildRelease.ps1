@@ -110,7 +110,9 @@ if (-not (Get-Content -LiteralPath $generatedVersionHeader -Raw).Contains('"' + 
 $tempDirectory = Join-Path ([IO.Path]::GetTempPath()) ("skyrim-load-progress-release-" + [guid]::NewGuid().ToString('N'))
 $packageDataDirectory = Join-Path $tempDirectory 'Data'
 $packagePluginDirectory = Join-Path $packageDataDirectory 'SKSE\Plugins'
+$packageDocumentationDirectory = Join-Path $packagePluginDirectory 'SkyrimLoadProgress'
 New-Item -ItemType Directory -Path $packagePluginDirectory -Force | Out-Null
+New-Item -ItemType Directory -Path $packageDocumentationDirectory -Force | Out-Null
 
 try
 {
@@ -118,8 +120,8 @@ try
     Copy-Item -LiteralPath $pluginPdb -Destination (Join-Path $packagePluginDirectory 'SkyrimLoadProgress.pdb') -Force
     Copy-Item -LiteralPath $sourceToml -Destination (Join-Path $packagePluginDirectory 'SkyrimLoadProgress.toml') -Force
     Copy-Item -LiteralPath $sourceInterface -Destination $packageDataDirectory -Recurse -Force
-    Copy-Item -LiteralPath $sourceLicense -Destination (Join-Path $tempDirectory 'LICENSE.txt') -Force
-    Copy-Item -LiteralPath $sourceReadme -Destination (Join-Path $tempDirectory 'README.txt') -Force
+    Copy-Item -LiteralPath $sourceLicense -Destination (Join-Path $packageDocumentationDirectory 'LICENSE.txt') -Force
+    Copy-Item -LiteralPath $sourceReadme -Destination (Join-Path $packageDocumentationDirectory 'README.txt') -Force
 
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     $archiveName = 'SkyrimLoadProgress-' + $Version.Replace('.', '_') + '.zip'
@@ -131,12 +133,9 @@ try
         Remove-Item -LiteralPath $releaseArchive -Force
     }
 
-    $packagePaths = @(
-        $packageDataDirectory,
-        (Join-Path $tempDirectory 'LICENSE.txt'),
-        (Join-Path $tempDirectory 'README.txt')
-    )
-    Compress-Archive -LiteralPath $packagePaths -DestinationPath $releaseArchive -CompressionLevel Optimal
+    # MO2 and Vortex both treat the archive root as the game's Data directory. Archive the
+    # contents of the staging Data directory so neither manager creates an extra Data/Data layer.
+    Compress-Archive -Path (Join-Path $packageDataDirectory '*') -DestinationPath $releaseArchive -CompressionLevel Optimal
     if (-not (Test-Path -LiteralPath $releaseArchive -PathType Leaf))
     {
         throw "Compress-Archive did not create $releaseArchive."
@@ -147,23 +146,23 @@ try
     try
     {
         $entries = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-        $allowedTopLevelEntries = @('LICENSE.txt', 'README.txt')
         $unexpectedTopLevelEntries = @($entries | Where-Object {
-            $_ -ne 'Data/' -and -not $_.StartsWith('Data/') -and $_ -notin $allowedTopLevelEntries
+            $topLevelName = $_.Split('/')[0]
+            $topLevelName -notin @('Interface', 'SKSE')
         })
         if ($unexpectedTopLevelEntries.Count -gt 0)
         {
-            throw "Release archive contains unexpected top-level entries: $($unexpectedTopLevelEntries -join ', ')"
+            throw "Release archive contains entries outside Interface/ or SKSE/: $($unexpectedTopLevelEntries -join ', ')"
         }
 
         $requiredEntries = @(
-            'Data/SKSE/Plugins/SkyrimLoadProgress.dll',
-            'Data/SKSE/Plugins/SkyrimLoadProgress.pdb',
-            'Data/SKSE/Plugins/SkyrimLoadProgress.toml',
-            'Data/Interface/SkyrimLoadProgress/LoadingProgressMeter.swf',
-            'Data/Interface/Exported/SkyrimLoadProgress/LoadingProgressMeter.swf',
-            'LICENSE.txt',
-            'README.txt'
+            'SKSE/Plugins/SkyrimLoadProgress.dll',
+            'SKSE/Plugins/SkyrimLoadProgress.pdb',
+            'SKSE/Plugins/SkyrimLoadProgress.toml',
+            'Interface/SkyrimLoadProgress/LoadingProgressMeter.swf',
+            'Interface/Exported/SkyrimLoadProgress/LoadingProgressMeter.swf',
+            'SKSE/Plugins/SkyrimLoadProgress/LICENSE.txt',
+            'SKSE/Plugins/SkyrimLoadProgress/README.txt'
         )
 
         foreach ($requiredEntry in $requiredEntries)

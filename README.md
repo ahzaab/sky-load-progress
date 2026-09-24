@@ -102,17 +102,19 @@ For a debug build with the console enabled:
 
 ## Packaging a Release
 
-Build, validate, and create a Nexus-ready ZIP with a top-level `Data` directory:
+Build, validate, and create a Nexus-ready ZIP for MO2 and Vortex:
 
 ```powershell
 ./Scripts/BuildRelease.ps1 -VsDevCmd J:\dev\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat
 ```
 
 The version defaults to `PROJECT_VERSION` from `CMakeLists.txt`. The archive is written to
-`release/<version>/`. It contains the top-level `Data` directory expected by mod managers, along
-with `LICENSE.txt` and `README.txt`. The `Data` directory includes the DLL, PDB, default TOML
-configuration, and both Interface movie paths required by the plugin. Use `-SkipBuild` to package
-an existing validated Release build.
+`release/<version>/`. The archive root represents Skyrim's `Data` directory, with `SKSE/` and
+`Interface/` at the top level so both MO2 and Vortex install the files without an extra `Data/Data`
+layer. The GPL license and release notice are installed under
+`SKSE/Plugins/SkyrimLoadProgress/`, where they cannot affect plugin loading. The archive also
+includes the DLL, PDB, default TOML configuration, and both Interface movie paths required by the
+plugin. Use `-SkipBuild` to package an existing validated Release build.
 
 ## License
 
