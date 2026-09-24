@@ -109,14 +109,25 @@ Build, validate, and create a Nexus-ready ZIP with a top-level `Data` directory:
 ```
 
 The version defaults to `PROJECT_VERSION` from `CMakeLists.txt`. The archive is written to
-`release/<version>/` and contains only the top-level `Data` directory expected by mod managers,
-with the DLL, PDB, default TOML configuration, and both Interface movie paths required by the plugin.
-Use `-SkipBuild` to package an existing validated Release build.
+`release/<version>/`. It contains the top-level `Data` directory expected by mod managers, along
+with `LICENSE.txt` and `README.txt`. The `Data` directory includes the DLL, PDB, default TOML
+configuration, and both Interface movie paths required by the plugin. Use `-SkipBuild` to package
+an existing validated Release build.
 
 ## License
 
-Skyrim Load Progress is licensed under the [GNU General Public License version 3 or
-later](COPYING), matching CommonLibSSE-NG. See `COPYING` for the complete license terms.
+Copyright (C) 2026 ahzaab.
+
+Skyrim Load Progress is free software: you can redistribute it and/or modify it under the terms of
+the GNU General Public License as published by the Free Software Foundation, either version 3 of
+the License, or (at your option) any later version.
+
+Skyrim Load Progress is distributed in the hope that it will be useful, but **without any warranty**;
+without even the implied warranty of merchantability or fitness for a particular purpose. See the
+[GNU General Public License](LICENSE.txt) for details.
+
+The complete corresponding source code is available in this
+[public GitHub repository](https://github.com/ahzaab/sky-load-progress).
 
 ## Reverse Engineering Notes
 
