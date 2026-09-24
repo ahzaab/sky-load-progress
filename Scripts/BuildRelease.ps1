@@ -52,10 +52,14 @@ $pluginDll = Join-Path $repositoryRoot 'build\release-msvc\SkyrimLoadProgress.dl
 $pluginPdb = Join-Path $repositoryRoot 'build\release-msvc\SkyrimLoadProgress.pdb'
 $sourceToml = Join-Path $repositoryRoot 'dist\SKSE\Plugins\SkyrimLoadProgress.toml'
 $sourceInterface = Join-Path $repositoryRoot 'dist\Interface'
+$sourceLicense = Join-Path $repositoryRoot 'LICENSE.txt'
+$sourceReadme = Join-Path $repositoryRoot 'README.txt'
 $requiredFiles = @(
     $pluginDll,
     $pluginPdb,
     $sourceToml,
+    $sourceLicense,
+    $sourceReadme,
     (Join-Path $sourceInterface 'SkyrimLoadProgress\LoadingProgressMeter.swf'),
     (Join-Path $sourceInterface 'Exported\SkyrimLoadProgress\LoadingProgressMeter.swf')
 )
@@ -114,6 +118,8 @@ try
     Copy-Item -LiteralPath $pluginPdb -Destination (Join-Path $packagePluginDirectory 'SkyrimLoadProgress.pdb') -Force
     Copy-Item -LiteralPath $sourceToml -Destination (Join-Path $packagePluginDirectory 'SkyrimLoadProgress.toml') -Force
     Copy-Item -LiteralPath $sourceInterface -Destination $packageDataDirectory -Recurse -Force
+    Copy-Item -LiteralPath $sourceLicense -Destination (Join-Path $tempDirectory 'LICENSE.txt') -Force
+    Copy-Item -LiteralPath $sourceReadme -Destination (Join-Path $tempDirectory 'README.txt') -Force
 
     New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
     $archiveName = 'SkyrimLoadProgress-' + $Version.Replace('.', '_') + '.zip'
@@ -125,7 +131,12 @@ try
         Remove-Item -LiteralPath $releaseArchive -Force
     }
 
-    Compress-Archive -LiteralPath $packageDataDirectory -DestinationPath $releaseArchive -CompressionLevel Optimal
+    $packagePaths = @(
+        $packageDataDirectory,
+        (Join-Path $tempDirectory 'LICENSE.txt'),
+        (Join-Path $tempDirectory 'README.txt')
+    )
+    Compress-Archive -LiteralPath $packagePaths -DestinationPath $releaseArchive -CompressionLevel Optimal
     if (-not (Test-Path -LiteralPath $releaseArchive -PathType Leaf))
     {
         throw "Compress-Archive did not create $releaseArchive."
@@ -136,12 +147,13 @@ try
     try
     {
         $entries = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+        $allowedTopLevelEntries = @('LICENSE.txt', 'README.txt')
         $unexpectedTopLevelEntries = @($entries | Where-Object {
-            $_ -ne 'Data/' -and -not $_.StartsWith('Data/')
+            $_ -ne 'Data/' -and -not $_.StartsWith('Data/') -and $_ -notin $allowedTopLevelEntries
         })
         if ($unexpectedTopLevelEntries.Count -gt 0)
         {
-            throw "Release archive contains entries outside the top-level Data directory: $($unexpectedTopLevelEntries -join ', ')"
+            throw "Release archive contains unexpected top-level entries: $($unexpectedTopLevelEntries -join ', ')"
         }
 
         $requiredEntries = @(
@@ -149,7 +161,9 @@ try
             'Data/SKSE/Plugins/SkyrimLoadProgress.pdb',
             'Data/SKSE/Plugins/SkyrimLoadProgress.toml',
             'Data/Interface/SkyrimLoadProgress/LoadingProgressMeter.swf',
-            'Data/Interface/Exported/SkyrimLoadProgress/LoadingProgressMeter.swf'
+            'Data/Interface/Exported/SkyrimLoadProgress/LoadingProgressMeter.swf',
+            'LICENSE.txt',
+            'README.txt'
         )
 
         foreach ($requiredEntry in $requiredEntries)

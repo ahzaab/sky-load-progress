@@ -76,6 +76,8 @@ namespace load_progress
         using ProcessMessage_t = RE::UI_MESSAGE_RESULTS (*)(RE::IMenu*, RE::UIMessage&);
         using ReferenceEnqueue_t = std::uintptr_t (*)(RE::TESObjectCELL*);
         using DistantReferenceEnqueue_t = std::uintptr_t (*)(RE::TESObjectCELL*, RE::TESObjectREFR*);
+        using IOTaskMutation_t = void (*)(RE::IOManager*);
+        using PostProcessingMutation_t = void (*)(void*);
 
         static LoadingProgress& GetSingleton();
         static std::uint64_t    GetLiveRemaining();
@@ -94,6 +96,8 @@ namespace load_progress
         static void                   LoadingMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
         static RE::UI_MESSAGE_RESULTS LoadingMenuProcessMessage(RE::IMenu*, RE::UIMessage&);
         static void                   LogProgress(const Progress&);
+        static void                   LogProgressTrace(const Progress&, float);
+        static std::uint64_t          MonotonicMilliseconds() noexcept;
         static void                   DisableHooks(std::string_view) noexcept;
         static void                   OnEnqueue(Queue) noexcept;
         static void                   OnComplete(Queue) noexcept;
@@ -103,6 +107,12 @@ namespace load_progress
         static void                   ReferenceComplete(CONTEXT&) noexcept;
         static void                   DistantEnqueue(CONTEXT&) noexcept;
         static void                   DistantComplete(CONTEXT&) noexcept;
+        static void                   BackgroundEnqueue(CONTEXT&) noexcept;
+        static void                   BackgroundComplete(CONTEXT&) noexcept;
+        static void                   IOTaskEnqueue(RE::IOManager*) noexcept;
+        static void                   IOTaskComplete(RE::IOManager*) noexcept;
+        static void                   PostProcessingEnqueue(void*) noexcept;
+        static void                   PostProcessingComplete(void*) noexcept;
         static void                   SeedQueuedWork();
         static void                   BeginLoadingEpoch();
         static void                   EndLoadingEpoch();
@@ -125,6 +135,10 @@ namespace load_progress
         inline static std::atomic_bool                             hooksEnabled{ false };
         inline static std::atomic_bool                             failureLogged{ false };
         inline static std::atomic_uint32_t                         displayedBasisPoints{};
+        inline static std::atomic_uint64_t                         traceEpochStartedMs{};
+        inline static std::atomic_uint64_t                         traceLastSampleMs{};
+        inline static std::atomic_uint64_t                         traceLastQueueActivityMs{};
+        inline static std::atomic_uint64_t                         traceLastProgressAdvanceMs{};
         inline static std::array<LoadedEntrySlot, loadedEntryCapacity> loadedEntries{};
         inline static std::array<std::atomic_uint64_t, loadedEntryTypeCount> loadedEntryTallies{};
         inline static std::atomic_uint64_t                         loadedEntryWriteCursor{};
@@ -137,6 +151,10 @@ namespace load_progress
         inline static AdvanceMovie_t                               originalAdvanceMovie{};
         inline static ReferenceEnqueue_t                           originalReferenceEnqueue{};
         inline static DistantReferenceEnqueue_t                    originalDistantReferenceEnqueue{};
+        inline static IOTaskMutation_t                              originalIOTaskEnqueue{};
+        inline static IOTaskMutation_t                              originalIOTaskComplete{};
+        inline static PostProcessingMutation_t                      originalPostProcessingEnqueue{};
+        inline static PostProcessingMutation_t                      originalPostProcessingComplete{};
 
     private:
         LoadingProgress() = default;

@@ -25,6 +25,15 @@ namespace load_progress
         constexpr REL::RelocationID DistantReferencesEnqueue{ 18677, 19159 };
         constexpr REL::RelocationID DistantReferencesComplete{ 18678, 19160 };
 
+        // BackgroundProcessThread brackets each dispatched loading-task batch with this counter.
+        // The value is one of the two task sources used by Skyrim's own loading diagnostic.
+        constexpr REL::RelocationID BackgroundTasksProcess{ 12902, 13049 };
+
+        // IOManager's +0xE0 priority queue supplies Skyrim's post-processing diagnostic value.
+        constexpr REL::RelocationID PostProcessingEnqueue{ 13095, 13241 };
+        constexpr REL::RelocationID PostProcessingComplete{ 13073, 13222 };
+        constexpr REL::RelocationID PostProcessingCount{ 13089, 13235 };
+
         // These callers own the semantic enqueue operations used by loaded-entry diagnostics. The
         // hook installer finds their unique calls to the counter helpers above, so these sites do not
         // depend on fragile function-relative offsets.
@@ -36,6 +45,11 @@ namespace load_progress
         // caller/callee pair lets the hook locate that call without a runtime-specific byte offset.
         constexpr REL::RelocationID NormalWorldRenderCaller{ 35560, 36559 };
         constexpr REL::RelocationID NormalWorldRenderer{ 100424, 107142 };
+
+        // Main's image-space pass owns the call Community Shaders chains to perform upscaling before
+        // Skyrim's post processing. Hooking the same call after CS lets the transition feed its retained
+        // frame through DLSS, HDR mapping, and the D3D12 frame-generation proxy.
+        constexpr REL::RelocationID ImageSpacePostProcessingCaller{ 100430, 107148 };
 
         // The UI renderer owns one call to this helper after binding the Scaleform render target and
         // before drawing any movies. Hooking that specific call preserves the world-only capture point.
@@ -75,9 +89,14 @@ namespace load_progress
         constexpr RuntimeOffset DistantReferencesEnqueue{ 0x4E, 0x4E, 0x4E };
         constexpr RuntimeOffset DistantReferencesComplete{ 0x69, 0x69, 0x69 };
 
+        // The SE worker has a shorter dispatch loop. AE and GOG share the same two mutations.
+        constexpr RuntimeOffset BackgroundTasksEnqueue{ 0x96, 0xA0, 0xA0 };
+        constexpr RuntimeOffset BackgroundTasksComplete{ 0x179, 0x363, 0x363 };
+
         // Verified fallback locations for chaining render hooks that another plugin has already
         // redirected. Vanilla installs still use semantic caller/callee discovery first.
         constexpr RuntimeOffset NormalWorldRenderCall{ 0x831, 0x841, 0x85E };
         constexpr RuntimeOffset ScaleformBeginCall{ 0x17F, 0x18A, 0x18A };
+        constexpr RuntimeOffset ImageSpacePostProcessingCall{ 0x1F0, 0x1E7, 0x1E7 };
     }
 }

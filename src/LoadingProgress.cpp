@@ -8,6 +8,7 @@
 #include "ProgressMeter.h"
 #include "Settings.h"
 
+#include <hde64.h>
 #include <xbyak/xbyak.h>
 
 namespace load_progress
@@ -27,6 +28,13 @@ namespace load_progress
             remaining += queue.load(std::memory_order_relaxed);
         }
         return remaining;
+    }
+
+    std::uint64_t LoadingProgress::MonotonicMilliseconds() noexcept
+    {
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+                                              .count());
     }
 
     // Applies queue deltas outside the engine's queue-mutation call paths.
@@ -268,6 +276,8 @@ namespace load_progress
             // HUDMenu can be created or made visible after LoadingMenu opens on a Main Menu save load.
             CellTransitioner::HideHUDForLoad();
 
+            LogProgressTrace(aggregator.Current(), a_interval);
+
             if (a_menu && a_menu->uiMovie) {
                 const bool seamless = CellTransitioner::IsSeamless();
                 const bool vanilla = CellTransitioner::IsVanilla();
@@ -314,14 +324,34 @@ namespace load_progress
 
     void LoadingProgress::LogProgress(const Progress& a_progress)
     {
-        const auto candidate = a_progress.total ?
-                                   static_cast<std::uint32_t>(std::clamp(a_progress.fraction * 10000.0, 0.0, 10000.0)) :
-                                   0u;
+        constexpr std::uint32_t finalLoadingBasisPoints = 9900;
+        constexpr std::uint64_t initialRampMilliseconds = 500;
+        const auto rawCandidate = a_progress.total ?
+                                      static_cast<std::uint32_t>(
+                                          std::clamp(a_progress.fraction * 10000.0, 0.0, 10000.0)) :
+                                      0u;
+        const auto now = MonotonicMilliseconds();
+        const auto epochStarted = traceEpochStartedMs.load(std::memory_order_relaxed);
+        const auto elapsed = epochStarted && now >= epochStarted ? now - epochStarted : 0;
+        const auto rampCeiling = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+            finalLoadingBasisPoints,
+            elapsed * finalLoadingBasisPoints / initialRampMilliseconds));
+        const auto candidate = std::min({ rawCandidate, rampCeiling, finalLoadingBasisPoints });
         auto       displayed = displayedBasisPoints.load(std::memory_order_relaxed);
-        // Newly queued work can lower the raw fraction, but the meter should not move backward.
-        while (candidate > displayed &&
-               !displayedBasisPoints.compare_exchange_weak(
-                   displayed, candidate, std::memory_order_release, std::memory_order_relaxed)) {}
+        // New work can appear after a queue temporarily drains. The initial time ceiling prevents an
+        // early completed batch from committing a misleading high value, and LoadingMenu owns the
+        // final one percent so the meter cannot report completion while the menu is still visible.
+        bool advanced = false;
+        while (candidate > displayed) {
+            if (displayedBasisPoints.compare_exchange_weak(
+                    displayed, candidate, std::memory_order_release, std::memory_order_relaxed)) {
+                advanced = true;
+                break;
+            }
+        }
+        if (advanced) {
+            traceLastProgressAdvanceMs.store(MonotonicMilliseconds(), std::memory_order_relaxed);
+        }
         if (a_progress.total == lastLogged.total && a_progress.completed == lastLogged.completed &&
             a_progress.remaining == lastLogged.remaining) {
             return;
@@ -332,6 +362,45 @@ namespace load_progress
                 a_progress.fraction * 100.0);
         }
         lastLogged = a_progress;
+    }
+
+    // Writes a low-frequency timeline sample even when no queue mutation changes the meter. This
+    // distinguishes untracked work from a stalled LoadingMenu update callback in test logs.
+    void LoadingProgress::LogProgressTrace(const Progress& a_progress, float a_interval)
+    {
+        if (!Settings::GetSingleton().IsVerboseQueueLoggingEnabled() ||
+            !epochActive.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        constexpr std::uint64_t samplePeriodMs = 250;
+        const auto now = MonotonicMilliseconds();
+        const auto previousSample = traceLastSampleMs.load(std::memory_order_relaxed);
+        if (previousSample != 0 && now - previousSample < samplePeriodMs) {
+            return;
+        }
+        traceLastSampleMs.store(now, std::memory_order_relaxed);
+
+        const auto epochStarted = traceEpochStartedMs.load(std::memory_order_relaxed);
+        const auto queueActivity = traceLastQueueActivityMs.load(std::memory_order_relaxed);
+        const auto progressAdvance = traceLastProgressAdvanceMs.load(std::memory_order_relaxed);
+        const auto displayed = displayedBasisPoints.load(std::memory_order_acquire);
+        const auto rawBasisPoints = a_progress.total ?
+                                        static_cast<std::uint32_t>(
+                                            std::clamp(a_progress.fraction * 10000.0, 0.0, 10000.0)) :
+                                        0u;
+
+        std::array<std::uint64_t, queueCount> live{};
+        for (std::size_t i = 0; i < queueCount; ++i) {
+            live[i] = liveRemaining[i].load(std::memory_order_relaxed);
+        }
+
+        logger::info(
+            "progress trace: epoch_ms={} sample_delta_ms={} frame_interval_ms={:.3f} displayed={:.2f}% raw={:.2f}% completed={} remaining={} total={} progress_idle_ms={} queue_idle_ms={} live=[critical-refs:{}, refs:{}, distant-refs:{}, background:{}, tasks:{}, post-processing:{}]",
+            now - epochStarted, previousSample ? now - previousSample : 0, a_interval * 1000.0F,
+            static_cast<double>(displayed) / 100.0, static_cast<double>(rawBasisPoints) / 100.0,
+            a_progress.completed, a_progress.remaining, a_progress.total, now - progressAdvance,
+            now - queueActivity, live[0], live[1], live[2], live[3], live[4], live[5]);
     }
 
     // Disables plugin behavior while leaving every installed hook as a pass-through.
@@ -360,6 +429,7 @@ namespace load_progress
 
         liveRemaining[index].fetch_add(1, std::memory_order_relaxed);
         if (epochActive.load(std::memory_order_relaxed)) {
+            traceLastQueueActivityMs.store(MonotonicMilliseconds(), std::memory_order_relaxed);
             pendingEnqueued[index].fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -377,6 +447,7 @@ namespace load_progress
         // Saturate at zero because the plugin may begin observing after Skyrim queued the work.
         while (value != 0 && !live.compare_exchange_weak(value, value - 1, std::memory_order_relaxed)) {}
         if (epochActive.load(std::memory_order_relaxed)) {
+            traceLastQueueActivityMs.store(MonotonicMilliseconds(), std::memory_order_relaxed);
             pendingCompleted[index].fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -388,6 +459,53 @@ namespace load_progress
     void LoadingProgress::ReferenceComplete(CONTEXT&) noexcept { OnComplete(Queue::references); }
     void LoadingProgress::DistantEnqueue(CONTEXT&) noexcept { OnEnqueue(Queue::distantReferences); }
     void LoadingProgress::DistantComplete(CONTEXT&) noexcept { OnComplete(Queue::distantReferences); }
+    void LoadingProgress::BackgroundEnqueue(CONTEXT&) noexcept { OnEnqueue(Queue::backgroundProcessing); }
+    void LoadingProgress::BackgroundComplete(CONTEXT&) noexcept { OnComplete(Queue::backgroundProcessing); }
+    void LoadingProgress::IOTaskEnqueue(RE::IOManager* a_manager) noexcept
+    {
+        if (originalIOTaskEnqueue) {
+            originalIOTaskEnqueue(a_manager);
+        }
+        OnEnqueue(Queue::tasks);
+    }
+
+    void LoadingProgress::IOTaskComplete(RE::IOManager* a_manager) noexcept
+    {
+        if (originalIOTaskComplete) {
+            originalIOTaskComplete(a_manager);
+        }
+        OnComplete(Queue::tasks);
+    }
+
+    void LoadingProgress::PostProcessingEnqueue(void* a_queue) noexcept
+    {
+        if (originalPostProcessingEnqueue) {
+            originalPostProcessingEnqueue(a_queue);
+        }
+        const auto* manager = RE::IOManager::GetSingleton();
+        const auto* postProcessing = manager ?
+                                         *reinterpret_cast<void* const*>(
+                                             reinterpret_cast<std::uintptr_t>(manager) + 0xE0) :
+                                         nullptr;
+        if (a_queue == postProcessing) {
+            OnEnqueue(Queue::postProcessing);
+        }
+    }
+
+    void LoadingProgress::PostProcessingComplete(void* a_queue) noexcept
+    {
+        if (originalPostProcessingComplete) {
+            originalPostProcessingComplete(a_queue);
+        }
+        const auto* manager = RE::IOManager::GetSingleton();
+        const auto* postProcessing = manager ?
+                                         *reinterpret_cast<void* const*>(
+                                             reinterpret_cast<std::uintptr_t>(manager) + 0xE0) :
+                                         nullptr;
+        if (a_queue == postProcessing) {
+            OnComplete(Queue::postProcessing);
+        }
+    }
 
     namespace
     {
@@ -413,6 +531,7 @@ namespace load_progress
         {
             const MutationHookDefinition* definition;
             std::uintptr_t                 address;
+            std::size_t                    patchSize;
         };
 
         struct LoadedEntryHookDefinition
@@ -477,7 +596,16 @@ namespace load_progress
                     BuildCounterSignature(CounterOperation::increment, rcx, 0x174) },
                 { IDs::DistantReferencesComplete, Offsets::DistantReferencesComplete,
                     LoadingProgress::DistantComplete, "distant completion",
-                    BuildCounterSignature(CounterOperation::decrement, rax, 0x174) }
+                    BuildCounterSignature(CounterOperation::decrement, rax, 0x174) },
+                { IDs::BackgroundTasksProcess, Offsets::BackgroundTasksEnqueue,
+                    LoadingProgress::BackgroundEnqueue, "background-task enqueue",
+                    BuildCounterSignature(CounterOperation::increment,
+                        REL::Module::get().version() < Runtimes::SkyrimAEStart ? rsi : r15, 0x68) },
+                { IDs::BackgroundTasksProcess, Offsets::BackgroundTasksComplete,
+                    LoadingProgress::BackgroundComplete, "background-task completion",
+                    BuildCounterSignature(CounterOperation::decrement,
+                        REL::Module::get().version() < Runtimes::SkyrimAEStart ? rsi : r15, 0x68) },
+
             });
         }
 
@@ -519,7 +647,27 @@ namespace load_progress
                     REL::Module::get().version().string("."), address));
             }
 
-            return { std::addressof(a_hook), address };
+            // A near branch needs five bytes. Skyrim SE's background counter mutations are only
+            // four bytes, so extend the patch across complete following instructions and replay the
+            // entire span in the trampoline. Reject position-dependent instructions because their
+            // displacement would not remain valid after relocation.
+            std::size_t patchSize = instructionSize;
+            while (patchSize < 5) {
+                hde64s decoded{};
+                const auto length = hde64_disasm(
+                    reinterpret_cast<const void*>(address + patchSize), &decoded);
+                if (length == 0 || (decoded.flags & F_ERROR) != 0 ||
+                    address + patchSize + length > textEnd ||
+                    (decoded.flags & F_RELATIVE) != 0 ||
+                    ((decoded.flags & F_MODRM) != 0 && decoded.modrm_mod == 0 && decoded.modrm_rm == 5)) {
+                    throw std::runtime_error(fmt::format(
+                        "could not safely extend the {} hook to a five-byte patch at {:X}",
+                        a_hook.name, address));
+                }
+                patchSize += length;
+            }
+
+            return { std::addressof(a_hook), address, patchSize };
         }
 
         // Resolves all counter sites first so a bad runtime cannot leave a partially installed set.
@@ -540,18 +688,18 @@ namespace load_progress
         void InstallMutationHook(const ResolvedMutationHook& a_hook)
         {
             const auto& definition = *a_hook.definition;
-            const auto  instructionSize = definition.signature.size();
             if (!SKSE::stl::install_context_hook(
-                    a_hook.address, static_cast<int>(instructionSize), definition.callback,
-                    static_cast<int>(instructionSize))) {
+                    a_hook.address, static_cast<int>(a_hook.patchSize), definition.callback,
+                    static_cast<int>(a_hook.patchSize))) {
                 throw std::runtime_error(
                     fmt::format("could not install {} hook at {:X}", definition.name, a_hook.address));
             }
 
-            logger::info("installed direct {} hook at {:X}", definition.name, a_hook.address);
+            logger::info("installed direct {} hook at {:X} ({}-byte patch)",
+                definition.name, a_hook.address, a_hook.patchSize);
         }
 
-        // Installs direct hooks on the three decoded reference queue mutations.
+        // Installs direct hooks on the decoded reference queues and loading-task worker.
         void InstallMutationHooks()
         {
             RequireQueueHookTrampolineSpace();
@@ -563,6 +711,95 @@ namespace load_progress
             for (const auto& hook : resolved) {
                 InstallMutationHook(hook);
             }
+        }
+
+        // The IOManager counter methods are only four bytes plus RET, too short for a context hook.
+        // Validate the exact bodies, then replace their virtual slots and chain the originals.
+        void InstallIOTaskHooks()
+        {
+            using namespace Xbyak::util;
+
+            constexpr std::size_t enqueueIndex = 14;
+            constexpr std::size_t completeIndex = 15;
+            REL::Relocation<std::uintptr_t> vtable{ RE::VTABLE_IOManager[0] };
+            const auto enqueue = *reinterpret_cast<const std::uintptr_t*>(
+                vtable.address() + enqueueIndex * sizeof(std::uintptr_t));
+            const auto complete = *reinterpret_cast<const std::uintptr_t*>(
+                vtable.address() + completeIndex * sizeof(std::uintptr_t));
+            const auto enqueueSignature = BuildCounterSignature(CounterOperation::increment, rcx, 0x30);
+            const auto completeSignature = BuildCounterSignature(CounterOperation::decrement, rcx, 0x30);
+            if (!enqueue || !complete ||
+                std::memcmp(reinterpret_cast<const void*>(enqueue), enqueueSignature.data(), enqueueSignature.size()) != 0 ||
+                std::memcmp(reinterpret_cast<const void*>(complete), completeSignature.data(), completeSignature.size()) != 0 ||
+                *reinterpret_cast<const std::uint8_t*>(enqueue + enqueueSignature.size()) != 0xC3 ||
+                *reinterpret_cast<const std::uint8_t*>(complete + completeSignature.size()) != 0xC3) {
+                throw std::runtime_error("IOManager task-counter hook bytes did not match this runtime");
+            }
+
+            LoadingProgress::originalIOTaskEnqueue =
+                reinterpret_cast<LoadingProgress::IOTaskMutation_t>(enqueue);
+            LoadingProgress::originalIOTaskComplete =
+                reinterpret_cast<LoadingProgress::IOTaskMutation_t>(complete);
+            vtable.write_vfunc(enqueueIndex, LoadingProgress::IOTaskEnqueue);
+            vtable.write_vfunc(completeIndex, LoadingProgress::IOTaskComplete);
+            logger::info("installed IOManager task enqueue/completion vtable hooks at {:X}/{:X}",
+                enqueue, complete);
+        }
+
+        // Skyrim's final IOTask priority queue uses the same four-byte counter methods. Its vtable
+        // is shared by other instances, so the callbacks count only IOManager's +0xE0 queue.
+        void InstallPostProcessingHooks()
+        {
+            using namespace Xbyak::util;
+
+            const auto enqueue = REL::Relocation<std::uintptr_t>(IDs::PostProcessingEnqueue).address();
+            const auto complete = REL::Relocation<std::uintptr_t>(IDs::PostProcessingComplete).address();
+            const auto count = REL::Relocation<std::uintptr_t>(IDs::PostProcessingCount).address();
+            const auto enqueueSignature = BuildCounterSignature(CounterOperation::increment, rcx, 0x14);
+            const auto completeSignature = BuildCounterSignature(CounterOperation::decrement, rcx, 0x14);
+            constexpr auto countSignature = std::to_array<std::uint8_t>({ 0x8B, 0x41, 0x14, 0xC3 });
+            if (!enqueue || !complete || !count ||
+                std::memcmp(reinterpret_cast<const void*>(enqueue), enqueueSignature.data(), enqueueSignature.size()) != 0 ||
+                std::memcmp(reinterpret_cast<const void*>(complete), completeSignature.data(), completeSignature.size()) != 0 ||
+                *reinterpret_cast<const std::uint8_t*>(enqueue + enqueueSignature.size()) != 0xC3 ||
+                *reinterpret_cast<const std::uint8_t*>(complete + completeSignature.size()) != 0xC3 ||
+                std::memcmp(reinterpret_cast<const void*>(count), countSignature.data(), countSignature.size()) != 0) {
+                throw std::runtime_error("post-processing counter hook bytes did not match this runtime");
+            }
+
+            constexpr std::size_t enqueueIndex = 1;
+            constexpr std::size_t completeIndex = 2;
+            constexpr std::size_t countIndex = 3;
+            REL::Relocation<std::uintptr_t> vtable{
+                RE::VTABLE_SynchronizedPriorityQueue_NiPointer_IOTask__[0]
+            };
+            const auto currentEnqueue = *reinterpret_cast<const std::uintptr_t*>(
+                vtable.address() + enqueueIndex * sizeof(std::uintptr_t));
+            const auto currentComplete = *reinterpret_cast<const std::uintptr_t*>(
+                vtable.address() + completeIndex * sizeof(std::uintptr_t));
+            const auto currentCount = *reinterpret_cast<const std::uintptr_t*>(
+                vtable.address() + countIndex * sizeof(std::uintptr_t));
+            if (currentEnqueue != enqueue || currentComplete != complete || currentCount != count) {
+                throw std::runtime_error(
+                    "post-processing vtable did not reference the validated counter methods");
+            }
+
+            auto* manager = RE::IOManager::GetSingleton();
+            const auto postProcessing = manager ?
+                                            *reinterpret_cast<void**>(
+                                                reinterpret_cast<std::uintptr_t>(manager) + 0xE0) :
+                                            nullptr;
+            if (!postProcessing || *reinterpret_cast<const std::uintptr_t*>(postProcessing) != vtable.address()) {
+                throw std::runtime_error("could not validate IOManager's post-processing queue instance");
+            }
+
+            LoadingProgress::originalPostProcessingEnqueue =
+                reinterpret_cast<LoadingProgress::PostProcessingMutation_t>(currentEnqueue);
+            LoadingProgress::originalPostProcessingComplete =
+                reinterpret_cast<LoadingProgress::PostProcessingMutation_t>(currentComplete);
+            vtable.write_vfunc(enqueueIndex, LoadingProgress::PostProcessingEnqueue);
+            vtable.write_vfunc(completeIndex, LoadingProgress::PostProcessingComplete);
+            logger::info("installed IOManager post-processing enqueue/completion vtable hooks");
         }
 
         // Resolves the original counter callees that semantic hooks must invoke in place of E8 calls.
@@ -716,6 +953,11 @@ namespace load_progress
         BeginLoadedEntryCapture();
 
         displayedBasisPoints.store(0, std::memory_order_release);
+        const auto now = MonotonicMilliseconds();
+        traceEpochStartedMs.store(now, std::memory_order_relaxed);
+        traceLastSampleMs.store(0, std::memory_order_relaxed);
+        traceLastQueueActivityMs.store(now, std::memory_order_relaxed);
+        traceLastProgressAdvanceMs.store(now, std::memory_order_relaxed);
         for (std::size_t i = 0; i < queueCount; ++i) {
             pendingEnqueued[i].store(0, std::memory_order_relaxed);
             pendingCompleted[i].store(0, std::memory_order_relaxed);
@@ -760,7 +1002,13 @@ namespace load_progress
 
         const auto final = aggregator.Current();
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            logger::info("loading epoch ended: Loading Menu closed; completed={} remaining={} total={}",
+            const auto now = MonotonicMilliseconds();
+            logger::info(
+                "loading epoch ended: Loading Menu closed; epoch_ms={} progress_idle_ms={} queue_idle_ms={} displayed={:.2f}% completed={} remaining={} total={}",
+                now - traceEpochStartedMs.load(std::memory_order_relaxed),
+                now - traceLastProgressAdvanceMs.load(std::memory_order_relaxed),
+                now - traceLastQueueActivityMs.load(std::memory_order_relaxed),
+                static_cast<double>(displayedBasisPoints.load(std::memory_order_acquire)) / 100.0,
                 final.completed, final.remaining, final.total);
         }
         aggregator.End();
@@ -930,6 +1178,8 @@ namespace load_progress
         }
 
         InstallMutationHooks();
+        InstallIOTaskHooks();
+        InstallPostProcessingHooks();
         InstallLoadedEntryHooks();
         InstallLoadingMenuHook();
 

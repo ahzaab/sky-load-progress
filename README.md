@@ -4,7 +4,7 @@ Skyrim Load Progress adds a progress meter to the loading screen. The meter uses
 
 > **Experimental branch:** `seamless-loading-experiment` keeps Skyrim's loading, fader, and mist update loops running but disables their presentation. This hides both Scaleform movies and suppresses MistMenu's native mist, background, and load-screen NIF rendering. It also disables form-backed image-space modifiers, including their cross-fades. The last completed frame is kept in a GPU texture and presented while the Loading Menu is open. Expect a frozen image followed by normal pop-in when rendering resumes.
 
-This is still a proof of concept. The plugin currently tracks the reference, critical reference, and distant reference queues used while cells are loading. Optional diagnostics can write the queue activity and calculated progress to `SkyrimLoadProgress.log`.
+This is still a proof of concept. The plugin currently tracks the reference, critical reference, distant reference, background, IO task, and post-processing work used while cells are loading. Optional diagnostics can write the queue activity and calculated progress to `SkyrimLoadProgress.log`.
 
 ## How it Works
 
@@ -41,7 +41,7 @@ Settings are read once when Skyrim finishes loading game data. Restart the game 
 
 ## Current Limitations
 
-Skyrim also reports background processing, task, and post-processing work in its loading diagnostics. Those queues are not included yet because their enqueue and completion points have not been identified with enough confidence.
+Skyrim also reports background processing, tasks, and post-processing work in its loading diagnostics. The plugin now tracks the same three values through their paired counter mutations, including the final IOManager priority queue used for post-processing.
 
 The Loading Menu can also remain open after the tracked cell queues are finished. More loading stages may need to be added before the meter represents the entire load process.
 
@@ -54,6 +54,7 @@ The log contains:
 * Loading Menu open and close events.
 * Queue enqueue and completion activity.
 * Completed, remaining, and total work.
+* A 250 ms progress heartbeat with callback, queue-idle, and meter-idle timing.
 * Cell fully loaded events.
 
 ## Installation
@@ -108,18 +109,29 @@ Build, validate, and create a Nexus-ready ZIP with a top-level `Data` directory:
 ```
 
 The version defaults to `PROJECT_VERSION` from `CMakeLists.txt`. The archive is written to
-`release/<version>/` and contains only the top-level `Data` directory expected by mod managers,
-with the DLL, PDB, default TOML configuration, and both Interface movie paths required by the plugin.
-Use `-SkipBuild` to package an existing validated Release build.
+`release/<version>/`. It contains the top-level `Data` directory expected by mod managers, along
+with `LICENSE.txt` and `README.txt`. The `Data` directory includes the DLL, PDB, default TOML
+configuration, and both Interface movie paths required by the plugin. Use `-SkipBuild` to package
+an existing validated Release build.
 
 ## License
 
-Skyrim Load Progress is licensed under the [GNU General Public License version 3 or
-later](COPYING), matching CommonLibSSE-NG. See `COPYING` for the complete license terms.
+Copyright (C) 2026 ahzaab.
+
+Skyrim Load Progress is free software: you can redistribute it and/or modify it under the terms of
+the GNU General Public License as published by the Free Software Foundation, either version 3 of
+the License, or (at your option) any later version.
+
+Skyrim Load Progress is distributed in the hope that it will be useful, but **without any warranty**;
+without even the implied warranty of merchantability or fitness for a particular purpose. See the
+[GNU General Public License](LICENSE.txt) for details.
+
+The complete corresponding source code is available in this
+[public GitHub repository](https://github.com/ahzaab/sky-load-progress).
 
 ## Reverse Engineering Notes
 
-The current queue hooks were verified against Skyrim 1.6.1170, 1.7.99, and 1.7.104.
+The current queue hooks were verified against Skyrim 1.5.97, 1.6.1170, 1.7.99, and 1.7.104.
 Other runtimes supported by Address Library are attempted on a best-effort basis using
 runtime-family offsets and hook-site validation rather than a fixed runtime whitelist.
 
@@ -129,4 +141,6 @@ runtime-family offsets and hook-site validation rather than a fixed runtime whit
 | Critical references | ID 19155 + `0x07` | ID 19156 + `0x0C` |
 | Distant references | ID 19159 + `0x4E` | ID 19160 + `0x69` |
 
-Each hook replaces a seven-byte `lock inc` or `lock dec` instruction with a CommonLib context hook.
+Each hook validates the complete `lock inc` or `lock dec` instruction before installation. When a
+runtime uses an instruction shorter than the branch needed by the hook, the installer safely extends
+the patch across complete relocatable instructions and replays the full original sequence.
