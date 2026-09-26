@@ -721,30 +721,78 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         return CreatePixelShader(a_device, source, "frozen frame blur", &frozenFrameBlurShader);
     }
 
-    // Resolves the queued fast-travel or door destination to its cell record.
+    // Resolves only queued destinations that the active TES grid can safely expose.
     RE::TESObjectCELL* CellTransitioner::GetQueuedDestinationCell()
     {
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player) {
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::debug("queued destination resolver: player is unavailable; using a cold presentation");
+            }
             return nullptr;
         }
 
-        const auto& target = player->GetPlayerRuntimeData().queuedTargetLoc;
+        // Snapshot the record so every decision in this pass uses the same destination fields.
+        const auto target = player->GetPlayerRuntimeData().queuedTargetLoc;
         if (!target.isValid) {
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::debug("queued destination resolver: no valid queued target; using a cold presentation");
+            }
             return nullptr;
         }
         if (target.interior) {
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::debug("queued destination resolver: using the published interior cell");
+            }
             return target.interior;
         }
         if (!target.world) {
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::debug("queued destination resolver: exterior target has no world; using a cold presentation");
+            }
             return nullptr;
         }
 
-        // Exterior cells use signed 4096-unit grid coordinates.
-        const auto x = static_cast<std::int16_t>(std::floor(target.location.x / 4096.0F));
-        const auto y = static_cast<std::int16_t>(std::floor(target.location.y / 4096.0F));
-        const auto it = target.world->cellMap.find(RE::CellID(y, x));
-        return it != target.world->cellMap.end() ? it->second : nullptr;
+        auto* tes = RE::TES::GetSingleton();
+        if (!tes || tes->GetRuntimeData2().worldSpace != target.world) {
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::debug(
+                    "queued destination resolver: target world is not active; using a cold presentation");
+            }
+            return nullptr;
+        }
+
+        // Never traverse TESWorldSpace::cellMap here. Exterior CellLoaderTask work can insert,
+        // remove, or rehash that container while scripted travel opens LoadingMenu. TES::GetCell
+        // is not sufficient on every supported runtime because its grid miss falls back to that
+        // worldspace map. Restrict the probe to the active GridCellArray instead.
+        auto* grid = tes->gridCells;
+        if (!grid || grid->length == 0) {
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::debug("queued destination resolver: active grid is unavailable; using a cold presentation");
+            }
+            return nullptr;
+        }
+
+        const auto cellX = static_cast<std::int32_t>(std::floor(target.location.x / 4096.0F));
+        const auto cellY = static_cast<std::int32_t>(std::floor(target.location.y / 4096.0F));
+        const auto half = static_cast<std::int32_t>(grid->length >> 1);
+        const auto gridX = cellX + half - tes->currentGridX;
+        const auto gridY = cellY + half - tes->currentGridY;
+        auto*      cell = gridX >= 0 && gridY >= 0 ?
+                              grid->GetCell(
+                                  static_cast<std::uint32_t>(gridX), static_cast<std::uint32_t>(gridY)) :
+                              nullptr;
+        if (cell && !cell->IsAttached()) {
+            cell = nullptr;
+        }
+        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+            logger::debug(
+                "queued destination resolver: exterior ({}, {}) active-grid lookup {}",
+                cellX, cellY,
+                cell ? "found an attached cell" : "found no attached cell; using a cold presentation");
+        }
+        return cell;
     }
 
     // Chooses the warm or cold presentation before the Loading Menu opens.
@@ -811,7 +859,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return Presentation::loadingMenu;
         }
 
-        auto*                  cell = GetQueuedDestinationCell();
+        auto* cell = GetQueuedDestinationCell();
         const bool             resident = cell && cell->GetRuntimeData().loadedData;
         const auto*            editorIDText = cell ? cell->GetFormEditorID() : nullptr;
         const std::string_view editorID = editorIDText ? editorIDText : "";
