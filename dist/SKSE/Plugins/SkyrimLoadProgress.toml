@@ -23,6 +23,14 @@ verbose_queues = false
 # transitions. The default false matches vanilla presentation.
 show_hud_during_loading = false
 
+# How long LoadingMenu Scaleform (tips, progress meter) takes to fade from
+# transparent to opaque during custom cold presentations. The active-grid
+# residency probe can temporarily classify a warm destination as cold; this
+# fade keeps tips and the meter from popping over the retained frame. Set to
+# 0 for an immediate full-opacity menu. Values above 600000 are limited to
+# 600000.
+loading_menu_fade_in_ms = 600
+
 [transitions]
 # Use the mod's retained-frame transitions for fast travel and save loads. Set
 # either option to false to leave Skyrim's LoadingMenu and FaderMenu presentation

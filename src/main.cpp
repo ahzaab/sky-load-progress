@@ -111,12 +111,10 @@ namespace
                 load_progress::transitions::InstallHooks();
                 load_progress::InstallHooks();
             } catch (const std::exception& error) {
-                load_progress::LoadingProgress::DisableHooks(error.what());
-                load_progress::CellTransitioner::DisableHooks(error.what());
+                load_progress::DisablePlugin(error.what());
                 LogCritical("could not install Skyrim Load Progress hooks", error.what());
             } catch (...) {
-                load_progress::LoadingProgress::DisableHooks("unknown hook-installation exception");
-                load_progress::CellTransitioner::DisableHooks("unknown hook-installation exception");
+                load_progress::DisablePlugin("unknown hook-installation exception");
                 LogCritical("could not install Skyrim Load Progress hooks: unknown exception");
             }
         }

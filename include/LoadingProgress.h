@@ -166,4 +166,7 @@ namespace load_progress
 
     // Installs loading progress hooks and event sinks.
     void InstallHooks();
+
+    // Fail-closed shutdown for both LoadingProgress and CellTransitioner.
+    void DisablePlugin(std::string_view a_reason) noexcept;
 }

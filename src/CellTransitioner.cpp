@@ -4,6 +4,7 @@
 #include "PCH.h"
 #include "CellTransitioner.h"
 #include "IdsAndOffsets.h"
+#include "LoadingProgress.h"
 
 #include <hde64.h>
 
@@ -151,8 +152,15 @@ namespace load_progress
         return singleton;
     }
 
-    // Disables transition behavior while preserving pass-through calls to Skyrim.
+    // Disables transition hooks and restores presentation mutated while the compositor owned the screen.
     void CellTransitioner::DisableHooks(std::string_view a_reason) noexcept
+    {
+        // Coordinate with LoadingProgress so one fail-closed path cannot leave the other armed.
+        DisablePlugin(a_reason);
+    }
+
+    // Clears compositor atomics and restores Fader/HUD. Invoked only from DisablePlugin.
+    void CellTransitioner::ResetOnDisable() noexcept
     {
         hooksEnabled.store(false, std::memory_order_release);
         epochActive.store(false, std::memory_order_release);
@@ -170,15 +178,39 @@ namespace load_progress
         awaitingControlRestore.store(false, std::memory_order_release);
         newGameTransitionActive.store(false, std::memory_order_release);
         newGameFadeRequestSeen.store(false, std::memory_order_release);
-        RestoreHUDVisibility();
+        mainMenuLoadPending.store(false, std::memory_order_release);
+        mainMenuLoadActive.store(false, std::memory_order_release);
+        postLoadFadePending.store(false, std::memory_order_release);
+        postLoadFadeStart.store(0, std::memory_order_release);
+        postLoadFadeRequestedAt.store(0, std::memory_order_release);
+        postLoadPresentFallback.store(false, std::memory_order_release);
+        dominantColorPending.store(false, std::memory_order_release);
+        loadingTransitionStart.store(0, std::memory_order_release);
+        loadingMenuFadeElapsedMs.store(0, std::memory_order_release);
 
-        if (!failureLogged.exchange(true, std::memory_order_acq_rel)) {
-            try {
-                logger::critical("cell-transition hooks disabled: {}", a_reason);
-            } catch (...) {
-                REX::W32::OutputDebugStringA("Skyrim Load Progress: cell-transition hooks disabled\n");
+        // FaderMenuAdvanceMovie returns early once hooksEnabled is false, so any movie we hid for
+        // load ownership must be restored here. Every UI/D3D pointer is treated as possibly null.
+        try {
+            if (faderPresentationSuppressed.load(std::memory_order_acquire)) {
+                auto* ui = RE::UI::GetSingleton();
+                if (!ui) {
+                    faderPresentationSuppressed.store(false, std::memory_order_release);
+                } else {
+                    auto menu = ui->GetMenu(RE::FaderMenu::MENU_NAME);
+                    if (menu && menu->uiMovie) {
+                        RestoreFaderPresentation(menu.get());
+                    } else {
+                        faderPresentationSuppressed.store(false, std::memory_order_release);
+                    }
+                }
             }
+        } catch (...) {
+            faderPresentationSuppressed.store(false, std::memory_order_release);
+            REX::W32::OutputDebugStringA(
+                "Skyrim Load Progress: could not restore FaderMenu presentation during disable\n");
         }
+
+        RestoreHUDVisibility();
     }
 
     // Checks that a callback target is committed executable memory.
@@ -354,6 +386,7 @@ namespace load_progress
             postLoadFadeRequestedAt.store(0, std::memory_order_release);
             postLoadPresentFallback.store(false, std::memory_order_release);
             loadingTransitionStart.store(0, std::memory_order_release);
+            loadingMenuFadeElapsedMs.store(0, std::memory_order_release);
             dominantColorPending.store(false, std::memory_order_release);
             RestoreHUDVisibility();
             return selected;
@@ -371,6 +404,8 @@ namespace load_progress
         // Menu construction and renderer suspension can consume the configured fade before the first
         // loading frame is presented. Start the visible color fade from Present instead.
         loadingTransitionStart.store(0, std::memory_order_release);
+        // Scaleform fade elapsed is advanced only from LoadingMenu::AdvanceMovie.
+        loadingMenuFadeElapsedMs.store(0, std::memory_order_release);
 
         const bool selectCapturedColor =
             transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&
@@ -450,7 +485,18 @@ namespace load_progress
         postLoadFadePending.store(deferToPostProcessing, std::memory_order_release);
         postLoadPresentFallback.store(false, std::memory_order_release);
         postProcessingPassesSincePresent.store(0, std::memory_order_release);
-        RestoreHUDVisibility();
+        // 1.0.7 keeps the retained frame up after LoadingMenu closes (especially the CS post-process
+        // fade). Restoring HUD here paints health/stamina over that cover even when
+        // show_hud_during_loading is false. Hold the hide until the presentation finishes.
+        const bool holdHUDForTransition =
+            !newGame && !vanilla && !nativeFastTravelFade &&
+            (mainMenuLoadActive.load(std::memory_order_acquire) ||
+                !Settings::GetSingleton().ShowHUDDuringLoading());
+        if (holdHUDForTransition) {
+            HideHUDForLoad();
+        } else {
+            RestoreHUDVisibility();
+        }
         if (newGame || vanilla || nativeFastTravelFade) {
             frozenFrameLocked.store(false, std::memory_order_release);
         }
@@ -541,6 +587,44 @@ namespace load_progress
         movie->SetVisible(false);
     }
 
+    // Reapplies or releases the HUD policy. Safe to schedule from Present; the movie is touched
+    // only inside the UI task.
+    void CellTransitioner::QueueHUDVisibilitySync() noexcept
+    {
+        if (hudSyncQueued.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+
+        auto* tasks = SKSE::GetTaskInterface();
+        if (!tasks) {
+            hudSyncQueued.store(false, std::memory_order_release);
+            return;
+        }
+
+        tasks->AddUITask([]() {
+            hudSyncQueued.store(false, std::memory_order_release);
+            if (!hooksEnabled.load(std::memory_order_acquire)) {
+                RestoreHUDVisibility();
+                return;
+            }
+
+            const bool transitionVisible =
+                epochActive.load(std::memory_order_acquire) ||
+                preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
+                postLoadFadePending.load(std::memory_order_acquire) ||
+                postLoadFadeStart.load(std::memory_order_acquire) > 0;
+            const bool hide =
+                transitionVisible && !IsVanilla() &&
+                (mainMenuLoadActive.load(std::memory_order_acquire) ||
+                    !Settings::GetSingleton().ShowHUDDuringLoading());
+            if (hide) {
+                HideHUDForLoad();
+            } else {
+                RestoreHUDVisibility();
+            }
+        });
+    }
+
     // Restores exactly the movie visibility observed before this transition claimed it.
     void CellTransitioner::RestoreHUDVisibility() noexcept
     {
@@ -574,6 +658,68 @@ namespace load_progress
     bool CellTransitioner::IsVanilla()
     {
         return presentation.load(std::memory_order_acquire) == Presentation::vanilla;
+    }
+
+    // Computes LoadingMenu Scaleform opacity for custom cold presentations.
+    // The active-grid residency probe can classify an upcoming warm destination as cold; fading the
+    // menu in gives the retained frame time to cover that false-cold pop (see GetQueuedDestinationCell).
+    // Elapsed time advances only from LoadingMenu::AdvanceMovie intervals so Scaleform writes stay on
+    // the UI/movie path rather than ProcessMessage, Present, or an external timer.
+    float CellTransitioner::LoadingMenuFadeAlpha(float a_interval) noexcept
+    {
+        if (!hooksEnabled.load(std::memory_order_acquire) ||
+            presentation.load(std::memory_order_acquire) != Presentation::loadingMenu) {
+            return 1.0F;
+        }
+
+        const auto duration = Settings::GetSingleton().GetLoadingMenuFadeIn().count();
+        if (duration <= 0) {
+            return 1.0F;
+        }
+
+        const auto step = std::max<std::int64_t>(
+            0, static_cast<std::int64_t>(std::llround(std::max(0.0F, a_interval) * 1000.0F)));
+        auto elapsed = loadingMenuFadeElapsedMs.load(std::memory_order_relaxed);
+        while (true) {
+            const auto next = std::min<std::int64_t>(duration, elapsed + step);
+            if (loadingMenuFadeElapsedMs.compare_exchange_weak(
+                    elapsed, next, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                elapsed = next;
+                break;
+            }
+        }
+
+        return std::clamp(static_cast<float>(elapsed) / static_cast<float>(duration), 0.0F, 1.0F);
+    }
+
+    // Writes Menu_mc alpha from LoadingMenu::AdvanceMovie so tips and the progress meter fade together.
+    void CellTransitioner::ApplyLoadingMenuFade(RE::IMenu* a_menu, float a_interval) noexcept
+    {
+        if (!a_menu || !a_menu->uiMovie) {
+            return;
+        }
+
+        try {
+            const auto alphaPercent = static_cast<double>(LoadingMenuFadeAlpha(a_interval)) * 100.0;
+            RE::GFxValue menu;
+            if (a_menu->uiMovie->GetVariable(&menu, "_root.Menu_mc") && menu.IsObject()) {
+                RE::GFxValue alpha;
+                alpha.SetNumber(alphaPercent);
+                menu.SetMember("_alpha", alpha);
+                return;
+            }
+
+            // Replacement LoadingMenu movies may omit Menu_mc; fade the root clip instead.
+            RE::GFxValue root;
+            if (a_menu->uiMovie->GetVariable(&root, "_root") && root.IsObject()) {
+                RE::GFxValue alpha;
+                alpha.SetNumber(alphaPercent);
+                root.SetMember("_alpha", alpha);
+            }
+        } catch (...) {
+            REX::W32::OutputDebugStringA(
+                "Skyrim Load Progress: could not apply LoadingMenu fade alpha\n");
+        }
     }
 
     // Compiles one of the small pixel shaders used by the loading compositor.
@@ -1325,7 +1471,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         // The final swap-chain capture includes render-extension lighting that may be applied after
         // the native scene target. Prefer it whenever it is compatible; the scene capture is only a
         // fallback for configurations whose output surface does not match the loading target.
+        // The final swap-chain copy includes HUD. Use it only when the user asked to keep HUD
+        // visible; otherwise the pre-Scaleform capture is the background the setting can actually hide.
         const bool finalSceneCapture =
+            Settings::GetSingleton().ShowHUDDuringLoading() &&
             sceneFrameContainsFinalOutput.load(std::memory_order_acquire) && MatchesSceneFrame(a_desc);
         auto* sourceView = finalSceneCapture ?
                                sceneFrameView :
@@ -1352,6 +1501,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         bool                                  a_separateUI)
     {
         const bool finalSceneCapture =
+            Settings::GetSingleton().ShowHUDDuringLoading() &&
             sceneFrameContainsFinalOutput.load(std::memory_order_acquire) && MatchesSceneFrame(a_desc);
         auto* sourceView = finalSceneCapture ? sceneFrameView : frozenFrameView;
         const bool opaqueFixedColor =
@@ -1441,6 +1591,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             postLoadPresentFallback.store(false, std::memory_order_release);
             frozenFrameLocked.store(false, std::memory_order_release);
             mainMenuLoadActive.store(false, std::memory_order_release);
+            // HUD movie writes belong on the UI thread, not in Present.
+            QueueHUDVisibilitySync();
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::debug("post-load frozen-frame crossfade completed");
             }
@@ -1743,6 +1895,22 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                             }
                         }
                     }
+                }
+
+                // Community Shaders composites the live UI target after LoadingMenu closes. Keep a hidden
+                // HUD hidden for the retained-frame presentation, and release it on the UI thread
+                // once that presentation ends. Movie writes never happen in Present itself.
+                const bool hudTransition =
+                    epochActive.load(std::memory_order_acquire) ||
+                    preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
+                    postLoadFadePending.load(std::memory_order_acquire) ||
+                    postLoadFadeStart.load(std::memory_order_acquire) > 0;
+                const bool wantsHUDHidden =
+                    mainMenuLoadActive.load(std::memory_order_acquire) ||
+                    !Settings::GetSingleton().ShowHUDDuringLoading();
+                if (hudVisibilityOwned.load(std::memory_order_acquire) ||
+                    (hudTransition && wantsHUDHidden && !IsVanilla())) {
+                    QueueHUDVisibilitySync();
                 }
             } catch (const std::exception& error) {
                 DisableHooks(error.what());

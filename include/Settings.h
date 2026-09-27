@@ -76,6 +76,8 @@ namespace load_progress
         [[nodiscard]] float                 GetBlurAmount() const;
         [[nodiscard]] const ProgressBar&    GetProgressBar() const;
         [[nodiscard]] bool                  ShowHUDDuringLoading() const;
+        // Duration of the LoadingMenu Scaleform fade-in used by custom cold presentations.
+        [[nodiscard]] std::chrono::milliseconds GetLoadingMenuFadeIn() const;
         [[nodiscard]] bool                  UseTransitionsForFastTravel() const;
         [[nodiscard]] bool                  UseTransitionsForSaveLoads() const;
         [[nodiscard]] bool                  IsLoadingLoggingEnabled() const;
@@ -109,6 +111,9 @@ namespace load_progress
         float                 blurAmount{ defaultBlurAmount };
         ProgressBar           progressBar;
         bool                  showHUDDuringLoading{ false };
+        // Softens false-cold LoadingMenu pops when the active-grid residency probe cannot yet
+        // prove a warm destination (see GetQueuedDestinationCell / GridCellArray note).
+        std::chrono::milliseconds loadingMenuFadeIn{ 600 };
         bool                  transitionsForFastTravel{ true };
         bool                  transitionsForSaveLoads{ true };
         bool                  loadingLoggingEnabled{ false };

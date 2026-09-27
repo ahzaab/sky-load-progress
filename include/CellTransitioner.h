@@ -49,9 +49,13 @@ namespace load_progress
         static void              ObserveSleepWaitMenuClosing();
         static void              HideHUDForLoad();
         static void              RestoreHUDVisibility() noexcept;
+        // Present may request this; the movie write always runs on the UI thread.
+        static void              QueueHUDVisibilitySync() noexcept;
         static bool              IsSeamless();
         static bool              IsVanilla();
         static void              DisableHooks(std::string_view) noexcept;
+        // Clears compositor state and restores suppressed Fader/HUD. Called only from DisablePlugin.
+        static void              ResetOnDisable() noexcept;
         static bool              IsExecutableAddress(std::uintptr_t) noexcept;
         static std::uintptr_t    FindUniqueRelativeCall(
             REL::RelocationID, REL::RelocationID, std::string_view);
@@ -108,6 +112,9 @@ namespace load_progress
         static void                   FaderMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
         static void                   MistMenuPostDisplay(RE::IMenu*);
         static void                   CloseResidualLoadingMenus(bool = false);
+        // Fades LoadingMenu Scaleform from LoadingMenu::AdvanceMovie only (UI/movie context).
+        static float                  LoadingMenuFadeAlpha(float a_interval) noexcept;
+        static void                   ApplyLoadingMenuFade(RE::IMenu*, float a_interval) noexcept;
 
         inline static std::atomic_bool                      epochActive{ false };
         inline static std::atomic_bool                      hooksEnabled{ false };
@@ -126,9 +133,12 @@ namespace load_progress
         inline static std::atomic_int64_t                   holdAfterLoad{ 250 };
         inline static std::atomic_int64_t                   fadeOutDuration{ 1000 };
         inline static std::atomic_int64_t                   loadingTransitionStart{};
+        // Accumulated AdvanceMovie interval (ms) for the LoadingMenu Scaleform fade-in.
+        inline static std::atomic_int64_t                   loadingMenuFadeElapsedMs{};
         inline static std::atomic_bool                      dominantColorPending{ false };
         inline static std::atomic_uint32_t                  transitionColor{ 0xFFFFFF };
         inline static std::atomic_bool                      hudVisibilityOwned{ false };
+        inline static std::atomic_bool                      hudSyncQueued{ false };
         inline static std::atomic_bool                      mainMenuLoadPending{ false };
         inline static std::atomic_bool                      mainMenuLoadActive{ false };
         inline static std::atomic_bool                      vanillaLoadPending{ false };

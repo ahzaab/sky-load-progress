@@ -23,6 +23,7 @@ namespace load_progress
         blurAmount = defaultBlurAmount;
         progressBar = {};
         showHUDDuringLoading = false;
+        loadingMenuFadeIn = std::chrono::milliseconds{ 600 };
         transitionsForFastTravel = true;
         transitionsForSaveLoads = true;
         loadingLoggingEnabled = false;
@@ -99,6 +100,8 @@ namespace load_progress
                 const auto& interfaceTable = toml::find(document, "interface");
                 showHUDDuringLoading =
                     toml::find_or<bool>(interfaceTable, "show_hud_during_loading", showHUDDuringLoading);
+                loadingMenuFadeIn = ReadDuration(
+                    interfaceTable, "loading_menu_fade_in_ms", loadingMenuFadeIn);
             }
 
             if (document.contains("transitions")) {
@@ -131,6 +134,7 @@ namespace load_progress
                 progressBarMode, progressBar.xPercent, progressBar.yPercent,
                 progressBar.widthPercent);
             logger::info("loading HUD: visible={}", showHUDDuringLoading);
+            logger::info("loading menu fade-in: {}ms", loadingMenuFadeIn.count());
             logger::info("custom transitions: fast travel={} load from save={}",
                 transitionsForFastTravel, transitionsForSaveLoads);
             logger::info("loading diagnostics: enabled={} verbose queues={}",
@@ -149,6 +153,7 @@ namespace load_progress
             progressBar = {};
             loadingLoggingEnabled = false;
             showHUDDuringLoading = false;
+            loadingMenuFadeIn = std::chrono::milliseconds{ 600 };
             transitionsForFastTravel = true;
             transitionsForSaveLoads = true;
             verboseQueueLoggingEnabled = false;
@@ -206,6 +211,12 @@ namespace load_progress
     bool Settings::ShowHUDDuringLoading() const
     {
         return showHUDDuringLoading;
+    }
+
+    // Returns how long custom cold LoadingMenu Scaleform takes to fade from transparent to opaque.
+    std::chrono::milliseconds Settings::GetLoadingMenuFadeIn() const
+    {
+        return loadingMenuFadeIn;
     }
 
     // Returns whether fast travel uses the retained-frame transition instead of Skyrim's native presentation.

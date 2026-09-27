@@ -284,6 +284,11 @@ namespace load_progress
                 const auto& progressBar = Settings::GetSingleton().GetProgressBar();
                 if (!vanilla) {
                     a_menu->uiMovie->SetBackgroundAlpha(0.0F);
+                    if (!seamless) {
+                        // Apply alpha before making the movie visible so the first painted frame
+                        // cannot flash full-opacity tips over a false-cold retained presentation.
+                        CellTransitioner::ApplyLoadingMenuFade(a_menu, a_interval);
+                    }
                     a_menu->uiMovie->SetVisible(!seamless);
                 }
                 const bool showProgress =
@@ -404,17 +409,36 @@ namespace load_progress
     }
 
     // Disables plugin behavior while leaving every installed hook as a pass-through.
+    // Coordinates with the transition compositor so a progress-side failure cannot leave a
+    // suppressed FaderMenu or retained-frame compositor owning the screen.
     void LoadingProgress::DisableHooks(std::string_view a_reason) noexcept
     {
-        hooksEnabled.store(false, std::memory_order_release);
-        epochActive.store(false, std::memory_order_release);
-        loadedEntryCaptureActive.store(false, std::memory_order_release);
+        DisablePlugin(a_reason);
+    }
 
-        if (!failureLogged.exchange(true, std::memory_order_acq_rel)) {
+    // Fail-closed shutdown shared by LoadingProgress and CellTransitioner catch paths.
+    void DisablePlugin(std::string_view a_reason) noexcept
+    {
+        static std::atomic_bool disabling{ false };
+        if (disabling.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+
+        LoadingProgress::hooksEnabled.store(false, std::memory_order_release);
+        LoadingProgress::epochActive.store(false, std::memory_order_release);
+        LoadingProgress::loadedEntryCaptureActive.store(false, std::memory_order_release);
+
+        CellTransitioner::ResetOnDisable();
+
+        const bool loggedProgress =
+            LoadingProgress::failureLogged.exchange(true, std::memory_order_acq_rel);
+        const bool loggedTransition =
+            CellTransitioner::failureLogged.exchange(true, std::memory_order_acq_rel);
+        if (!loggedProgress && !loggedTransition) {
             try {
-                logger::critical("loading-progress hooks disabled: {}", a_reason);
+                logger::critical("Skyrim Load Progress disabled: {}", a_reason);
             } catch (...) {
-                REX::W32::OutputDebugStringA("Skyrim Load Progress: loading-progress hooks disabled\n");
+                REX::W32::OutputDebugStringA("Skyrim Load Progress: plugin disabled\n");
             }
         }
     }
@@ -964,10 +988,44 @@ namespace load_progress
         }
 
         aggregator.Begin();
+
+        // Publish the epoch before reading liveRemaining so worker completes cannot land in a
+        // "seeded but not yet accepting pending" gap. Stabilise by clearing pending and rereading
+        // until a quiet sample across all queues; SeedQueuedWork then snapshots liveRemaining.
+        // Mutations after that sample remain in pending for the drain below / AdvanceMovie.
+        epochActive.store(true, std::memory_order_release);
+        constexpr std::uint32_t quietAttempts = 64;
+        for (std::uint32_t attempt = 0; attempt < quietAttempts; ++attempt) {
+            bool quiet = true;
+            for (std::size_t i = 0; i < queueCount; ++i) {
+                pendingEnqueued[i].store(0, std::memory_order_relaxed);
+                pendingCompleted[i].store(0, std::memory_order_relaxed);
+            }
+            for (std::size_t i = 0; i < queueCount; ++i) {
+                if (pendingEnqueued[i].load(std::memory_order_relaxed) != 0 ||
+                    pendingCompleted[i].load(std::memory_order_relaxed) != 0) {
+                    quiet = false;
+                    break;
+                }
+            }
+            if (quiet) {
+                break;
+            }
+        }
         SeedQueuedWork();
+        for (std::size_t i = 0; i < queueCount; ++i) {
+            const auto enqueued = pendingEnqueued[i].exchange(0, std::memory_order_acq_rel);
+            const auto completed = pendingCompleted[i].exchange(0, std::memory_order_acq_rel);
+            const auto queue = static_cast<Queue>(i);
+            if (enqueued != 0) {
+                aggregator.Enqueue(queue, enqueued);
+            }
+            if (completed != 0) {
+                aggregator.Complete(queue, completed);
+            }
+        }
 
         lastLogged = {};
-        epochActive.store(true, std::memory_order_release);
         CellTransitioner::BeginLoad();
 
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
@@ -993,9 +1051,18 @@ namespace load_progress
             return;
         }
 
+        // Fold any final worker deltas before discarding pending counters so end-of-load logs and
+        // the last meter sample reflect work that completed after the previous AdvanceMovie drain.
         for (std::size_t i = 0; i < queueCount; ++i) {
-            pendingEnqueued[i].store(0, std::memory_order_relaxed);
-            pendingCompleted[i].store(0, std::memory_order_relaxed);
+            const auto enqueued = pendingEnqueued[i].exchange(0, std::memory_order_acq_rel);
+            const auto completed = pendingCompleted[i].exchange(0, std::memory_order_acq_rel);
+            const auto queue = static_cast<Queue>(i);
+            if (enqueued != 0) {
+                aggregator.Enqueue(queue, enqueued);
+            }
+            if (completed != 0) {
+                aggregator.Complete(queue, completed);
+            }
         }
         EndLoadedEntryCapture();
         CellTransitioner::EndLoad();
