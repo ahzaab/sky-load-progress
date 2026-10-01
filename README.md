@@ -37,6 +37,8 @@ Loading diagnostics are disabled by default. Set `logging.loading` to write per-
 
 Cold transitions can use the retained frame with an optional blur, or blend to a fixed or captured dominant color. Each cold rule can override `fade_in_ms`, `hold_after_load_ms`, and `fade_out_ms`. Values omitted from a rule inherit from the global `[cold]` table. Warm transitions are global and do not use cell rules.
 
+The captured image is prepared once into a persistent transition texture before the cell renderer becomes unstable. The image-space compositor holds that immutable texture through the load, with the swap-chain compositor as a watchdog for skipped image-space passes. Save loads also keep Skyrim's native FaderMenu opaque until its Scaleform display pass and consecutive destination renders confirm that the handoff is safe. Invalid or late states remain covered by FaderMenu as the opaque fallback.
+
 Settings are read once when Skyrim finishes loading game data. Restart the game after changing the file.
 
 ## Current Limitations

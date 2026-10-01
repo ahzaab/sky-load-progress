@@ -17,6 +17,20 @@ namespace load_progress
             vanilla
         };
 
+        // Explicit ownership of the transition image. Present is the verified final SDR watchdog;
+        // FaderMenu is the stable UI owner while Skyrim rebuilds the world renderer. The compositor
+        // does not regain ownership until destination frames and the UI handoff are both complete.
+        enum class TransitionState : std::uint8_t
+        {
+            rollingCapture,
+            preparing,
+            uiHold,
+            waitingForStableRenderer,
+            compositorHandoff,
+            fadingToLive,
+            faderFallback
+        };
+
         struct ControlState
         {
             std::uint32_t enabled;
@@ -65,6 +79,8 @@ namespace load_progress
         static bool                            CreatePixelShader(::ID3D11Device*, std::string_view, std::string_view, ::ID3D11PixelShader**);
         static bool                            CreateLoadingOverlayShader(::ID3D11Device*);
         static bool                            CreateSolidColorShader(::ID3D11Device*);
+        static bool                            CreateTransitionFadeShader(::ID3D11Device*);
+        static bool                            CreateStableUITransitionShaders(::ID3D11Device*);
         static std::int64_t                    CurrentTimeMilliseconds();
         static bool                            CreateFrozenFrameBlurShader(::ID3D11Device*);
         static RE::TESObjectCELL*              GetQueuedDestinationCell();
@@ -72,11 +88,14 @@ namespace load_progress
         static std::optional<ControlState>     GetControlState();
         static void                            ObserveControlRestore();
         static bool                            MatchesFrozenFrame(const REX::W32::D3D11_TEXTURE2D_DESC&);
-        static bool                            MatchesSceneFrame(const REX::W32::D3D11_TEXTURE2D_DESC&);
+        static bool                        PreparePersistentTransitionFrame(
+                                   REX::W32::ID3D11Device*, REX::W32::ID3D11DeviceContext*,
+                                   const REX::W32::D3D11_TEXTURE2D_DESC&);
+        static void                            ReleasePersistentTransitionFrame();
+        static void                            EnterFaderFallback(std::string_view) noexcept;
+        static bool                            StartPostLoadFade(bool);
         static void                            ReleaseFrameResources();
-        static void                            ReleaseSceneFrameResources();
         static bool                            PrepareFrozenFrame(REX::W32::ID3D11Device*, const REX::W32::D3D11_TEXTURE2D_DESC&);
-        static bool                            PrepareSceneFrame(REX::W32::ID3D11Device*, const REX::W32::D3D11_TEXTURE2D_DESC&);
         static bool                            IsBgraFormat(REX::W32::DXGI_FORMAT);
         static bool                            IsRgbaFormat(REX::W32::DXGI_FORMAT);
         static std::array<std::uint32_t, 4096> BuildColorHistogram(
@@ -94,7 +113,10 @@ namespace load_progress
         static void PresentLoadingMenuFrame(
             REX::W32::ID3D11DeviceContext*, REX::W32::ID3D11Texture2D*,
             const REX::W32::D3D11_TEXTURE2D_DESC&, bool);
-        static void PresentPostLoadFrame(REX::W32::ID3D11DeviceContext*, const REX::W32::D3D11_TEXTURE2D_DESC&);
+        static void PresentPostLoadFrame(REX::W32::ID3D11DeviceContext*, const REX::W32::D3D11_TEXTURE2D_DESC&, bool = false);
+        static bool PrepareStableUIOverlay(
+            REX::W32::ID3D11Device*, const REX::W32::D3D11_TEXTURE2D_DESC&);
+        static bool CompositePostLoadStableUI(REX::W32::ID3D11Device*, REX::W32::ID3D11DeviceContext*);
         static void CompositeLoadingFrame(
             REX::W32::ID3D11DeviceContext*, REX::W32::ID3D11Texture2D*,
             const REX::W32::D3D11_TEXTURE2D_DESC&, bool = false);
@@ -107,9 +129,11 @@ namespace load_progress
                          RE::ImageSpaceManager*, std::uint32_t, RE::RENDER_TARGET, void*, bool);
         static void                   FastTravelFadeCallbackRun(void*);
         static void                   SaveLoadFadeCallbackRun(void*);
+        static bool                   QueueFaderBridge(bool);
         static void                   RestoreFaderPresentation(RE::IMenu*);
         static RE::UI_MESSAGE_RESULTS FaderMenuProcessMessage(RE::IMenu*, RE::UIMessage&);
         static void                   FaderMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
+        static void                   FaderMenuPostDisplay(RE::IMenu*);
         static void                   MistMenuPostDisplay(RE::IMenu*);
         static void                   CloseResidualLoadingMenus(bool = false);
         // Fades LoadingMenu Scaleform from LoadingMenu::AdvanceMovie only (UI/movie context).
@@ -126,6 +150,13 @@ namespace load_progress
         inline static std::atomic_bool                      postLoadFadePending{};
         inline static std::atomic_int64_t                   postLoadFadeRequestedAt{};
         inline static std::atomic_bool                      postLoadPresentFallback{};
+        inline static std::atomic<TransitionState>          transitionState{ TransitionState::rollingCapture };
+        inline static std::atomic_uint32_t                  destinationWorldFrames{};
+        inline static std::atomic_uint32_t                  stablePipelineFrames{};
+        inline static std::atomic_bool                      fallbackFaderActiveSeen{};
+        inline static std::atomic_bool                      faderBridgeActive{};
+        inline static std::atomic_bool                      faderBridgeReleaseQueued{};
+        inline static std::atomic_uint64_t                  faderBridgeDisplaySerial{};
         inline static std::atomic<Presentation>             presentation{ Presentation::loadingMenu };
         inline static std::atomic<Settings::TransitionType> transitionType{ Settings::TransitionType::blur };
         inline static std::atomic<Settings::ColorSource>    colorSource{ Settings::ColorSource::dominant };
@@ -164,32 +195,35 @@ namespace load_progress
         inline static void (*originalFastTravelFadeCallbackRun)(void*){};
         inline static void (*originalSaveLoadFadeCallbackRun)(void*){};
         inline static AdvanceMovie_t                         originalFaderAdvanceMovie{};
+        inline static PostDisplay_t                          originalFaderPostDisplay{};
         inline static PostDisplay_t                          originalMistPostDisplay{};
         inline static REL::Relocation<RenderWorld_t>         originalRenderWorld;
         inline static REL::Relocation<BeginScaleform_t>      originalBeginScaleform;
         inline static ImageSpacePostProcessing_t             originalImageSpacePostProcessing{};
         inline static Present_t                              originalPresent{};
         inline static bool                                   compositeAfterPostProcessing{};
-        inline static bool                                   communityShadersFrameGenerationProxy{};
-        inline static std::atomic_bool                       frameGenerationSuppressionLogged{};
         inline static std::atomic_uint32_t                   postProcessingPassesSincePresent{};
+        inline static std::atomic_bool                       stableUICompositeAvailable{};
         inline static REX::W32::ID3D11Texture2D*             frozenFrame{};
         inline static REX::W32::ID3D11ShaderResourceView*    frozenFrameView{};
-        inline static REX::W32::ID3D11Texture2D*             sceneFrame{};
-        inline static REX::W32::ID3D11ShaderResourceView*    sceneFrameView{};
-        inline static REX::W32::ID3D11Texture2D*             communityShadersHdrTarget{};
-        inline static REX::W32::ID3D11RenderTargetView*      communityShadersHdrTargetView{};
+        inline static REX::W32::ID3D11Texture2D*             persistentTransitionFrame{};
+        inline static REX::W32::ID3D11ShaderResourceView*    persistentTransitionView{};
+        inline static REX::W32::ID3D11RenderTargetView*      persistentTransitionTarget{};
+        inline static REX::W32::D3D11_TEXTURE2D_DESC         persistentTransitionDesc{};
         inline static REX::W32::ID3D11Texture2D*             dominantColorReadback{};
         inline static REX::W32::ID3D11Texture2D*             loadingOverlay{};
         inline static REX::W32::ID3D11ShaderResourceView*    loadingOverlayView{};
+        inline static REX::W32::ID3D11Texture2D*             stableUIOverlay{};
+        inline static REX::W32::ID3D11ShaderResourceView*    stableUIOverlayView{};
+        inline static REX::W32::D3D11_TEXTURE2D_DESC         stableUIOverlayDesc{};
         inline static REX::W32::D3D11_TEXTURE2D_DESC         frozenFrameDesc{};
-        inline static REX::W32::D3D11_TEXTURE2D_DESC         sceneFrameDesc{};
-        inline static REX::W32::D3D11_TEXTURE2D_DESC         communityShadersHdrTargetDesc{};
-        inline static std::atomic_bool                       sceneFrameContainsFinalOutput{};
         inline static std::unique_ptr<DirectX::SpriteBatch>  spriteBatch;
         inline static std::unique_ptr<DirectX::CommonStates> commonStates;
         inline static ::ID3D11PixelShader*                   frozenFrameBlurShader{};
         inline static ::ID3D11PixelShader*                   solidColorShader{};
+        inline static ::ID3D11PixelShader*                   transitionFadeShader{};
+        inline static ::ID3D11PixelShader*                   stableUITransitionShader{};
+        inline static ::ID3D11PixelShader*                   stableUIColorShader{};
         inline static ::ID3D11PixelShader*                   loadingOverlayShader{};
         inline static bool                                   loggedFrozenFrame{};
         inline static bool                                   loggedFrozenPresentation{};
