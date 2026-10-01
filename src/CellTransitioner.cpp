@@ -91,6 +91,9 @@ namespace load_progress
             return true;
         }
 
+        constexpr std::uint32_t firstPersonPostHandoffMinimumFrames = 8;
+        constexpr std::int64_t  firstPersonPostHandoffMinimumObservation = 500;
+
     }
 
     // Returns the singleton that owns all cell-transition state.
@@ -136,6 +139,9 @@ namespace load_progress
         transitionState.store(TransitionState::rollingCapture, std::memory_order_release);
         destinationWorldFrames.store(0, std::memory_order_release);
         stablePipelineFrames.store(0, std::memory_order_release);
+        firstPersonPostHandoffQualifying.store(false, std::memory_order_release);
+        firstPersonPostHandoffQualificationStart.store(0, std::memory_order_release);
+        firstPersonPostHandoffRenderedFrames.store(0, std::memory_order_release);
         fallbackFaderActiveSeen.store(false, std::memory_order_release);
         if (faderBridgeActive.load(std::memory_order_acquire)) {
             QueueFaderBridge(false);
@@ -360,6 +366,9 @@ namespace load_progress
         transitionState.store(TransitionState::preparing, std::memory_order_release);
         destinationWorldFrames.store(0, std::memory_order_release);
         stablePipelineFrames.store(0, std::memory_order_release);
+        firstPersonPostHandoffQualifying.store(false, std::memory_order_release);
+        firstPersonPostHandoffQualificationStart.store(0, std::memory_order_release);
+        firstPersonPostHandoffRenderedFrames.store(0, std::memory_order_release);
         preLoadDoorCaptureLocked.store(false, std::memory_order_release);
         postLoadFadeStart.store(0, std::memory_order_release);
         postLoadFadePending.store(false, std::memory_order_release);
@@ -462,6 +471,9 @@ namespace load_progress
         postProcessingPassesSincePresent.store(0, std::memory_order_release);
         destinationWorldFrames.store(0, std::memory_order_release);
         stablePipelineFrames.store(0, std::memory_order_release);
+        firstPersonPostHandoffQualifying.store(false, std::memory_order_release);
+        firstPersonPostHandoffQualificationStart.store(0, std::memory_order_release);
+        firstPersonPostHandoffRenderedFrames.store(0, std::memory_order_release);
 
         if (customFade) {
             // Publish the successor owner before releasing the loading gate. Present can therefore
@@ -1278,6 +1290,58 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         logger::error("transition presentation fell back to FaderMenu: {}", a_reason);
     }
 
+    // The observed first-person pulse occurs only after the Fader bridge is released. Camera-space
+    // stability is not a valid release condition because intentional movement and ordinary head bob
+    // change the same transforms. Keep the retained frame opaque for the measured pulse interval and
+    // require completed destination renders, neither of which can be extended by player input.
+    void CellTransitioner::ObservePostHandoffCameraQualification() noexcept
+    {
+        if (!firstPersonPostHandoffQualifying.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        const auto now = CurrentTimeMilliseconds();
+        const auto qualificationStart =
+            firstPersonPostHandoffQualificationStart.load(std::memory_order_acquire);
+        const auto elapsed = qualificationStart > 0 ? now - qualificationStart : 0;
+
+        try {
+            const auto* playerCamera = RE::PlayerCamera::GetSingleton();
+            if (!playerCamera || !playerCamera->IsInFirstPerson()) {
+                const auto delay = std::max<std::int64_t>(holdAfterLoad.load(std::memory_order_acquire), 0);
+                postLoadFadeStart.store(now - delay, std::memory_order_release);
+                firstPersonPostHandoffQualifying.store(false, std::memory_order_release);
+                return;
+            }
+
+            const auto renderedFrames =
+                firstPersonPostHandoffRenderedFrames.fetch_add(1, std::memory_order_acq_rel) + 1;
+            const auto configuredHold =
+                std::max<std::int64_t>(holdAfterLoad.load(std::memory_order_acquire), 0);
+            const auto minimumObservation =
+                std::max(firstPersonPostHandoffMinimumObservation, configuredHold);
+            const bool observedLongEnough = elapsed >= minimumObservation;
+            if (!observedLongEnough || renderedFrames < firstPersonPostHandoffMinimumFrames) {
+                return;
+            }
+
+            logger::info(
+                "post-handoff first-person cover completed after {}ms and {} rendered frames",
+                elapsed, renderedFrames);
+
+            // The configured opaque hold has already elapsed inside this longer qualification.
+            // Backdate the ordinary fade clock by that hold so the crossfade starts on the next
+            // compositor pass instead of creating a second, unobserved waiting interval.
+            postLoadFadeStart.store(now - configuredHold, std::memory_order_release);
+            firstPersonPostHandoffQualifying.store(false, std::memory_order_release);
+        } catch (...) {
+            const auto delay = std::max<std::int64_t>(holdAfterLoad.load(std::memory_order_acquire), 0);
+            postLoadFadeStart.store(now - delay, std::memory_order_release);
+            firstPersonPostHandoffQualifying.store(false, std::memory_order_release);
+            logger::warn("post-handoff first-person cover observation failed; beginning the visible fade");
+        }
+    }
+
     // Starts the compositor side of a gapless handoff. Both owners sample the same SRV, and the first
     // fade frame has alpha 1, so changing ownership cannot expose a frame of the destination.
     bool CellTransitioner::StartPostLoadFade(bool a_presentFallback)
@@ -1303,10 +1367,23 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         // save load. Present remains only the timeout/watchdog owner when image-space did not resume.
         const bool presentOwner = a_presentFallback;
 
+        bool qualifyFirstPerson = false;
+        try {
+            const auto* playerCamera = RE::PlayerCamera::GetSingleton();
+            qualifyFirstPerson = playerCamera && playerCamera->IsInFirstPerson();
+        } catch (...) {
+        }
+
+        const auto handoffTime = CurrentTimeMilliseconds();
+        firstPersonPostHandoffQualificationStart.store(
+            qualifyFirstPerson ? handoffTime : 0, std::memory_order_release);
+        firstPersonPostHandoffRenderedFrames.store(0, std::memory_order_release);
+        firstPersonPostHandoffQualifying.store(qualifyFirstPerson, std::memory_order_release);
+
         postLoadFadePending.store(false, std::memory_order_release);
         postLoadFadeRequestedAt.store(0, std::memory_order_release);
         postLoadPresentFallback.store(presentOwner, std::memory_order_release);
-        postLoadFadeStart.store(CurrentTimeMilliseconds(), std::memory_order_release);
+        postLoadFadeStart.store(handoffTime, std::memory_order_release);
         transitionState.store(TransitionState::fadingToLive, std::memory_order_release);
         // The current compositor pass draws the same persistent image fully opaque. Release the
         // native bridge asynchronously; its zero-duration fade-in reveals this pass without a gap.
@@ -1778,6 +1855,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return;
         }
 
+        // Load the qualification gate first. Its release store publishes the corrected fade clock
+        // when qualification completes, so the subsequent start load cannot observe the old clock.
+        const bool cameraQualifying =
+            firstPersonPostHandoffQualifying.load(std::memory_order_acquire);
         const auto fadeStart = postLoadFadeStart.load(std::memory_order_acquire);
         const bool fadePending = postLoadFadePending.load(std::memory_order_acquire);
         if (fadeStart <= 0 && !fadePending) {
@@ -1785,16 +1866,20 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         // While the ordinary image-space compositor has not resumed yet, keep the retained frame opaque.
-        // This closes the handoff between LoadingMenu's last Present and the first post-load fade pass.
+        // First person also remains covered while its final post-handoff render camera is qualified.
         const auto delay = holdAfterLoad.load(std::memory_order_acquire);
-        const auto fadeElapsed = fadePending ? 0 : CurrentTimeMilliseconds() - fadeStart - delay;
+        const auto fadeElapsed =
+            (fadePending || cameraQualifying) ? 0 : CurrentTimeMilliseconds() - fadeStart - delay;
         const auto duration = fadeOutDuration.load(std::memory_order_acquire);
 
-        if (!fadePending && fadeElapsed >= duration) {
+        if (!fadePending && !cameraQualifying && fadeElapsed >= duration) {
             postLoadFadeStart.store(0, std::memory_order_release);
             postLoadFadePending.store(false, std::memory_order_release);
             postLoadFadeRequestedAt.store(0, std::memory_order_release);
             postLoadPresentFallback.store(false, std::memory_order_release);
+            firstPersonPostHandoffQualifying.store(false, std::memory_order_release);
+            firstPersonPostHandoffQualificationStart.store(0, std::memory_order_release);
+            firstPersonPostHandoffRenderedFrames.store(0, std::memory_order_release);
             frozenFrameLocked.store(false, std::memory_order_release);
             mainMenuLoadActive.store(false, std::memory_order_release);
             transitionState.store(TransitionState::rollingCapture, std::memory_order_release);
@@ -2229,9 +2314,12 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     LogRenderState("for the first time after Loading Menu closed");
                 }
 
-                if (transitionState.load(std::memory_order_acquire) ==
-                    TransitionState::waitingForStableRenderer) {
+                const auto transition = transitionState.load(std::memory_order_acquire);
+                if (transition == TransitionState::waitingForStableRenderer) {
                     destinationWorldFrames.fetch_add(1, std::memory_order_acq_rel);
+                } else if (transition == TransitionState::fadingToLive &&
+                           firstPersonPostHandoffQualifying.load(std::memory_order_acquire)) {
+                    ObservePostHandoffCameraQualification();
                 }
             } catch (const std::exception& error) {
                 DisableHooks(error.what());

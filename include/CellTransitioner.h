@@ -93,6 +93,7 @@ namespace load_progress
                                    const REX::W32::D3D11_TEXTURE2D_DESC&);
         static void                            ReleasePersistentTransitionFrame();
         static void                            EnterFaderFallback(std::string_view) noexcept;
+        static void                            ObservePostHandoffCameraQualification() noexcept;
         static bool                            StartPostLoadFade(bool);
         static void                            ReleaseFrameResources();
         static bool                            PrepareFrozenFrame(REX::W32::ID3D11Device*, const REX::W32::D3D11_TEXTURE2D_DESC&);
@@ -153,6 +154,9 @@ namespace load_progress
         inline static std::atomic<TransitionState>          transitionState{ TransitionState::rollingCapture };
         inline static std::atomic_uint32_t                  destinationWorldFrames{};
         inline static std::atomic_uint32_t                  stablePipelineFrames{};
+        inline static std::atomic_bool                      firstPersonPostHandoffQualifying{};
+        inline static std::atomic_int64_t                   firstPersonPostHandoffQualificationStart{};
+        inline static std::atomic_uint32_t                  firstPersonPostHandoffRenderedFrames{};
         inline static std::atomic_bool                      fallbackFaderActiveSeen{};
         inline static std::atomic_bool                      faderBridgeActive{};
         inline static std::atomic_bool                      faderBridgeReleaseQueued{};
