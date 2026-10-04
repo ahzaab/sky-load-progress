@@ -1208,6 +1208,16 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     // Releases textures that must be recreated when the render target changes.
     void CellTransitioner::ReleaseFrameResources()
     {
+        if (communityShadersHdrTargetView) {
+            communityShadersHdrTargetView->Release();
+            communityShadersHdrTargetView = nullptr;
+        }
+        if (communityShadersHdrTarget) {
+            communityShadersHdrTarget->Release();
+            communityShadersHdrTarget = nullptr;
+        }
+        communityShadersHdrTargetDesc = {};
+
         if (frozenFrame) {
             frozenFrame->Release();
             frozenFrame = nullptr;
@@ -1249,6 +1259,16 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     // the rolling world captures and renderer-owned targets above.
     void CellTransitioner::ReleasePersistentTransitionFrame()
     {
+        if (persistentSceneView) {
+            persistentSceneView->Release();
+            persistentSceneView = nullptr;
+        }
+        if (persistentSceneFrame) {
+            persistentSceneFrame->Release();
+            persistentSceneFrame = nullptr;
+        }
+        persistentSceneDesc = {};
+        persistentSceneContainsFinalOutput = false;
         if (persistentTransitionTarget) {
             persistentTransitionTarget->Release();
             persistentTransitionTarget = nullptr;
@@ -1371,6 +1391,97 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         loggedFrozenFrame = false;
 
         return true;
+    }
+
+    bool CellTransitioner::MatchesSceneFrame(const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
+    {
+        return sceneFrame && sceneFrameView && sceneFrameDesc.width == a_desc.width &&
+               sceneFrameDesc.height == a_desc.height && sceneFrameDesc.format == a_desc.format &&
+               sceneFrameDesc.sampleDesc.count == a_desc.sampleDesc.count &&
+               sceneFrameDesc.sampleDesc.quality == a_desc.sampleDesc.quality;
+    }
+
+    void CellTransitioner::ReleaseSceneFrameResources()
+    {
+        if (sceneFrameView) {
+            sceneFrameView->Release();
+            sceneFrameView = nullptr;
+        }
+        if (sceneFrame) {
+            sceneFrame->Release();
+            sceneFrame = nullptr;
+        }
+        sceneFrameDesc = {};
+        sceneFrameContainsFinalOutput = false;
+    }
+
+    // The final lit output must not replace the post-CS texture used by the destination fade.
+    bool CellTransitioner::PrepareSceneFrame(
+        REX::W32::ID3D11Device* a_device, const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
+    {
+        if (!a_device || !a_desc.width || !a_desc.height || a_desc.sampleDesc.count != 1) {
+            return false;
+        }
+        if (MatchesSceneFrame(a_desc)) {
+            return true;
+        }
+        ReleaseSceneFrameResources();
+        auto desc = a_desc;
+        desc.usage = REX::W32::D3D11_USAGE_DEFAULT;
+        desc.bindFlags = REX::W32::D3D11_BIND_SHADER_RESOURCE;
+        desc.cpuAccessFlags = 0;
+        desc.miscFlags = 0;
+        if (a_device->CreateTexture2D(&desc, nullptr, &sceneFrame) < 0 ||
+            a_device->CreateShaderResourceView(sceneFrame, nullptr, &sceneFrameView) < 0) {
+            ReleaseSceneFrameResources();
+            return false;
+        }
+        sceneFrameDesc = a_desc;
+        return true;
+    }
+
+    REX::W32::ID3D11ShaderResourceView* CellTransitioner::LoadingFrameView(
+        const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
+    {
+        // Reproduce b7b2e22's output-space preference without aliasing either rolling capture.
+        const bool finalOutputMatches = persistentSceneView && persistentSceneContainsFinalOutput &&
+                                        persistentSceneDesc.width == a_desc.width &&
+                                        persistentSceneDesc.height == a_desc.height &&
+                                        persistentSceneDesc.format == a_desc.format &&
+                                        persistentSceneDesc.sampleDesc.count == a_desc.sampleDesc.count &&
+                                        persistentSceneDesc.sampleDesc.quality == a_desc.sampleDesc.quality;
+        return finalOutputMatches ? persistentSceneView : persistentTransitionView;
+    }
+
+    bool CellTransitioner::PrepareLoadingOverlay(
+        REX::W32::ID3D11Device* a_device, const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
+    {
+        if (!a_device || a_desc.sampleDesc.count != 1) {
+            return false;
+        }
+        if (loadingOverlay && loadingOverlayView) {
+            REX::W32::D3D11_TEXTURE2D_DESC previous{};
+            loadingOverlay->GetDesc(&previous);
+            if (previous.width == a_desc.width && previous.height == a_desc.height &&
+                previous.format == a_desc.format) {
+                return true;
+            }
+        }
+        if (loadingOverlayView) {
+            loadingOverlayView->Release();
+            loadingOverlayView = nullptr;
+        }
+        if (loadingOverlay) {
+            loadingOverlay->Release();
+            loadingOverlay = nullptr;
+        }
+        auto desc = a_desc;
+        desc.usage = REX::W32::D3D11_USAGE_DEFAULT;
+        desc.bindFlags = REX::W32::D3D11_BIND_SHADER_RESOURCE;
+        desc.cpuAccessFlags = 0;
+        desc.miscFlags = 0;
+        return a_device->CreateTexture2D(&desc, nullptr, &loadingOverlay) >= 0 &&
+               a_device->CreateShaderResourceView(loadingOverlay, nullptr, &loadingOverlayView) >= 0;
     }
 
     // Allocates a byte-for-byte snapshot of the renderer's current stable UI target. This resource
@@ -1661,6 +1772,24 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             // ownership independent of Skyrim's volatile render targets.
             a_context->CopyResource(persistentTransitionFrame, frozenFrame);
 
+            // Freeze the separately captured final lit image for loading presentation. The
+            // post-CS snapshot above remains the only source used by the destination crossfade.
+            if (sceneFrame && sceneFrameView && sceneFrameDesc.sampleDesc.count == 1) {
+                auto sceneDesc = sceneFrameDesc;
+                sceneDesc.usage = REX::W32::D3D11_USAGE_DEFAULT;
+                sceneDesc.bindFlags = REX::W32::D3D11_BIND_SHADER_RESOURCE;
+                sceneDesc.cpuAccessFlags = 0;
+                sceneDesc.miscFlags = 0;
+                if (a_device->CreateTexture2D(&sceneDesc, nullptr, &persistentSceneFrame) < 0 ||
+                    a_device->CreateShaderResourceView(
+                        persistentSceneFrame, nullptr, &persistentSceneView) < 0) {
+                    ReleasePersistentTransitionFrame();
+                    return false;
+                }
+                a_context->CopyResource(persistentSceneFrame, sceneFrame);
+                persistentSceneDesc = sceneDesc;
+                persistentSceneContainsFinalOutput = sceneFrameContainsFinalOutput;
+            }
         }
 
         transitionState.store(TransitionState::uiHold, std::memory_order_release);
@@ -1681,9 +1810,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return;
         }
 
-        // Every presentation path samples the same immutable pre-Scaleform texture. It is independent
-        // of Skyrim's volatile scene, lighting, and swap-chain targets.
-        auto* sourceView = persistentTransitionView;
+        // Final output includes late render-extension lighting; use it only in a matching output
+        // target. HDR loading and post-load fades retain the separate post-CS representation.
+        auto* sourceView = LoadingFrameView(a_desc);
         if (!sourceView) {
             return;
         }
@@ -1707,13 +1836,13 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         const REX::W32::D3D11_TEXTURE2D_DESC& a_desc,
         bool                                  a_separateUI)
     {
-        auto*      sourceView = persistentTransitionView;
+        auto*      sourceView = LoadingFrameView(a_desc);
         const bool opaqueFixedColor =
             transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&
             colorSource.load(std::memory_order_acquire) == Settings::ColorSource::fixed &&
             fadeInDuration.load(std::memory_order_acquire) <= 0;
         if (!a_context || !a_backBuffer || !commonStates || !sourceView ||
-            (!a_separateUI && (!loadingOverlay || !loadingOverlayView))) {
+            (!a_separateUI && !PrepareLoadingOverlay(RE::BSGraphics::Renderer::GetDevice(), a_desc))) {
             return;
         }
 
@@ -1992,6 +2121,40 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         PresentLoadingMenuFrame(a_context, a_backBuffer, a_desc, a_separateUI);
     }
 
+    // During renderer suspension the CS Present chain still converts this HDR surface. Refill it
+    // with the retained post-CS image instead of drawing float16 RGB into an output-encoded buffer.
+    bool CellTransitioner::CompositeLoadingHDR(REX::W32::ID3D11DeviceContext* a_context)
+    {
+        if (!a_context || !communityShadersHdrTarget || !communityShadersHdrTargetView ||
+            !MatchesFrozenFrame(communityShadersHdrTargetDesc)) {
+            return false;
+        }
+        REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> previousView;
+        REX::W32::ComPtr<REX::W32::ID3D11DepthStencilView> previousDepth;
+        a_context->OMGetRenderTargets(1, previousView.GetAddressOf(), previousDepth.GetAddressOf());
+        std::array<REX::W32::D3D11_VIEWPORT,
+            D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE> previousViewports{};
+        auto viewportCount = static_cast<std::uint32_t>(previousViewports.size());
+        a_context->RSGetViewports(&viewportCount, previousViewports.data());
+
+        auto* outputView = communityShadersHdrTargetView;
+        a_context->OMSetRenderTargets(1, &outputView, nullptr);
+        const REX::W32::D3D11_VIEWPORT viewport{
+            0.0F, 0.0F, static_cast<float>(communityShadersHdrTargetDesc.width),
+            static_cast<float>(communityShadersHdrTargetDesc.height), 0.0F, 1.0F
+        };
+        a_context->RSSetViewports(1, &viewport);
+        CompositeLoadingFrame(a_context, communityShadersHdrTarget, communityShadersHdrTargetDesc, true);
+
+        auto* previousTarget = previousView.Get();
+        a_context->OMSetRenderTargets(previousTarget ? 1U : 0U,
+            previousTarget ? &previousTarget : nullptr, previousDepth.Get());
+        if (viewportCount > 0) {
+            a_context->RSSetViewports(viewportCount, previousViewports.data());
+        }
+        return true;
+    }
+
     // Hooks IDXGISwapChain::Present to composite the retained loading frame.
     REX::W32::HRESULT CellTransitioner::PresentFrozenFrame(
         REX::W32::IDXGISwapChain* a_swapChain, std::uint32_t a_syncInterval, std::uint32_t a_flags)
@@ -2027,8 +2190,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
             auto* device = RE::BSGraphics::Renderer::GetDevice();
             auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
-            if (device && context && PrepareFrozenFrame(device, displayedDesc)) {
-                context->CopyResource(frozenFrame, displayedFrame.Get());
+            if (device && context && PrepareSceneFrame(device, displayedDesc)) {
+                context->CopyResource(sceneFrame, displayedFrame.Get());
+                sceneFrameContainsFinalOutput = true;
                 loggedFrozenPresentation = false;
                 if (!loggedFrozenFrame && Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                     logger::debug(
@@ -2049,7 +2213,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 // stage overwrite it. Shared interop buffers are deliberately deferred until CS has
                 // populated them; ordinary DXGI back buffers are captured at the normal pre-Present
                 // boundary.
-                if (!compositeAfterPostProcessing &&
+                if (compositeAfterPostProcessing &&
                     !frozenFrameLocked.load(std::memory_order_acquire)) {
                     captureAfterDownstreamPresent = captureRollingSwapChainFrame(false);
                 }
@@ -2116,7 +2280,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         auto* device = RE::BSGraphics::Renderer::GetDevice();
                         auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
 
-                        if (device && context) {
+                        if (device && context && !(loading && CompositeLoadingHDR(context))) {
                             REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> boundView;
                             REX::W32::ComPtr<REX::W32::ID3D11DepthStencilView> boundDepth;
                             context->OMGetRenderTargets(
@@ -2244,6 +2408,11 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     // Copies the currently bound world target into the rolling frozen-frame texture.
     void CellTransitioner::CaptureBoundWorldTarget()
     {
+        // Once Present has supplied a completed CS output, retain it until the next Present.
+        // An intervening UI pass must not replace it with an earlier scene representation.
+        if (compositeAfterPostProcessing && sceneFrameContainsFinalOutput) {
+            return;
+        }
         auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
         auto* device = RE::BSGraphics::Renderer::GetDevice();
         auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
@@ -2295,8 +2464,12 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             REX::W32::D3D11_TEXTURE2D_DESC desc{};
             captureTarget->GetDesc(&desc);
 
-            if (PrepareFrozenFrame(device, desc)) {
-                context->CopyResource(frozenFrame, captureTarget);
+            const bool useSceneCapture = compositeAfterPostProcessing;
+            if (useSceneCapture ? PrepareSceneFrame(device, desc) : PrepareFrozenFrame(device, desc)) {
+                context->CopyResource(useSceneCapture ? sceneFrame : frozenFrame, captureTarget);
+                if (useSceneCapture) {
+                    sceneFrameContainsFinalOutput = false;
+                }
                 loggedFrozenPresentation = false;
 
                 if (!loggedFrozenFrame) {
@@ -2398,6 +2571,23 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                     desc.width, desc.height, std::to_underlying(desc.format));
                                 loggedFrozenFrame = true;
                             }
+                        }
+
+                        // b7b2e22 retained this destination because CS still performs its final
+                        // HDR conversion during loading even when image-space rendering stops.
+                        if (fullResolution && desc.format == REX::W32::DXGI_FORMAT_R16G16B16A16_FLOAT &&
+                            communityShadersHdrTarget != targetTexture.Get()) {
+                            if (communityShadersHdrTargetView) {
+                                communityShadersHdrTargetView->Release();
+                            }
+                            if (communityShadersHdrTarget) {
+                                communityShadersHdrTarget->Release();
+                            }
+                            communityShadersHdrTarget = targetTexture.Get();
+                            communityShadersHdrTarget->AddRef();
+                            communityShadersHdrTargetView = targetView.Get();
+                            communityShadersHdrTargetView->AddRef();
+                            communityShadersHdrTargetDesc = desc;
                         }
 
                         if (fullResolution &&
@@ -3187,6 +3377,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             CellTransitioner::GetSingleton();
 
             InstallRenderObservationHook();
+            InstallWorldCaptureHook();
             InstallCommunityShadersCompositeHook();
             InstallFrozenFrameHook();
             InstallFastTravelFadeCallbackHook();

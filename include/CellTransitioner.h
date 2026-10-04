@@ -88,6 +88,11 @@ namespace load_progress
         static std::optional<ControlState>     GetControlState();
         static void                            ObserveControlRestore();
         static bool                            MatchesFrozenFrame(const REX::W32::D3D11_TEXTURE2D_DESC&);
+        static bool                            MatchesSceneFrame(const REX::W32::D3D11_TEXTURE2D_DESC&);
+        static bool                            PrepareSceneFrame(REX::W32::ID3D11Device*, const REX::W32::D3D11_TEXTURE2D_DESC&);
+        static void                            ReleaseSceneFrameResources();
+        static REX::W32::ID3D11ShaderResourceView* LoadingFrameView(const REX::W32::D3D11_TEXTURE2D_DESC&);
+        static bool                            PrepareLoadingOverlay(REX::W32::ID3D11Device*, const REX::W32::D3D11_TEXTURE2D_DESC&);
         static bool                        PreparePersistentTransitionFrame(
                                    REX::W32::ID3D11Device*, REX::W32::ID3D11DeviceContext*,
                                    const REX::W32::D3D11_TEXTURE2D_DESC&);
@@ -117,6 +122,7 @@ namespace load_progress
         static bool PrepareStableUIOverlay(
             REX::W32::ID3D11Device*, const REX::W32::D3D11_TEXTURE2D_DESC&);
         static bool CompositePostLoadStableUI(REX::W32::ID3D11Device*, REX::W32::ID3D11DeviceContext*);
+        static bool CompositeLoadingHDR(REX::W32::ID3D11DeviceContext*);
         static void CompositeLoadingFrame(
             REX::W32::ID3D11DeviceContext*, REX::W32::ID3D11Texture2D*,
             const REX::W32::D3D11_TEXTURE2D_DESC&, bool = false);
@@ -206,6 +212,17 @@ namespace load_progress
         inline static std::atomic_bool                       stableUICompositeAvailable{};
         inline static REX::W32::ID3D11Texture2D*             frozenFrame{};
         inline static REX::W32::ID3D11ShaderResourceView*    frozenFrameView{};
+        inline static REX::W32::ID3D11Texture2D*             sceneFrame{};
+        inline static REX::W32::ID3D11ShaderResourceView*    sceneFrameView{};
+        inline static REX::W32::D3D11_TEXTURE2D_DESC         sceneFrameDesc{};
+        inline static bool                                   sceneFrameContainsFinalOutput{};
+        inline static REX::W32::ID3D11Texture2D*             communityShadersHdrTarget{};
+        inline static REX::W32::ID3D11RenderTargetView*      communityShadersHdrTargetView{};
+        inline static REX::W32::D3D11_TEXTURE2D_DESC         communityShadersHdrTargetDesc{};
+        inline static REX::W32::ID3D11Texture2D*             persistentSceneFrame{};
+        inline static REX::W32::ID3D11ShaderResourceView*    persistentSceneView{};
+        inline static REX::W32::D3D11_TEXTURE2D_DESC         persistentSceneDesc{};
+        inline static bool                                   persistentSceneContainsFinalOutput{};
         inline static REX::W32::ID3D11Texture2D*             persistentTransitionFrame{};
         inline static REX::W32::ID3D11ShaderResourceView*    persistentTransitionView{};
         inline static REX::W32::ID3D11RenderTargetView*      persistentTransitionTarget{};
