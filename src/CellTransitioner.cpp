@@ -661,8 +661,8 @@ namespace load_progress
     }
 
     // Computes LoadingMenu Scaleform opacity for custom cold presentations.
-    // The active-grid residency probe can classify an upcoming warm destination as cold; fading the
-    // menu in gives the retained frame time to cover that false-cold pop (see GetQueuedDestinationCell).
+    // Queued exterior destinations are intentionally treated as cold; fading the menu in gives the
+    // retained frame time to cover that conservative classification (see GetQueuedDestinationCell).
     // Elapsed time advances only from LoadingMenu::AdvanceMovie intervals so Scaleform writes stay on
     // the UI/movie path rather than ProcessMessage, Present, or an external timer.
     float CellTransitioner::LoadingMenuFadeAlpha(float a_interval) noexcept
@@ -908,37 +908,11 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return nullptr;
         }
 
-        // Never traverse TESWorldSpace::cellMap here. Exterior CellLoaderTask work can insert,
-        // remove, or rehash that container while scripted travel opens LoadingMenu. TES::GetCell
-        // is not sufficient on every supported runtime because its grid miss falls back to that
-        // worldspace map. Restrict the probe to the active GridCellArray instead.
-        auto* grid = tes->gridCells;
-        if (!grid || grid->length == 0) {
-            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                logger::debug("queued destination resolver: active grid is unavailable; using a cold presentation");
-            }
-            return nullptr;
-        }
-
-        const auto cellX = static_cast<std::int32_t>(std::floor(target.location.x / 4096.0F));
-        const auto cellY = static_cast<std::int32_t>(std::floor(target.location.y / 4096.0F));
-        const auto half = static_cast<std::int32_t>(grid->length >> 1);
-        const auto gridX = cellX + half - tes->currentGridX;
-        const auto gridY = cellY + half - tes->currentGridY;
-        auto*      cell = gridX >= 0 && gridY >= 0 ?
-                              grid->GetCell(
-                                  static_cast<std::uint32_t>(gridX), static_cast<std::uint32_t>(gridY)) :
-                              nullptr;
-        if (cell && !cell->IsAttached()) {
-            cell = nullptr;
-        }
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
             logger::debug(
-                "queued destination resolver: exterior ({}, {}) active-grid lookup {}",
-                cellX, cellY,
-                cell ? "found an attached cell" : "found no attached cell; using a cold presentation");
+                "queued destination resolver: exterior target in active world; using a cold presentation");
         }
-        return cell;
+        return nullptr;
     }
 
     // Chooses the warm or cold presentation before the Loading Menu opens.
