@@ -1911,9 +1911,96 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             RE::Main::WorldRootCamera() != nullptr, player && player->Get3D() != nullptr);
     }
 
+    // Improved Camera applies NPCEyeBone height after Skyrim updates the first-person camera.
+    // During a cell handoff that offset can accumulate while Skyrim's camera anchor stays fixed.
+    // Correct only that extra positive displacement, before drawing the destination world. The
+    // baseline retains Improved Camera's intended first-person offset; moving the player opts out.
+    void CellTransitioner::CorrectImprovedCameraTransitionBounce() noexcept
+    {
+        constexpr float maximumInitialOffset = 8.0F;
+        constexpr float movementTolerance = 0.1F;
+        constexpr float bounceThreshold = 2.0F;
+        constexpr float maximumBounce = 24.0F;
+
+        static bool active = false;
+        static bool abandoned = false;
+        static float baseline = 0.0F;
+        static RE::NiPoint3 initialPlayerPosition{};
+
+        // Master's existing post-load fade flags bound the destination-camera handoff window.
+        const bool destinationRendering =
+            !epochActive.load(std::memory_order_acquire) &&
+            (postLoadFadePending.load(std::memory_order_acquire) ||
+                postLoadFadeStart.load(std::memory_order_acquire) > 0);
+        if (!hooksEnabled.load(std::memory_order_acquire) || !destinationRendering ||
+            !GetModuleHandleW(L"ImprovedCameraSE.dll")) {
+            active = false;
+            abandoned = false;
+            return;
+        }
+
+        auto* camera = RE::PlayerCamera::GetSingleton();
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!camera || !camera->IsInFirstPerson() || !player ||
+            player->AsActorState()->IsWeaponDrawn()) {
+            active = false;
+            abandoned = true;
+            return;
+        }
+
+        auto* root = camera->cameraRoot.get();
+        auto* rootNode = root ? root->AsNode() : nullptr;
+        auto* cameraNode = rootNode && !rootNode->GetChildren().empty() ?
+                               rootNode->GetChildren()[0].get() : nullptr;
+        if (!root || !cameraNode || abandoned) {
+            return;
+        }
+
+        const auto anchor = camera->GetRuntimeData2().pos;
+        const float offset = root->world.translate.z - anchor.z;
+        if (!std::isfinite(offset)) {
+            abandoned = true;
+            return;
+        }
+        if (!active) {
+            // A large first sample means we missed the stable camera; leave it untouched.
+            if (std::abs(offset) > maximumInitialOffset) {
+                abandoned = true;
+                return;
+            }
+            baseline = offset;
+            initialPlayerPosition = player->GetPosition();
+            active = true;
+            logger::info("Improved Camera transition correction armed: camera offset {:.3f}", baseline);
+            return;
+        }
+
+        const auto position = player->GetPosition();
+        const auto displacement = position - initialPlayerPosition;
+        if (displacement.Length() > movementTolerance) {
+            abandoned = true;
+            logger::info("Improved Camera transition correction released for player movement");
+            return;
+        }
+
+        const float excess = offset - baseline;
+        if (excess < -bounceThreshold || excess > maximumBounce) {
+            // A new camera state is not the small repeatable handoff pulse.
+            abandoned = true;
+            return;
+        }
+        if (excess > bounceThreshold) {
+            root->local.translate.z -= excess;
+            root->world.translate.z -= excess;
+            cameraNode->world.translate.z -= excess;
+            logger::info("Improved Camera transition camera bounce corrected by {:.3f}", excess);
+        }
+    }
+
     // Observes when Skyrim stops and resumes its normal world-render call.
     void CellTransitioner::ObserveRenderWorld(bool a_firstPerson)
     {
+        CorrectImprovedCameraTransitionBounce();
         if (hooksEnabled.load(std::memory_order_acquire)) {
             try {
                 auto state = renderObservationState.load(std::memory_order_acquire);

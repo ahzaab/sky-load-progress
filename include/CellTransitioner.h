@@ -101,6 +101,7 @@ namespace load_progress
         static REX::W32::HRESULT PresentFrozenFrame(REX::W32::IDXGISwapChain*, std::uint32_t, std::uint32_t);
         static void              LogRenderState(std::string_view);
         static void              ObserveRenderWorld(bool);
+        static void              CorrectImprovedCameraTransitionBounce() noexcept;
         static void              CaptureBoundWorldTarget();
         static void              CaptureAfterScaleformBegin(void*);
         static void              CompositeAfterPostProcessing(
