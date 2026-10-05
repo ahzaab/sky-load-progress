@@ -6,7 +6,7 @@
 #include "IdsAndOffsets.h"
 #include "LoadingProgress.h"
 #include "ScopedSpritePipelineState.h"
-#include "CommunityShadersTransition.h"
+#include "TransitionUiOverlay.h"
 #include "FrozenFrameShader.h"
 
 #include <hde64.h>
@@ -29,7 +29,10 @@
 //    the compositor gate when the LoadingMenu open event arrives.
 // 3. With CS, the post-processing hook captures/composites the completed scene before UI. Present
 //    supplies an opaque watchdog when that pass is skipped, refilling CS's HDR input before ApplyHDR.
-//    Vanilla uses the completed back buffer directly.
+//    The HDR dispatch observer retains that display-converted output, then places it below native
+//    foreground UI after the UI's HDR conversion. Its opaque UI coverage hides generated-world
+//    distortion through the hold and crossfade without patching CS instructions. Vanilla uses the
+//    completed back buffer directly.
 // 4. During a warm load the locked frame replaces the back buffer. During a cold load the current
 //    Scaleform output is copied aside, the locked world is blurred or blended toward its dominant
 //    color, and the LoadingMenu layer is drawn back on top.
@@ -45,6 +48,8 @@ namespace load_progress
 {
     namespace
     {
+        TransitionUiOverlay transitionUiOverlay;
+
         enum class NativeLoadPath : std::uint8_t
         {
             none,
@@ -1076,6 +1081,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     // Releases textures that must be recreated when the render target changes.
     void CellTransitioner::ReleaseFrameResources()
     {
+        transitionUiOverlay.ReleaseTextures();
         if (communityShadersUiTargetView) {
             communityShadersUiTargetView->Release();
             communityShadersUiTargetView = nullptr;
@@ -1796,6 +1802,23 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 original = reinterpret_cast<Dispatch_t>(current);
             }
         }
+        TransitionUiOverlay::Binding overlayBinding;
+        const bool overlayOwnsImage = hooksEnabled.load(std::memory_order_acquire) && !IsVanilla() &&
+            frozenFrameView && (epochActive.load(std::memory_order_acquire) ||
+                preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
+                postLoadFadePending.load(std::memory_order_acquire) ||
+                postLoadFadeStart.load(std::memory_order_acquire) > 0 ||
+                postLoadReleasePending.load(std::memory_order_acquire));
+        if (overlayOwnsImage && original) {
+            REX::W32::MEMORY_BASIC_INFORMATION callerMemory{};
+            const auto csModule = GetModuleHandleW(L"CommunityShaders.dll");
+            const auto* graphics = RE::BSGraphics::State::GetSingleton();
+            if (csModule && graphics && REX::W32::VirtualQuery(_ReturnAddress(), &callerMemory, sizeof(callerMemory)) != 0 &&
+                callerMemory.allocationBase == csModule) {
+                overlayBinding = transitionUiOverlay.Inspect(reinterpret_cast<ID3D11DeviceContext*>(a_context),
+                    graphics->screenWidth, graphics->screenHeight);
+            }
+        }
         try {
             PrepareHdrUiForTransition(a_context, _ReturnAddress());
         } catch (const std::exception& error) {
@@ -1805,6 +1828,31 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
         if (original) {
             original(a_context, a_x, a_y, a_z);
+        }
+        HRESULT overlayResult = S_FALSE;
+        if (overlayBinding.pass == TransitionUiOverlay::Pass::display) {
+            overlayResult = transitionUiOverlay.Capture(reinterpret_cast<ID3D11DeviceContext*>(a_context), overlayBinding);
+        } else if (overlayBinding.pass == TransitionUiOverlay::Pass::ui) {
+            overlayResult = transitionUiOverlay.Compose(reinterpret_cast<ID3D11DeviceContext*>(a_context), overlayBinding,
+                reinterpret_cast<TransitionUiOverlay::Dispatch>(original));
+            if (overlayResult == S_OK && Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                static unsigned lastReportedPhase{};
+                const unsigned phase = epochActive.load(std::memory_order_acquire) ? 2 :
+                    preLoadDoorTransitionActive.load(std::memory_order_acquire) ? 1 : 3;
+                if (phase != lastReportedPhase) {
+                    logger::info("transition image composed into native frame-generation UI: phase={} size={}x{}",
+                        phase, overlayBinding.desc.Width, overlayBinding.desc.Height);
+                    lastReportedPhase = phase;
+                }
+            }
+        }
+        if (FAILED(overlayResult)) {
+            static bool failureReported{};
+            if (!failureReported) {
+                logger::warn("transition UI overlay unavailable ({:08X}); retaining scene composition",
+                    static_cast<std::uint32_t>(overlayResult));
+                failureReported = true;
+            }
         }
         if (!Settings::GetSingleton().IsTransitionTextureCaptureEnabled()) {
             return;
@@ -1996,15 +2044,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return nullPointerResult;
         }
 
-        // Consume every frame, including suspended world frames, so readiness cannot go stale.
-        const bool generationCompletedScene = completedSceneSincePresent.exchange(false, std::memory_order_acq_rel);
-        const bool generationFreshWorld = worldRenderedSincePresent.load(std::memory_order_acquire) && generationCompletedScene;
-        const bool generationOwnedAtEntry = !IsVanilla() && (
-            epochActive.load(std::memory_order_acquire) ||
-            preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
-            postLoadFadePending.load(std::memory_order_acquire) ||
-            postLoadFadeStart.load(std::memory_order_acquire) > 0 ||
-            postLoadReleasePending.load(std::memory_order_acquire));
+        transitionUiOverlay.BeginPresent();
 
         if (hooksEnabled.load(std::memory_order_acquire)) {
             try {
@@ -2295,23 +2335,13 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             }
         }
 
-        const bool generationOwnsImage = generationOwnedAtEntry || (!IsVanilla() && (
-            epochActive.load(std::memory_order_acquire) ||
-            preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
-            postLoadFadePending.load(std::memory_order_acquire) ||
-            postLoadFadeStart.load(std::memory_order_acquire) > 0 ||
-            postLoadReleasePending.load(std::memory_order_acquire)));
-        CommunityShadersTransition::BeginPresent(
-            hooksEnabled.load(std::memory_order_acquire) && communityShadersFrameGenerationProxy && communityShadersHdrTarget,
-            generationOwnsImage,
-            generationFreshWorld);
         worldRenderedSincePresent.store(false, std::memory_order_release);
         if (hooksEnabled.load(std::memory_order_acquire) && compositeAfterPostProcessing) {
             auto* observerRenderer = RE::BSGraphics::Renderer::GetSingleton();
             EnsureCopyObserver(observerRenderer ? observerRenderer->GetRuntimeData().context : nullptr);
         }
         const auto result = originalPresent(a_swapChain, a_syncInterval, a_flags);
-        CommunityShadersTransition::EndPresent(result >= 0);
+        transitionUiOverlay.BeginPresent();
         if (Settings::GetSingleton().IsTransitionTextureCaptureEnabled()) {
             diagnosticOutputTarget.store(0, std::memory_order_release);
         }
@@ -2633,7 +2663,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         }
 
                         const bool freshWorld = worldRenderedSincePresent.load(std::memory_order_acquire);
-                        completedSceneSincePresent.store(freshWorld, std::memory_order_release);
                         const bool loading = preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
                                              epochActive.load(std::memory_order_acquire);
                         const bool postLoadTransition = postLoadFadePending.load(std::memory_order_acquire) ||
@@ -3306,6 +3335,17 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     throw std::runtime_error("could not create the loading overlay shader");
                 }
 
+                // Compile outside the transition so the first covered frame does not hitch.
+                if (CellTransitioner::compositeAfterPostProcessing) {
+                    const auto overlayStatus = transitionUiOverlay.Initialize(reinterpret_cast<::ID3D11Device*>(device));
+                    if (FAILED(overlayStatus)) {
+                        logger::warn("could not initialize native transition UI overlay ({:08X}); retaining scene composition",
+                            static_cast<std::uint32_t>(overlayStatus));
+                    } else {
+                        logger::info("native HDR transition UI overlay ready; Community Shaders instructions are not patched");
+                    }
+                }
+
                 // Patch Present only after every resource needed by its callback is ready.
                 const auto vtableAddress = *reinterpret_cast<std::uintptr_t*>(window->swapChain);
                 if (!vtableAddress) {
@@ -3355,7 +3395,6 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             InstallWorldCaptureHook();
             InstallCommunityShadersCompositeHook();
             InstallFrozenFrameHook();
-            CommunityShadersTransition::Install();
             InstallFastTravelFadeCallbackHook();
             InstallSaveLoadFadeCallbackHook();
             InstallFaderMenuHook();

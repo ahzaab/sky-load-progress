@@ -2,7 +2,7 @@
 
 Skyrim Load Progress adds a progress meter to the loading screen. The meter uses the same artwork as the level progress bar and is placed directly below it.
 
-The transition compositor retains a completed world image across cell loading and blends back into gameplay. Community Shaders is optional; its verified 1.8.4 integration preserves post-processed lighting and temporarily suppresses frame generation while the compositor owns the image.
+The transition compositor retains a completed world image across cell loading and blends back into gameplay. Community Shaders is optional. When CS provides an HDR frame-generation UI layer, the plugin places the completed transition image beneath native foreground UI in that layer, covering generated-world distortion through the hold and crossfade. Integration uses Skyrim engine hooks and D3D11 interfaces without patching instructions or using private addresses in Community Shaders. Without CS, the native scene capture and composition path remains active.
 
 This is still a proof of concept. The plugin currently tracks the reference, critical reference, distant reference, background, IO task, and post-processing work used while cells are loading. Optional diagnostics can write the queue activity and calculated progress to `SkyrimLoadProgress.log`.
 

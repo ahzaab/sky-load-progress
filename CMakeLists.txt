@@ -32,8 +32,8 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         include/PCH.h
         include/ProgressMeter.h
         include/Settings.h
+        include/TransitionUiOverlay.h
         src/CellTransitioner.cpp
-        src/CommunityShadersTransition.cpp
         src/LoadingProgress.cpp
         src/PCH.cpp
         src/ProgressMeter.cpp
@@ -55,4 +55,4 @@ if(SKSE_SUPPORT_PATCH_SAFETY)
 endif()
 
 target_precompile_headers(${PROJECT_NAME} PRIVATE include/PCH.h)
-target_link_libraries(${PROJECT_NAME} PRIVATE toml11::toml11 bcrypt)
+target_link_libraries(${PROJECT_NAME} PRIVATE toml11::toml11)

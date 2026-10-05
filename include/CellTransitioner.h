@@ -206,8 +206,6 @@ namespace load_progress
         inline static std::atomic_uint32_t                   postProcessingPassesSincePresent{};
         // Set after the normal world renderer returns; consumed at Present, not by UI-only passes.
         inline static std::atomic_bool                       worldRenderedSincePresent{};
-        // An accepted full-size scene returned from CS, including ordinary gameplay frames.
-        inline static std::atomic_bool                       completedSceneSincePresent{};
         inline static REX::W32::ID3D11Texture2D*             frozenFrame{};
         inline static REX::W32::ID3D11ShaderResourceView*    frozenFrameView{};
         inline static REX::W32::ID3D11Texture2D*             sceneFrame{};
