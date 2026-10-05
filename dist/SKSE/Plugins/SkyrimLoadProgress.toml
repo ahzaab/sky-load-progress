@@ -7,15 +7,35 @@
 # All timing values are milliseconds. Values below zero are treated as zero,
 # and values above 600000 are limited to 600000.
 
-[logging]
+[debugging]
+# Diagnostic features only. Leave these disabled for normal play.
+# TOML-enabled diagnostic messages use info level in Release and Debug builds.
+# This master switch also gates verbose queues, loaded entries and texture capture.
 # Per-load summaries and transition diagnostics can be useful when diagnosing
 # compatibility problems. Keep this off for normal play. Startup messages,
 # warnings, and errors are still written when it is false.
 loading = false
 
+# Save first-door scene/UI/output DDS textures for rendering investigations.
+# Requires loading=true. GPU readbacks stall rendering; leave off for visual tests.
+capture_transition_textures = false
+
 # Log individual queue mutations and aggregate progress samples. This can write
 # many lines during a cold load and only takes effect when loading is also true.
 verbose_queues = false
+
+[debugging.loaded_entries]
+# Log references when Skyrim actually enqueues their normal 3D or object-loading
+# work. Each entry includes the reference, base object, and cell Form IDs and
+# resolves their Editor IDs later on the game thread.
+object_references = false
+
+# Log references whose queued work is transferred from one cell to another.
+transferred_references = false
+
+# Log references added to Skyrim's distant-reference queue. This queue can
+# include LOD-related work, but it is not a direct count of generated LOD meshes.
+distant_references = false
 
 [interface]
 # HUDMenu normally sits beneath Skyrim's opaque loading menus. Set this to true
@@ -37,19 +57,6 @@ loading_menu_fade_in_ms = 600
 # completely vanilla for that load path. The progress meter remains available.
 fast_travel = true
 load_from_save = true
-
-[logging.loaded_entries]
-# Log references when Skyrim actually enqueues their normal 3D or object-loading
-# work. Each entry includes the reference, base object, and cell Form IDs and
-# resolves their Editor IDs later on the game thread.
-object_references = false
-
-# Log references whose queued work is transferred from one cell to another.
-transferred_references = false
-
-# Log references added to Skyrim's distant-reference queue. This queue can
-# include LOD-related work, but it is not a direct count of generated LOD meshes.
-distant_references = false
 
 [progress_bar]
 # Controls where the loading progress meter is displayed:

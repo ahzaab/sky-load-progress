@@ -272,18 +272,16 @@ namespace load_progress
         SetNumber(a_layoutClip, "_x", requestedLocalX);
         SetNumber(a_layoutClip, "_y", requestedLocalY);
 
-        if (!GetGlobalClipBounds(a_view, a_boundsClip, root, globalBounds)) {
-            return false;
-        }
-
-        double appliedX = 0.0;
-        double appliedY = 0.0;
-        if (!GetNumber(a_layoutClip, "_x", appliedX) || !GetNumber(a_layoutClip, "_y", appliedY)) {
-            return false;
-        }
-
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            logger::debug(
+            if (!GetGlobalClipBounds(a_view, a_boundsClip, root, globalBounds)) {
+                return false;
+            }
+            double appliedX = 0.0;
+            double appliedY = 0.0;
+            if (!GetNumber(a_layoutClip, "_x", appliedX) || !GetNumber(a_layoutClip, "_y", appliedY)) {
+                return false;
+            }
+            logger::info(
                 "positioned loading meter: x={:.1f}% y={:.1f}% width={:.1f}% "
                 "localPosition=({:.1f}, {:.1f})->({:.1f}, {:.1f}) "
                 "globalSafe=({:.1f}, {:.1f})-({:.1f}, {:.1f}) globalBounds=({:.1f}, {:.1f})-({:.1f}, {:.1f})",
@@ -361,7 +359,7 @@ namespace load_progress
             }
 
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                logger::debug("requested SkyrimLoadProgress/LoadingProgressMeter.swf");
+                logger::info("requested SkyrimLoadProgress/LoadingProgressMeter.swf");
             }
             return false;
         }
@@ -415,7 +413,7 @@ namespace load_progress
         }
 
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            logger::debug("initialized standalone loading meter; frames empty={:.0f} full={:.0f}",
+            logger::info("initialized standalone loading meter; frames empty={:.0f} full={:.0f}",
                 emptyFrame, fullFrame);
         }
         return true;

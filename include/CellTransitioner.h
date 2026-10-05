@@ -25,6 +25,12 @@ namespace load_progress
             bool          paused;
             bool          faderOpen;
             bool          mistOpen;
+            bool          movementHandlerEnabled;
+            bool          lookHandlerEnabled;
+            bool          ignoreKeyboardMouse;
+            bool          modal;
+            bool          remapMode;
+            std::uint32_t pauseCount;
 
             bool operator==(const ControlState&) const = default;
         };
@@ -35,6 +41,14 @@ namespace load_progress
         using ImageSpacePostProcessing_t = void (*)(
             RE::ImageSpaceManager*, std::uint32_t, RE::RENDER_TARGET, void*, bool);
         using Present_t = REX::W32::HRESULT (*)(REX::W32::IDXGISwapChain*, std::uint32_t, std::uint32_t);
+        using CopyResource_t = void (*)(REX::W32::ID3D11DeviceContext*, REX::W32::ID3D11Resource*, REX::W32::ID3D11Resource*);
+        using Dispatch_t = void (*)(REX::W32::ID3D11DeviceContext*, std::uint32_t, std::uint32_t, std::uint32_t);
+        struct CopyObserverRecord
+        {
+            std::uintptr_t vtable;
+            CopyResource_t original;
+            Dispatch_t originalDispatch;
+        };
         using PostDisplay_t = void (*)(RE::IMenu*);
 
         static CellTransitioner& GetSingleton();
@@ -57,6 +71,9 @@ namespace load_progress
         // Clears compositor state and restores suppressed Fader/HUD. Called only from DisablePlugin.
         static void              ResetOnDisable() noexcept;
         static bool              IsExecutableAddress(std::uintptr_t) noexcept;
+        static bool              EnsureCopyObserver(REX::W32::ID3D11DeviceContext*);
+        static void              PrepareHdrUiForTransition(REX::W32::ID3D11DeviceContext*, const void*);
+        static void              TraceHdrDispatch(REX::W32::ID3D11DeviceContext*, std::uint32_t, std::uint32_t, std::uint32_t);
         static std::uintptr_t    FindUniqueRelativeCall(
             REL::RelocationID, REL::RelocationID, std::string_view);
         static std::pair<std::uintptr_t, std::uintptr_t> FindChainableRelativeCall(
@@ -95,6 +112,7 @@ namespace load_progress
             REX::W32::ID3D11DeviceContext*, REX::W32::ID3D11Texture2D*,
             const REX::W32::D3D11_TEXTURE2D_DESC&, bool);
         static void PresentPostLoadFrame(REX::W32::ID3D11DeviceContext*, const REX::W32::D3D11_TEXTURE2D_DESC&);
+        static void FinishPostLoadPresentation();
         static void CompositeLoadingFrame(
             REX::W32::ID3D11DeviceContext*, REX::W32::ID3D11Texture2D*,
             const REX::W32::D3D11_TEXTURE2D_DESC&, bool = false);
@@ -103,6 +121,8 @@ namespace load_progress
         static void              ObserveRenderWorld(bool);
         static void              CorrectImprovedCameraTransitionBounce() noexcept;
         static void              CaptureBoundWorldTarget();
+        static void              TraceOutputCopy(REX::W32::ID3D11DeviceContext*, REX::W32::ID3D11Resource*, REX::W32::ID3D11Resource*);
+        static void              SaveDiagnosticTexture(REX::W32::ID3D11DeviceContext*, REX::W32::ID3D11Resource*, std::string_view);
         static void              CaptureAfterScaleformBegin(void*);
         static void              CompositeAfterPostProcessing(
                          RE::ImageSpaceManager*, std::uint32_t, RE::RENDER_TARGET, void*, bool);
@@ -118,6 +138,16 @@ namespace load_progress
         static void                   ApplyLoadingMenuFade(RE::IMenu*, float a_interval) noexcept;
 
         inline static std::atomic_bool                      epochActive{ false };
+        inline static std::atomic_uint8_t                    diagnosticCaptureStage{};
+        inline static std::atomic_bool                       diagnosticFrozenSaved{};
+        inline static std::atomic_uint8_t                    diagnosticPresentSamples{};
+        inline static std::atomic_uint8_t                    diagnosticDispatchSamples{};
+        // Identity comparison only: never retain a swap-chain buffer across Present/resize.
+        inline static std::atomic_uintptr_t                  diagnosticOutputTarget{};
+        inline static CopyResource_t                        originalCopyResource{};
+        // Published before each vtable patch; records remain immutable for chained calls.
+        inline static std::array<CopyObserverRecord, 16>      copyObserverRecords{};
+        inline static std::atomic_uint32_t                   copyObserverRecordCount{};
         inline static std::atomic_bool                      hooksEnabled{ false };
         inline static std::atomic_bool                      failureLogged{ false };
         inline static std::atomic_bool                      frozenFrameLocked{ false };
@@ -125,8 +155,9 @@ namespace load_progress
         inline static std::atomic_bool                      preLoadDoorTransitionActive{ false };
         inline static std::atomic_int64_t                   postLoadFadeStart{};
         inline static std::atomic_bool                      postLoadFadePending{};
-        inline static std::atomic_int64_t                   postLoadFadeRequestedAt{};
-        inline static std::atomic_bool                      postLoadPresentFallback{};
+        // Keep scene/UI ownership through CS's final conversion and proxy Present.
+        inline static std::atomic_bool                      postLoadReleasePending{};
+        inline static std::atomic_int64_t                   postLoadRecoveryDeadline{};
         inline static std::atomic<Presentation>             presentation{ Presentation::loadingMenu };
         inline static std::atomic<Settings::TransitionType> transitionType{ Settings::TransitionType::blur };
         inline static std::atomic<Settings::ColorSource>    colorSource{ Settings::ColorSource::dominant };
@@ -172,13 +203,18 @@ namespace load_progress
         inline static Present_t                              originalPresent{};
         inline static bool                                   compositeAfterPostProcessing{};
         inline static bool                                   communityShadersFrameGenerationProxy{};
-        inline static std::atomic_bool                       frameGenerationSuppressionLogged{};
         inline static std::atomic_uint32_t                   postProcessingPassesSincePresent{};
+        // Set after the normal world renderer returns; consumed at Present, not by UI-only passes.
+        inline static std::atomic_bool                       worldRenderedSincePresent{};
+        // An accepted full-size scene returned from CS, including ordinary gameplay frames.
+        inline static std::atomic_bool                       completedSceneSincePresent{};
         inline static REX::W32::ID3D11Texture2D*             frozenFrame{};
         inline static REX::W32::ID3D11ShaderResourceView*    frozenFrameView{};
         inline static REX::W32::ID3D11Texture2D*             sceneFrame{};
         inline static REX::W32::ID3D11ShaderResourceView*    sceneFrameView{};
         inline static REX::W32::ID3D11Texture2D*             communityShadersHdrTarget{};
+        inline static REX::W32::ID3D11Texture2D*             communityShadersUiTarget{};
+        inline static REX::W32::ID3D11RenderTargetView*       communityShadersUiTargetView{};
         inline static REX::W32::ID3D11RenderTargetView*      communityShadersHdrTargetView{};
         inline static REX::W32::ID3D11Texture2D*             dominantColorReadback{};
         inline static REX::W32::ID3D11Texture2D*             loadingOverlay{};
@@ -186,7 +222,6 @@ namespace load_progress
         inline static REX::W32::D3D11_TEXTURE2D_DESC         frozenFrameDesc{};
         inline static REX::W32::D3D11_TEXTURE2D_DESC         sceneFrameDesc{};
         inline static REX::W32::D3D11_TEXTURE2D_DESC         communityShadersHdrTargetDesc{};
-        inline static std::atomic_bool                       sceneFrameContainsFinalOutput{};
         inline static std::unique_ptr<DirectX::SpriteBatch>  spriteBatch;
         inline static std::unique_ptr<DirectX::CommonStates> commonStates;
         inline static ::ID3D11PixelShader*                   frozenFrameBlurShader{};

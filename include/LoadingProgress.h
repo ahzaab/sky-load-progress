@@ -95,7 +95,7 @@ namespace load_progress
         static void                   DistantReferenceQueued(CONTEXT&) noexcept;
         static void                   LoadingMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
         static RE::UI_MESSAGE_RESULTS LoadingMenuProcessMessage(RE::IMenu*, RE::UIMessage&);
-        static void                   LogProgress(const Progress&);
+        static void                   UpdateDisplayedProgress(const Progress&);
         static void                   LogProgressTrace(const Progress&, float);
         static std::uint64_t          MonotonicMilliseconds() noexcept;
         static void                   DisableHooks(std::string_view) noexcept;
@@ -135,7 +135,7 @@ namespace load_progress
         inline static std::atomic_bool                             hooksEnabled{ false };
         inline static std::atomic_bool                             failureLogged{ false };
         inline static std::atomic_uint32_t                         displayedBasisPoints{};
-        inline static std::atomic_uint64_t                         traceEpochStartedMs{};
+        inline static std::atomic_uint64_t                         epochStartedMs{};
         inline static std::atomic_uint64_t                         traceLastSampleMs{};
         inline static std::atomic_uint64_t                         traceLastQueueActivityMs{};
         inline static std::atomic_uint64_t                         traceLastProgressAdvanceMs{};

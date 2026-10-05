@@ -57,7 +57,7 @@ namespace load_progress
                 aggregator.Complete(queue, completed);
             }
         }
-        LogProgress(aggregator.Current());
+        UpdateDisplayedProgress(aggregator.Current());
     }
 
     // Resolves captured numeric IDs on the loading-menu thread and releases their ring slots.
@@ -276,7 +276,9 @@ namespace load_progress
             // HUDMenu can be created or made visible after LoadingMenu opens on a Main Menu save load.
             CellTransitioner::HideHUDForLoad();
 
-            LogProgressTrace(aggregator.Current(), a_interval);
+            if (Settings::GetSingleton().IsVerboseQueueLoggingEnabled()) {
+                LogProgressTrace(aggregator.Current(), a_interval);
+            }
 
             if (a_menu && a_menu->uiMovie) {
                 const bool seamless = CellTransitioner::IsSeamless();
@@ -327,7 +329,7 @@ namespace load_progress
                    RE::UI_MESSAGE_RESULTS::kPassOn;
     }
 
-    void LoadingProgress::LogProgress(const Progress& a_progress)
+    void LoadingProgress::UpdateDisplayedProgress(const Progress& a_progress)
     {
         constexpr std::uint32_t finalLoadingBasisPoints = 9900;
         constexpr std::uint64_t initialRampMilliseconds = 500;
@@ -336,7 +338,7 @@ namespace load_progress
                                           std::clamp(a_progress.fraction * 10000.0, 0.0, 10000.0)) :
                                       0u;
         const auto now = MonotonicMilliseconds();
-        const auto epochStarted = traceEpochStartedMs.load(std::memory_order_relaxed);
+        const auto epochStarted = epochStartedMs.load(std::memory_order_relaxed);
         const auto elapsed = epochStarted && now >= epochStarted ? now - epochStarted : 0;
         const auto rampCeiling = static_cast<std::uint32_t>(std::min<std::uint64_t>(
             finalLoadingBasisPoints,
@@ -354,8 +356,11 @@ namespace load_progress
                 break;
             }
         }
-        if (advanced) {
+        if (advanced && Settings::GetSingleton().IsLoadingLoggingEnabled()) {
             traceLastProgressAdvanceMs.store(MonotonicMilliseconds(), std::memory_order_relaxed);
+        }
+        if (!Settings::GetSingleton().IsVerboseQueueLoggingEnabled()) {
+            return;
         }
         if (a_progress.total == lastLogged.total && a_progress.completed == lastLogged.completed &&
             a_progress.remaining == lastLogged.remaining) {
@@ -386,7 +391,7 @@ namespace load_progress
         }
         traceLastSampleMs.store(now, std::memory_order_relaxed);
 
-        const auto epochStarted = traceEpochStartedMs.load(std::memory_order_relaxed);
+        const auto epochStarted = epochStartedMs.load(std::memory_order_relaxed);
         const auto queueActivity = traceLastQueueActivityMs.load(std::memory_order_relaxed);
         const auto progressAdvance = traceLastProgressAdvanceMs.load(std::memory_order_relaxed);
         const auto displayed = displayedBasisPoints.load(std::memory_order_acquire);
@@ -453,7 +458,9 @@ namespace load_progress
 
         liveRemaining[index].fetch_add(1, std::memory_order_relaxed);
         if (epochActive.load(std::memory_order_relaxed)) {
-            traceLastQueueActivityMs.store(MonotonicMilliseconds(), std::memory_order_relaxed);
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                traceLastQueueActivityMs.store(MonotonicMilliseconds(), std::memory_order_relaxed);
+            }
             pendingEnqueued[index].fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -471,7 +478,9 @@ namespace load_progress
         // Saturate at zero because the plugin may begin observing after Skyrim queued the work.
         while (value != 0 && !live.compare_exchange_weak(value, value - 1, std::memory_order_relaxed)) {}
         if (epochActive.load(std::memory_order_relaxed)) {
-            traceLastQueueActivityMs.store(MonotonicMilliseconds(), std::memory_order_relaxed);
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                traceLastQueueActivityMs.store(MonotonicMilliseconds(), std::memory_order_relaxed);
+            }
             pendingCompleted[index].fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -978,10 +987,12 @@ namespace load_progress
 
         displayedBasisPoints.store(0, std::memory_order_release);
         const auto now = MonotonicMilliseconds();
-        traceEpochStartedMs.store(now, std::memory_order_relaxed);
-        traceLastSampleMs.store(0, std::memory_order_relaxed);
-        traceLastQueueActivityMs.store(now, std::memory_order_relaxed);
-        traceLastProgressAdvanceMs.store(now, std::memory_order_relaxed);
+        epochStartedMs.store(now, std::memory_order_relaxed);
+        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+            traceLastSampleMs.store(0, std::memory_order_relaxed);
+            traceLastQueueActivityMs.store(now, std::memory_order_relaxed);
+            traceLastProgressAdvanceMs.store(now, std::memory_order_relaxed);
+        }
         for (std::size_t i = 0; i < queueCount; ++i) {
             pendingEnqueued[i].store(0, std::memory_order_relaxed);
             pendingCompleted[i].store(0, std::memory_order_relaxed);
@@ -1025,14 +1036,16 @@ namespace load_progress
             }
         }
 
-        lastLogged = {};
+        if (Settings::GetSingleton().IsVerboseQueueLoggingEnabled()) {
+            lastLogged = {};
+        }
         CellTransitioner::BeginLoad();
 
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
             logger::info(
                 "loading epoch began: Loading Menu opened; baseline remaining={}", aggregator.Current().remaining);
         }
-        LogProgress(aggregator.Current());
+        UpdateDisplayedProgress(aggregator.Current());
     }
 
     // Ends aggregation and starts the retained-frame transition into gameplay.
@@ -1067,12 +1080,12 @@ namespace load_progress
         EndLoadedEntryCapture();
         CellTransitioner::EndLoad();
 
-        const auto final = aggregator.Current();
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+            const auto final = aggregator.Current();
             const auto now = MonotonicMilliseconds();
             logger::info(
                 "loading epoch ended: Loading Menu closed; epoch_ms={} progress_idle_ms={} queue_idle_ms={} displayed={:.2f}% completed={} remaining={} total={}",
-                now - traceEpochStartedMs.load(std::memory_order_relaxed),
+                now - epochStartedMs.load(std::memory_order_relaxed),
                 now - traceLastProgressAdvanceMs.load(std::memory_order_relaxed),
                 now - traceLastQueueActivityMs.load(std::memory_order_relaxed),
                 static_cast<double>(displayedBasisPoints.load(std::memory_order_acquire)) / 100.0,
@@ -1138,7 +1151,7 @@ namespace load_progress
         const RE::TESCellFullyLoadedEvent* a_event,
         RE::BSTEventSource<RE::TESCellFullyLoadedEvent>*)
     {
-        if (!hooksEnabled.load(std::memory_order_acquire)) {
+        if (!Settings::GetSingleton().IsLoadingLoggingEnabled() || !hooksEnabled.load(std::memory_order_acquire)) {
             return RE::BSEventNotifyControl::kContinue;
         }
 
@@ -1239,8 +1252,9 @@ namespace load_progress
     {
         auto& events = LoadingProgress::GetSingleton();
         auto* ui = RE::UI::GetSingleton();
-        auto* eventSources = RE::ScriptEventSourceHolder::GetSingleton();
-        if (!ui || !eventSources) {
+        const bool diagnostics = Settings::GetSingleton().IsLoadingLoggingEnabled();
+        auto* eventSources = diagnostics ? RE::ScriptEventSourceHolder::GetSingleton() : nullptr;
+        if (!ui || (diagnostics && !eventSources)) {
             throw std::runtime_error("could not find Skyrim's UI or script event source holder");
         }
 
@@ -1251,9 +1265,11 @@ namespace load_progress
         InstallLoadingMenuHook();
 
         ui->AddEventSink<RE::MenuOpenCloseEvent>(&events);
-        eventSources->AddEventSink<RE::TESCellFullyLoadedEvent>(&events);
+        if (diagnostics) {
+            eventSources->AddEventSink<RE::TESCellFullyLoadedEvent>(&events);
+        }
         LoadingProgress::hooksEnabled.store(true, std::memory_order_release);
 
-        logger::info("installed loading-menu and cell-fully-loaded event sinks");
+        logger::info("installed loading-menu event sink; cell diagnostics={}", diagnostics);
     }
 }

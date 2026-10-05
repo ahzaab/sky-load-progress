@@ -27,6 +27,7 @@ namespace load_progress
         transitionsForFastTravel = true;
         transitionsForSaveLoads = true;
         loadingLoggingEnabled = false;
+        transitionTextureCaptureEnabled = false;
         verboseQueueLoggingEnabled = false;
         loadedEntryLogging = {};
 
@@ -45,10 +46,14 @@ namespace load_progress
         try {
             const auto document = toml::parse(path);
 
-            if (document.contains("logging")) {
-                const auto& logging = toml::find(document, "logging");
+            // Prefer the dedicated debugging table; accept older configurations.
+            const auto diagnosticTable = document.contains("debugging") ? "debugging" : "logging";
+            if (document.contains(diagnosticTable)) {
+                const auto& logging = toml::find(document, diagnosticTable);
                 loadingLoggingEnabled =
                     toml::find_or<bool>(logging, "loading", loadingLoggingEnabled);
+                transitionTextureCaptureEnabled =
+                    toml::find_or<bool>(logging, "capture_transition_textures", transitionTextureCaptureEnabled);
                 verboseQueueLoggingEnabled =
                     toml::find_or<bool>(logging, "verbose_queues", verboseQueueLoggingEnabled);
 
@@ -137,8 +142,8 @@ namespace load_progress
             logger::info("loading menu fade-in: {}ms", loadingMenuFadeIn.count());
             logger::info("custom transitions: fast travel={} load from save={}",
                 transitionsForFastTravel, transitionsForSaveLoads);
-            logger::info("loading diagnostics: enabled={} verbose queues={}",
-                loadingLoggingEnabled, IsVerboseQueueLoggingEnabled());
+            logger::info("loading diagnostics: enabled={} verbose queues={} GPU texture capture={}",
+                loadingLoggingEnabled, IsVerboseQueueLoggingEnabled(), IsTransitionTextureCaptureEnabled());
             logger::info("loaded-entry diagnostics: objects={} transfers={} distant={}",
                 loadingLoggingEnabled && loadedEntryLogging.objectReferences,
                 loadingLoggingEnabled && loadedEntryLogging.transferredReferences,
@@ -152,6 +157,7 @@ namespace load_progress
             blurAmount = defaultBlurAmount;
             progressBar = {};
             loadingLoggingEnabled = false;
+            transitionTextureCaptureEnabled = false;
             showHUDDuringLoading = false;
             loadingMenuFadeIn = std::chrono::milliseconds{ 600 };
             transitionsForFastTravel = true;
@@ -179,7 +185,7 @@ namespace load_progress
         for (const auto& rule : cellRules) {
             if (MatchesPattern(a_editorID, rule.pattern)) {
                 if (IsLoadingLoggingEnabled()) {
-                    logger::debug(
+                    logger::info(
                         "cell transition rule matched: editorID='{}' pattern='{}'", a_editorID, rule.pattern);
                 }
                 return rule.transition;
@@ -235,6 +241,11 @@ namespace load_progress
     bool Settings::IsLoadingLoggingEnabled() const
     {
         return loadingLoggingEnabled;
+    }
+
+    bool Settings::IsTransitionTextureCaptureEnabled() const
+    {
+        return loadingLoggingEnabled && transitionTextureCaptureEnabled;
     }
 
     // Verbose queue samples require both logging switches to avoid accidental file spam.

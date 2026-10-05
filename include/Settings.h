@@ -81,6 +81,7 @@ namespace load_progress
         [[nodiscard]] bool                  UseTransitionsForFastTravel() const;
         [[nodiscard]] bool                  UseTransitionsForSaveLoads() const;
         [[nodiscard]] bool                  IsLoadingLoggingEnabled() const;
+        [[nodiscard]] bool                  IsTransitionTextureCaptureEnabled() const;
         [[nodiscard]] bool                  IsVerboseQueueLoggingEnabled() const;
         [[nodiscard]] const LoadedEntryLogging& GetLoadedEntryLogging() const;
         [[nodiscard]] bool                      IsLoadedEntryLoggingEnabled() const;
@@ -117,6 +118,7 @@ namespace load_progress
         bool                  transitionsForFastTravel{ true };
         bool                  transitionsForSaveLoads{ true };
         bool                  loadingLoggingEnabled{ false };
+        bool                  transitionTextureCaptureEnabled{ false };
         bool                  verboseQueueLoggingEnabled{ false };
         LoadedEntryLogging    loadedEntryLogging;
 

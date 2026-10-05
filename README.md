@@ -2,7 +2,7 @@
 
 Skyrim Load Progress adds a progress meter to the loading screen. The meter uses the same artwork as the level progress bar and is placed directly below it.
 
-> **Experimental branch:** `seamless-loading-experiment` keeps Skyrim's loading, fader, and mist update loops running but disables their presentation. This hides both Scaleform movies and suppresses MistMenu's native mist, background, and load-screen NIF rendering. It also disables form-backed image-space modifiers, including their cross-fades. The last completed frame is kept in a GPU texture and presented while the Loading Menu is open. Expect a frozen image followed by normal pop-in when rendering resumes.
+The transition compositor retains a completed world image across cell loading and blends back into gameplay. Community Shaders is optional; its verified 1.8.4 integration preserves post-processed lighting and temporarily suppresses frame generation while the compositor owns the image.
 
 This is still a proof of concept. The plugin currently tracks the reference, critical reference, distant reference, background, IO task, and post-processing work used while cells are loading. Optional diagnostics can write the queue activity and calculated progress to `SkyrimLoadProgress.log`.
 
@@ -33,7 +33,7 @@ the plugin hands presentation back to Skyrim's native FaderMenu without modifyin
 This preserves the scripted `FadeOutGame(false, true, 14.0, 15.0)` hold and fade while allowing
 TitleSequence Menu to render at its normal higher UI depth.
 
-Loading diagnostics are disabled by default. Set `logging.loading` to write per-load and transition details. Set `logging.verbose_queues` as well to include individual queue mutations and aggregate progress samples. The `logging.loaded_entries` table can separately log normal object-reference work, references transferred between cells, and distant-reference work. Enabled entry categories include Form IDs and Editor IDs where available, plus an end-of-load tally. Startup messages, warnings, and errors are always logged.
+Loading diagnostics are disabled by default. TOML-enabled diagnostics use `info` verbosity in Release and Debug builds; enabling them never lowers the Release logger threshold to `debug` or `trace`. When disabled, diagnostic-only timing, control inspection, counters and GPU readbacks are skipped. Set `debugging.loading` to write per-load and transition details. Set `debugging.verbose_queues` as well to include individual queue mutations and aggregate progress samples. The `debugging.loaded_entries` table can separately log normal object-reference work, references transferred between cells, and distant-reference work. Enabled entry categories include Form IDs and Editor IDs where available, plus an end-of-load tally. `debugging.capture_transition_textures` saves diagnostic GPU textures and can stall rendering; keep it disabled for normal play and smoothness tests. Startup messages, warnings, and errors are always logged. Older `[logging]` configurations remain supported; `[debugging]` takes precedence when present.
 
 Cold transitions can use the retained frame with an optional blur, or blend to a fixed or captured dominant color. Each cold rule can override `fade_in_ms`, `hold_after_load_ms`, and `fade_out_ms`. Values omitted from a rule inherit from the global `[cold]` table. Warm transitions are global and do not use cell rules.
 
@@ -88,33 +88,30 @@ Clone the repository with submodules, or initialize them after cloning:
 git submodule update --init --recursive
 ```
 
-For a release build:
+Use an x64 Visual Studio developer shell with CMake and Ninja available and
+`VCPKG_ROOT` pointing to your vcpkg installation. For a release build:
 
 ```powershell
-./build.ps1
+cmake --preset build-release-msvc
+cmake --build --preset release-msvc
 ```
 
 For a debug build with the console enabled:
 
 ```powershell
-./build-debug.ps1
+cmake --preset build-debug-msvc
+cmake --build --preset debug-msvc
 ```
 
 ## Packaging a Release
 
-Build, validate, and create a Nexus-ready ZIP for MO2 and Vortex:
-
-```powershell
-./Scripts/BuildRelease.ps1 -VsDevCmd J:\dev\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat
-```
-
-The version defaults to `PROJECT_VERSION` from `CMakeLists.txt`. The archive is written to
-`release/<version>/`. The archive root represents Skyrim's `Data` directory, with `SKSE/` and
+Package the validated Release DLL and PDB from `build/release-msvc/` with the contents
+of `dist/`. The archive root represents Skyrim's `Data` directory, with `SKSE/` and
 `Interface/` at the top level so both MO2 and Vortex install the files without an extra `Data/Data`
 layer. The GPL license and release notice are installed under
 `SKSE/Plugins/SkyrimLoadProgress/`, where they cannot affect plugin loading. The archive also
 includes the DLL, PDB, default TOML configuration, and both Interface movie paths required by the
-plugin. Use `-SkipBuild` to package an existing validated Release build.
+plugin.
 
 ## License
 
