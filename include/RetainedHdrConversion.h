@@ -19,6 +19,29 @@ namespace load_progress
     public:
         using Dispatch = void (*)(ID3D11DeviceContext*, UINT, UINT, UINT);
 
+        struct DiagnosticState
+        {
+            const ID3D11Texture2D* capturedSource{};
+            HRESULT initialization = E_PENDING;
+            UINT constantBytes{};
+            bool compatible{};
+        };
+
+        // Descriptor inspection only; callers must gate this on debugging.loading.
+        // No buffer mapping, staging allocation or GPU synchronization is involved.
+        DiagnosticState InspectDiagnostics(ID3D11Buffer* constants) const noexcept
+        {
+            DiagnosticState result{ source.Get(), status };
+            if (constants) {
+                D3D11_BUFFER_DESC desc{};
+                constants->GetDesc(&desc);
+                result.constantBytes = desc.ByteWidth;
+                result.compatible = desc.ByteWidth == 48 &&
+                    (desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER) != 0;
+            }
+            return result;
+        }
+
         void Invalidate() noexcept
         {
             source.Reset();

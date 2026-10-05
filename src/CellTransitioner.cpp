@@ -53,6 +53,27 @@ namespace load_progress
         RetainedHdrConversion retainedHdrConversion;
         thread_local bool captureHdrConversionThisPresent{};
 
+        // Mutated only with debugging.loading enabled. Keep per-Present coverage
+        // separate from phase-change reports so a single missing pass is visible.
+        struct TransitionFrameDiagnostics
+        {
+            std::uint64_t frame{};
+            bool insidePresent{};
+            bool insideChain{};
+            bool owned{};
+            unsigned displays{};
+            unsigned snapshots{};
+            unsigned uiPasses{};
+            unsigned unpairedUi{};
+            unsigned compositions{};
+            unsigned sceneCopies{};
+            unsigned frozenCopies{};
+            unsigned sceneDispatches{};
+            unsigned displayCopies{};
+            std::uintptr_t displayTexture{};
+        };
+        thread_local TransitionFrameDiagnostics transitionFrameDiagnostics;
+
         enum class NativeLoadPath : std::uint8_t
         {
             none,
@@ -1636,8 +1657,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (!a_context || !compositeAfterPostProcessing) {
             return false;
         }
-        const bool traceCopies = Settings::GetSingleton().IsTransitionTextureCaptureEnabled() &&
-                                 diagnosticCaptureStage.load(std::memory_order_acquire) < 4;
+        const bool traceCopies = Settings::GetSingleton().IsLoadingLoggingEnabled() ||
+            (Settings::GetSingleton().IsTransitionTextureCaptureEnabled() &&
+                diagnosticCaptureStage.load(std::memory_order_acquire) < 4);
         // D3D11 can expose a different context vtable after initialization. Refresh
         // coverage on the rendering thread and preserve each table's original method.
         const auto vtable = *reinterpret_cast<const std::uintptr_t*>(a_context);
@@ -1807,21 +1829,33 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             }
         }
         TransitionUiOverlay::Binding overlayBinding;
+        TransitionUiOverlay::Binding diagnosticBinding;
+        const bool loadingDiagnostics = Settings::GetSingleton().IsLoadingLoggingEnabled();
+        static thread_local unsigned rollingDiagnosticReports{};
         const bool overlayOwnsImage = hooksEnabled.load(std::memory_order_acquire) && !IsVanilla() &&
             frozenFrameView && (epochActive.load(std::memory_order_acquire) ||
                 preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
                 postLoadFadePending.load(std::memory_order_acquire) ||
                 postLoadFadeStart.load(std::memory_order_acquire) > 0 ||
                 postLoadReleasePending.load(std::memory_order_acquire));
+        const bool inspectRollingDiagnostics = loadingDiagnostics && rollingDiagnosticReports < 8 &&
+            completedHdrSceneSincePresent.load(std::memory_order_acquire) &&
+            !frozenFrameLocked.load(std::memory_order_acquire);
         if (hooksEnabled.load(std::memory_order_acquire) &&
-            (overlayOwnsImage || captureHdrConversionThisPresent) && original) {
+            (overlayOwnsImage || captureHdrConversionThisPresent || inspectRollingDiagnostics) && original) {
             REX::W32::MEMORY_BASIC_INFORMATION callerMemory{};
             const auto csModule = GetModuleHandleW(L"CommunityShaders.dll");
             const auto* graphics = RE::BSGraphics::State::GetSingleton();
             if (csModule && graphics && REX::W32::VirtualQuery(_ReturnAddress(), &callerMemory, sizeof(callerMemory)) != 0 &&
                 callerMemory.allocationBase == csModule) {
-                overlayBinding = transitionUiOverlay.Inspect(reinterpret_cast<ID3D11DeviceContext*>(a_context),
+                auto binding = transitionUiOverlay.Inspect(reinterpret_cast<ID3D11DeviceContext*>(a_context),
                     graphics->screenWidth, graphics->screenHeight);
+                if (overlayOwnsImage || captureHdrConversionThisPresent) {
+                    overlayBinding = std::move(binding);
+                } else {
+                    // Observe early native conversion without changing its production eligibility.
+                    diagnosticBinding = std::move(binding);
+                }
             }
         }
         try {
@@ -1832,14 +1866,17 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             logger::warn("CS UI preparation failed; continuing native HDR dispatch");
         }
         HRESULT conversionResult = S_FALSE;
+        HRESULT conversionCaptureResult = S_FALSE;
+        bool holdingImage{};
         if (overlayBinding.pass == TransitionUiOverlay::Pass::display) {
             if (captureHdrConversionThisPresent && overlayBinding.scene.Get() ==
                 reinterpret_cast<ID3D11Texture2D*>(communityShadersHdrTarget)) {
                 conversionResult = retainedHdrConversion.Capture(reinterpret_cast<ID3D11DeviceContext*>(a_context),
                     overlayBinding.constants.Get(), overlayBinding.scene.Get());
+                if (loadingDiagnostics) conversionCaptureResult = conversionResult;
             }
             const auto fadeStart = postLoadFadeStart.load(std::memory_order_acquire);
-            const bool holdingImage = overlayOwnsImage && (preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
+            holdingImage = overlayOwnsImage && (preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
                 epochActive.load(std::memory_order_acquire) || postLoadFadePending.load(std::memory_order_acquire) ||
                 (fadeStart > 0 && CurrentTimeMilliseconds() - fadeStart <= holdAfterLoad.load(std::memory_order_acquire)));
             if (holdingImage) {
@@ -1888,6 +1925,57 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         phase, overlayBinding.desc.Width, overlayBinding.desc.Height);
                     lastReportedPhase = phase;
                 }
+            }
+        }
+        if (loadingDiagnostics) {
+            const auto& observed = overlayBinding.pass != TransitionUiOverlay::Pass::none || overlayBinding.texture ?
+                overlayBinding : diagnosticBinding;
+            const bool reportRolling = observed.pass == TransitionUiOverlay::Pass::display &&
+                !overlayOwnsImage && rollingDiagnosticReports < 8;
+            if (observed.pass == TransitionUiOverlay::Pass::display && (overlayOwnsImage || reportRolling)) {
+                const auto state = retainedHdrConversion.InspectDiagnostics(observed.constants.Get());
+                const auto phase = epochActive.load(std::memory_order_acquire) ? 2U :
+                    preLoadDoorTransitionActive.load(std::memory_order_acquire) ? 1U :
+                    overlayOwnsImage ? 3U : 0U;
+                logger::info("HDR frame trace: frame={} phase={} insidePresent={} insideChain={} captureEligible={} "
+                    "captureResult={:08X} hold={} applyResult={:08X} expectedScene={:X} nativeScene={:X} "
+                    "capturedScene={:X} cb={:X} cbBytes={} compatible={} init={:08X} output={:X} ui={:X} snapshot={:08X}",
+                    transitionFrameDiagnostics.frame, phase, transitionFrameDiagnostics.insidePresent,
+                    transitionFrameDiagnostics.insideChain, captureHdrConversionThisPresent,
+                    static_cast<std::uint32_t>(conversionCaptureResult), holdingImage,
+                    static_cast<std::uint32_t>(conversionResult),
+                    reinterpret_cast<std::uintptr_t>(communityShadersHdrTarget),
+                    reinterpret_cast<std::uintptr_t>(observed.scene.Get()),
+                    reinterpret_cast<std::uintptr_t>(state.capturedSource),
+                    reinterpret_cast<std::uintptr_t>(observed.constants.Get()), state.constantBytes, state.compatible,
+                    static_cast<std::uint32_t>(state.initialization), reinterpret_cast<std::uintptr_t>(observed.texture.Get()),
+                    reinterpret_cast<std::uintptr_t>(observed.ui.Get()), static_cast<std::uint32_t>(overlayResult));
+                if (reportRolling) ++rollingDiagnosticReports;
+                if (overlayOwnsImage) {
+                    ++transitionFrameDiagnostics.displays;
+                    transitionFrameDiagnostics.snapshots += overlayResult == S_OK;
+                    transitionFrameDiagnostics.displayTexture = reinterpret_cast<std::uintptr_t>(observed.texture.Get());
+                }
+            } else if (overlayOwnsImage && observed.pass == TransitionUiOverlay::Pass::ui) {
+                ++transitionFrameDiagnostics.uiPasses;
+                transitionFrameDiagnostics.compositions += overlayResult == S_OK;
+                logger::info("UI frame trace: frame={} insidePresent={} insideChain={} target={:X} cb={:X} compose={:08X}",
+                    transitionFrameDiagnostics.frame, transitionFrameDiagnostics.insidePresent,
+                    transitionFrameDiagnostics.insideChain, reinterpret_cast<std::uintptr_t>(observed.texture.Get()),
+                    reinterpret_cast<std::uintptr_t>(observed.constants.Get()), static_cast<std::uint32_t>(overlayResult));
+            } else if (overlayOwnsImage && observed.texture.Get() ==
+                reinterpret_cast<ID3D11Texture2D*>(communityShadersHdrTarget) && observed.texture) {
+                ++transitionFrameDiagnostics.sceneDispatches;
+                logger::info("scene compute write trace: frame={} insidePresent={} insideChain={} target={:X}",
+                    transitionFrameDiagnostics.frame, transitionFrameDiagnostics.insidePresent,
+                    transitionFrameDiagnostics.insideChain, reinterpret_cast<std::uintptr_t>(observed.texture.Get()));
+            } else if (overlayOwnsImage && observed.texture && observed.desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM &&
+                observed.texture.Get() == reinterpret_cast<ID3D11Texture2D*>(communityShadersUiTarget)) {
+                ++transitionFrameDiagnostics.unpairedUi;
+                logger::info("UI frame trace: frame={} insidePresent={} insideChain={} target={:X} cb={:X} unpaired=true",
+                    transitionFrameDiagnostics.frame, transitionFrameDiagnostics.insidePresent,
+                    transitionFrameDiagnostics.insideChain, reinterpret_cast<std::uintptr_t>(observed.texture.Get()),
+                    reinterpret_cast<std::uintptr_t>(observed.constants.Get()));
             }
         }
         if (FAILED(overlayResult)) {
@@ -1994,6 +2082,30 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (original) {
             original(a_context, a_destination, a_source);
         }
+        if (Settings::GetSingleton().IsLoadingLoggingEnabled() && hooksEnabled.load(std::memory_order_acquire) &&
+            frozenFrameView && (epochActive.load(std::memory_order_acquire) ||
+                preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
+                postLoadFadePending.load(std::memory_order_acquire) ||
+                postLoadFadeStart.load(std::memory_order_acquire) > 0 ||
+                postLoadReleasePending.load(std::memory_order_acquire))) {
+            const auto source = reinterpret_cast<std::uintptr_t>(a_source);
+            const auto destination = reinterpret_cast<std::uintptr_t>(a_destination);
+            const bool sceneWrite = communityShadersHdrTarget && destination ==
+                reinterpret_cast<std::uintptr_t>(communityShadersHdrTarget);
+            const bool frozenWrite = frozenFrame && destination == reinterpret_cast<std::uintptr_t>(frozenFrame);
+            const bool displayRead = transitionFrameDiagnostics.displayTexture &&
+                source == transitionFrameDiagnostics.displayTexture;
+            if (sceneWrite || frozenWrite || displayRead) {
+                transitionFrameDiagnostics.sceneCopies += sceneWrite;
+                transitionFrameDiagnostics.frozenCopies += frozenWrite;
+                transitionFrameDiagnostics.displayCopies += displayRead;
+                logger::info("scene copy trace: frame={} insidePresent={} insideChain={} source={:X} destination={:X} "
+                    "sceneWrite={} frozenWrite={} displayRead={} caller={:X}",
+                    transitionFrameDiagnostics.frame, transitionFrameDiagnostics.insidePresent,
+                    transitionFrameDiagnostics.insideChain, source, destination, sceneWrite, frozenWrite, displayRead,
+                    reinterpret_cast<std::uintptr_t>(_ReturnAddress()));
+            }
+        }
         if (!Settings::GetSingleton().IsTransitionTextureCaptureEnabled()) {
             return;
         }
@@ -2093,6 +2205,32 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         captureHdrConversionThisPresent = hooksEnabled.load(std::memory_order_acquire) && completedHdrScene &&
             worldRenderedSincePresent.load(std::memory_order_acquire) &&
             !frozenFrameLocked.load(std::memory_order_acquire);
+        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+            const auto nextFrame = transitionFrameDiagnostics.frame + 1;
+            const auto displayTexture = transitionFrameDiagnostics.displayTexture;
+            transitionFrameDiagnostics = {};
+            transitionFrameDiagnostics.frame = nextFrame;
+            transitionFrameDiagnostics.displayTexture = displayTexture;
+            transitionFrameDiagnostics.insidePresent = true;
+            transitionFrameDiagnostics.owned = hooksEnabled.load(std::memory_order_acquire) && !IsVanilla() &&
+                frozenFrameView && (epochActive.load(std::memory_order_acquire) ||
+                    preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
+                    postLoadFadePending.load(std::memory_order_acquire) ||
+                    postLoadFadeStart.load(std::memory_order_acquire) > 0 ||
+                    postLoadReleasePending.load(std::memory_order_acquire));
+            if (transitionFrameDiagnostics.owned || nextFrame <= 8) {
+                const auto state = retainedHdrConversion.InspectDiagnostics(nullptr);
+                logger::info("transition Present begin: frame={} owned={} epoch={} door={} pending={} fadeStart={} "
+                    "completedScene={} freshWorld={} locked={} captureEligible={} expectedScene={:X} frozen={:X} capturedScene={:X}",
+                    nextFrame, transitionFrameDiagnostics.owned, epochActive.load(std::memory_order_acquire),
+                    preLoadDoorTransitionActive.load(std::memory_order_acquire),
+                    postLoadFadePending.load(std::memory_order_acquire), postLoadFadeStart.load(std::memory_order_acquire),
+                    completedHdrScene, worldRenderedSincePresent.load(std::memory_order_acquire),
+                    frozenFrameLocked.load(std::memory_order_acquire), captureHdrConversionThisPresent,
+                    reinterpret_cast<std::uintptr_t>(communityShadersHdrTarget), reinterpret_cast<std::uintptr_t>(frozenFrame),
+                    reinterpret_cast<std::uintptr_t>(state.capturedSource));
+            }
+        }
 
         if (hooksEnabled.load(std::memory_order_acquire)) {
             try {
@@ -2388,7 +2526,24 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             auto* observerRenderer = RE::BSGraphics::Renderer::GetSingleton();
             EnsureCopyObserver(observerRenderer ? observerRenderer->GetRuntimeData().context : nullptr);
         }
+        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+            transitionFrameDiagnostics.insideChain = true;
+        }
         const auto result = originalPresent(a_swapChain, a_syncInterval, a_flags);
+        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+            if (transitionFrameDiagnostics.owned) {
+                logger::info("transition Present end: frame={} result={:08X} displays={} snapshots={} uiPasses={} "
+                    "compositions={} unpairedUi={} sceneCopies={} frozenCopies={} sceneDispatches={} displayReads={}",
+                    transitionFrameDiagnostics.frame, static_cast<std::uint32_t>(result),
+                    transitionFrameDiagnostics.displays, transitionFrameDiagnostics.snapshots,
+                    transitionFrameDiagnostics.uiPasses, transitionFrameDiagnostics.compositions,
+                    transitionFrameDiagnostics.unpairedUi, transitionFrameDiagnostics.sceneCopies,
+                    transitionFrameDiagnostics.frozenCopies, transitionFrameDiagnostics.sceneDispatches,
+                    transitionFrameDiagnostics.displayCopies);
+            }
+            transitionFrameDiagnostics.insideChain = false;
+            transitionFrameDiagnostics.insidePresent = false;
+        }
         captureHdrConversionThisPresent = false;
         transitionUiOverlay.BeginPresent();
         if (Settings::GetSingleton().IsTransitionTextureCaptureEnabled()) {
@@ -2717,6 +2872,15 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                              epochActive.load(std::memory_order_acquire);
                         const bool postLoadTransition = postLoadFadePending.load(std::memory_order_acquire) ||
                                                         postLoadFadeStart.load(std::memory_order_acquire) > 0;
+                        if (Settings::GetSingleton().IsLoadingLoggingEnabled() && (loading || postLoadTransition)) {
+                            logger::info("post-CS scene trace: frame={} insidePresent={} target={:X} expectedScene={:X} "
+                                "freshWorld={} locked={} matchesFrozen={} size={}x{} format={}",
+                                transitionFrameDiagnostics.frame, transitionFrameDiagnostics.insidePresent,
+                                reinterpret_cast<std::uintptr_t>(targetTexture.Get()),
+                                reinterpret_cast<std::uintptr_t>(communityShadersHdrTarget), freshWorld,
+                                frozenFrameLocked.load(std::memory_order_acquire), MatchesFrozenFrame(desc),
+                                desc.width, desc.height, std::to_underlying(desc.format));
+                        }
                         if (freshWorld && !loading && postLoadTransition && !MatchesFrozenFrame(desc)) {
                             if (mainMenuLoadActive.load(std::memory_order_acquire) &&
                                 transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&

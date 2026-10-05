@@ -11,8 +11,8 @@
 # Diagnostic features only. Leave these disabled for normal play.
 # TOML-enabled diagnostic messages use info level in Release and Debug builds.
 # This master switch also gates verbose queues, loaded entries and texture capture.
-# Per-load summaries and transition diagnostics can be useful when diagnosing
-# compatibility problems. Keep this off for normal play. Startup messages,
+# Includes per-load summaries and per-frame HDR/UI coverage during transitions.
+# This can write many lines during testing. Keep it off for normal play. Startup messages,
 # warnings, and errors are still written when it is false.
 loading = false
 
