@@ -2220,9 +2220,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     postLoadReleasePending.load(std::memory_order_acquire));
             if (transitionFrameDiagnostics.owned || nextFrame <= 8) {
                 const auto state = retainedHdrConversion.InspectDiagnostics(nullptr);
-                logger::info("transition Present begin: frame={} owned={} epoch={} door={} pending={} fadeStart={} "
+                logger::info("transition Present begin: frame={} thread={} flags={:08X} sync={} owned={} epoch={} door={} pending={} fadeStart={} "
                     "completedScene={} freshWorld={} locked={} captureEligible={} expectedScene={:X} frozen={:X} capturedScene={:X}",
-                    nextFrame, transitionFrameDiagnostics.owned, epochActive.load(std::memory_order_acquire),
+                    nextFrame, ::GetCurrentThreadId(), a_flags, a_syncInterval, transitionFrameDiagnostics.owned,
+                    epochActive.load(std::memory_order_acquire),
                     preLoadDoorTransitionActive.load(std::memory_order_acquire),
                     postLoadFadePending.load(std::memory_order_acquire), postLoadFadeStart.load(std::memory_order_acquire),
                     completedHdrScene, worldRenderedSincePresent.load(std::memory_order_acquire),
@@ -2532,9 +2533,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         const auto result = originalPresent(a_swapChain, a_syncInterval, a_flags);
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
             if (transitionFrameDiagnostics.owned) {
-                logger::info("transition Present end: frame={} result={:08X} displays={} snapshots={} uiPasses={} "
+                logger::info("transition Present end: frame={} thread={} flags={:08X} result={:08X} displays={} snapshots={} uiPasses={} "
                     "compositions={} unpairedUi={} sceneCopies={} frozenCopies={} sceneDispatches={} displayReads={}",
-                    transitionFrameDiagnostics.frame, static_cast<std::uint32_t>(result),
+                    transitionFrameDiagnostics.frame, ::GetCurrentThreadId(), a_flags, static_cast<std::uint32_t>(result),
                     transitionFrameDiagnostics.displays, transitionFrameDiagnostics.snapshots,
                     transitionFrameDiagnostics.uiPasses, transitionFrameDiagnostics.compositions,
                     transitionFrameDiagnostics.unpairedUi, transitionFrameDiagnostics.sceneCopies,

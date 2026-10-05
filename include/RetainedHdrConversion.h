@@ -7,7 +7,9 @@
 
 namespace load_progress
 {
-    // HDROutputCS's published PerFrame shader interface is three float4s.
+    // HDROutputCS's published PerFrame interface uses three float4s, but CS's
+    // ConstantBufferDesc rounds that 48-byte payload up to a 64-byte allocation.
+    // Copy the full allocation and preserve its fourth register as opaque data.
     // A retained scene must keep its scene encoding and AutoHDR treatment even
     // when Effects11 did not run on the current loading frame. UI/FG policy,
     // brightness and display settings continue to come from the native frame.
@@ -15,6 +17,7 @@ namespace load_progress
     {
         template <class T>
         using Ptr = Microsoft::WRL::ComPtr<T>;
+        static constexpr UINT nativeBufferBytes = 64;
 
     public:
         using Dispatch = void (*)(ID3D11DeviceContext*, UINT, UINT, UINT);
@@ -36,7 +39,7 @@ namespace load_progress
                 D3D11_BUFFER_DESC desc{};
                 constants->GetDesc(&desc);
                 result.constantBytes = desc.ByteWidth;
-                result.compatible = desc.ByteWidth == 48 &&
+                result.compatible = desc.ByteWidth == nativeBufferBytes &&
                     (desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER) != 0;
             }
             return result;
@@ -66,7 +69,7 @@ namespace load_progress
                 return status;
             }
             D3D11_BUFFER_DESC desc{};
-            desc.ByteWidth = 48;
+            desc.ByteWidth = nativeBufferBytes;
             desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
             status = device->CreateBuffer(&desc, nullptr, captured.GetAddressOf());
             if (FAILED(status)) return status;
@@ -79,12 +82,12 @@ namespace load_progress
             D3D11_UNORDERED_ACCESS_VIEW_DESC view{};
             view.Format = DXGI_FORMAT_R32_TYPELESS;
             view.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-            view.Buffer.NumElements = 12;
+            view.Buffer.NumElements = nativeBufferBytes / sizeof(UINT);
             view.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
             status = device->CreateUnorderedAccessView(scratch.Get(), &view, scratchView.GetAddressOf());
             if (FAILED(status)) return status;
             constexpr char code[] = R"(
-cbuffer Live : register(b0) { float4 live0; float4 live1; float4 live2; }
+cbuffer Live : register(b0) { float4 live0; float4 live1; float4 live2; uint4 livePadding; }
 cbuffer Photograph : register(b1) { float4 photo0; float4 photo1; float4 photo2; }
 RWByteAddressBuffer Output : register(u0);
 [numthreads(1, 1, 1)] void main(uint3 p : SV_DispatchThreadID)
@@ -92,6 +95,7 @@ RWByteAddressBuffer Output : register(u0);
     Output.Store4(0, asuint(live0));
     Output.Store4(16, asuint(float4(live1.x, photo1.y, live1.zw)));
     Output.Store4(32, asuint(float4(live2.x, photo2.y, live2.zw)));
+    Output.Store4(48, livePadding);
 }
 )";
             Ptr<ID3DBlob> compiled;
@@ -162,7 +166,7 @@ RWByteAddressBuffer Output : register(u0);
             if (!constants) return false;
             D3D11_BUFFER_DESC desc{};
             constants->GetDesc(&desc);
-            return desc.ByteWidth == 48 && (desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER) != 0;
+            return desc.ByteWidth == nativeBufferBytes && (desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER) != 0;
         }
 
         Ptr<ID3D11Device> device;
