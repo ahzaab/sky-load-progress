@@ -24,6 +24,7 @@ namespace load_progress
             Pass pass = Pass::none;
             Ptr<ID3D11UnorderedAccessView> output;
             Ptr<ID3D11Texture2D> texture;
+            Ptr<ID3D11Texture2D> scene;
             Ptr<ID3D11Texture2D> ui;
             Ptr<ID3D11Buffer> constants;
             D3D11_TEXTURE2D_DESC desc{};
@@ -126,13 +127,12 @@ void main(uint3 p : SV_DispatchThreadID)
                     return result;
                 }
             }
-            Ptr<ID3D11Texture2D> scene;
             inputs[0]->GetResource(resource.ReleaseAndGetAddressOf());
-            if (FAILED(resource.As(&scene))) {
+            if (FAILED(resource.As(&result.scene))) {
                 return result;
             }
             D3D11_TEXTURE2D_DESC sceneDesc{};
-            scene->GetDesc(&sceneDesc);
+            result.scene->GetDesc(&sceneDesc);
             if (sceneDesc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT ||
                 sceneDesc.Width != width || sceneDesc.Height != height) {
                 return result;

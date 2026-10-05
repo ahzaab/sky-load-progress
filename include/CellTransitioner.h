@@ -206,6 +206,8 @@ namespace load_progress
         inline static std::atomic_uint32_t                   postProcessingPassesSincePresent{};
         // Set after the normal world renderer returns; consumed at Present, not by UI-only passes.
         inline static std::atomic_bool                       worldRenderedSincePresent{};
+        // Qualifies the conversion constants captured alongside a completed HDR photograph.
+        inline static std::atomic_bool                       completedHdrSceneSincePresent{};
         inline static REX::W32::ID3D11Texture2D*             frozenFrame{};
         inline static REX::W32::ID3D11ShaderResourceView*    frozenFrameView{};
         inline static REX::W32::ID3D11Texture2D*             sceneFrame{};

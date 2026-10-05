@@ -33,6 +33,7 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         include/ProgressMeter.h
         include/Settings.h
         include/TransitionUiOverlay.h
+        include/RetainedHdrConversion.h
         src/CellTransitioner.cpp
         src/LoadingProgress.cpp
         src/PCH.cpp

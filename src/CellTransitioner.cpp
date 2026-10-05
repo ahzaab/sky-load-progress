@@ -7,6 +7,7 @@
 #include "LoadingProgress.h"
 #include "ScopedSpritePipelineState.h"
 #include "TransitionUiOverlay.h"
+#include "RetainedHdrConversion.h"
 #include "FrozenFrameShader.h"
 
 #include <hde64.h>
@@ -49,6 +50,8 @@ namespace load_progress
     namespace
     {
         TransitionUiOverlay transitionUiOverlay;
+        RetainedHdrConversion retainedHdrConversion;
+        thread_local bool captureHdrConversionThisPresent{};
 
         enum class NativeLoadPath : std::uint8_t
         {
@@ -1082,6 +1085,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     void CellTransitioner::ReleaseFrameResources()
     {
         transitionUiOverlay.ReleaseTextures();
+        retainedHdrConversion.Invalidate();
         if (communityShadersUiTargetView) {
             communityShadersUiTargetView->Release();
             communityShadersUiTargetView = nullptr;
@@ -1809,7 +1813,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 postLoadFadePending.load(std::memory_order_acquire) ||
                 postLoadFadeStart.load(std::memory_order_acquire) > 0 ||
                 postLoadReleasePending.load(std::memory_order_acquire));
-        if (overlayOwnsImage && original) {
+        if (hooksEnabled.load(std::memory_order_acquire) &&
+            (overlayOwnsImage || captureHdrConversionThisPresent) && original) {
             REX::W32::MEMORY_BASIC_INFORMATION callerMemory{};
             const auto csModule = GetModuleHandleW(L"CommunityShaders.dll");
             const auto* graphics = RE::BSGraphics::State::GetSingleton();
@@ -1826,13 +1831,52 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         } catch (...) {
             logger::warn("CS UI preparation failed; continuing native HDR dispatch");
         }
+        HRESULT conversionResult = S_FALSE;
+        if (overlayBinding.pass == TransitionUiOverlay::Pass::display) {
+            if (captureHdrConversionThisPresent && overlayBinding.scene.Get() ==
+                reinterpret_cast<ID3D11Texture2D*>(communityShadersHdrTarget)) {
+                conversionResult = retainedHdrConversion.Capture(reinterpret_cast<ID3D11DeviceContext*>(a_context),
+                    overlayBinding.constants.Get(), overlayBinding.scene.Get());
+            }
+            const auto fadeStart = postLoadFadeStart.load(std::memory_order_acquire);
+            const bool holdingImage = overlayOwnsImage && (preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
+                epochActive.load(std::memory_order_acquire) || postLoadFadePending.load(std::memory_order_acquire) ||
+                (fadeStart > 0 && CurrentTimeMilliseconds() - fadeStart <= holdAfterLoad.load(std::memory_order_acquire)));
+            if (holdingImage) {
+                conversionResult = retainedHdrConversion.Apply(reinterpret_cast<ID3D11DeviceContext*>(a_context),
+                    overlayBinding.constants.Get(), overlayBinding.scene.Get(),
+                    reinterpret_cast<RetainedHdrConversion::Dispatch>(original));
+                if (conversionResult == S_OK && Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                    static unsigned lastReportedPhase{};
+                    const unsigned phase = epochActive.load(std::memory_order_acquire) ? 2 :
+                        preLoadDoorTransitionActive.load(std::memory_order_acquire) ? 1 : 3;
+                    if (phase != lastReportedPhase) {
+                        logger::info("retained HDR scene conversion during image hold: phase={}; native UI/FG policy preserved", phase);
+                        lastReportedPhase = phase;
+                    }
+                }
+            }
+        }
         if (original) {
             original(a_context, a_x, a_y, a_z);
         }
-        HRESULT overlayResult = S_FALSE;
+        // Restore before the native UI pass observes the original constant-buffer identity.
         if (overlayBinding.pass == TransitionUiOverlay::Pass::display) {
+            auto* nativeConstants = overlayBinding.constants.Get();
+            reinterpret_cast<ID3D11DeviceContext*>(a_context)->CSSetConstantBuffers(0, 1, &nativeConstants);
+        }
+        if (FAILED(conversionResult)) {
+            static bool failureReported{};
+            if (!failureReported) {
+                logger::warn("retained HDR conversion unavailable ({:08X}); using native scene conversion",
+                    static_cast<std::uint32_t>(conversionResult));
+                failureReported = true;
+            }
+        }
+        HRESULT overlayResult = S_FALSE;
+        if (overlayOwnsImage && overlayBinding.pass == TransitionUiOverlay::Pass::display) {
             overlayResult = transitionUiOverlay.Capture(reinterpret_cast<ID3D11DeviceContext*>(a_context), overlayBinding);
-        } else if (overlayBinding.pass == TransitionUiOverlay::Pass::ui) {
+        } else if (overlayOwnsImage && overlayBinding.pass == TransitionUiOverlay::Pass::ui) {
             overlayResult = transitionUiOverlay.Compose(reinterpret_cast<ID3D11DeviceContext*>(a_context), overlayBinding,
                 reinterpret_cast<TransitionUiOverlay::Dispatch>(original));
             if (overlayResult == S_OK && Settings::GetSingleton().IsLoadingLoggingEnabled()) {
@@ -2045,6 +2089,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         transitionUiOverlay.BeginPresent();
+        const bool completedHdrScene = completedHdrSceneSincePresent.exchange(false, std::memory_order_acq_rel);
+        captureHdrConversionThisPresent = hooksEnabled.load(std::memory_order_acquire) && completedHdrScene &&
+            worldRenderedSincePresent.load(std::memory_order_acquire) &&
+            !frozenFrameLocked.load(std::memory_order_acquire);
 
         if (hooksEnabled.load(std::memory_order_acquire)) {
             try {
@@ -2341,6 +2389,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             EnsureCopyObserver(observerRenderer ? observerRenderer->GetRuntimeData().context : nullptr);
         }
         const auto result = originalPresent(a_swapChain, a_syncInterval, a_flags);
+        captureHdrConversionThisPresent = false;
         transitionUiOverlay.BeginPresent();
         if (Settings::GetSingleton().IsTransitionTextureCaptureEnabled()) {
             diagnosticOutputTarget.store(0, std::memory_order_release);
@@ -2663,6 +2712,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         }
 
                         const bool freshWorld = worldRenderedSincePresent.load(std::memory_order_acquire);
+                        completedHdrSceneSincePresent.store(freshWorld, std::memory_order_release);
                         const bool loading = preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
                                              epochActive.load(std::memory_order_acquire);
                         const bool postLoadTransition = postLoadFadePending.load(std::memory_order_acquire) ||
@@ -3337,6 +3387,11 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
                 // Compile outside the transition so the first covered frame does not hitch.
                 if (CellTransitioner::compositeAfterPostProcessing) {
+                    const auto conversionStatus = retainedHdrConversion.Initialize(reinterpret_cast<::ID3D11Device*>(device));
+                    if (FAILED(conversionStatus)) {
+                        logger::warn("could not initialize retained HDR conversion ({:08X}); using native scene conversion",
+                            static_cast<std::uint32_t>(conversionStatus));
+                    }
                     const auto overlayStatus = transitionUiOverlay.Initialize(reinterpret_cast<::ID3D11Device*>(device));
                     if (FAILED(overlayStatus)) {
                         logger::warn("could not initialize native transition UI overlay ({:08X}); retaining scene composition",
