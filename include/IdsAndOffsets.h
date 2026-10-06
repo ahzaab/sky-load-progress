@@ -63,15 +63,20 @@ namespace load_progress
         std::ptrdiff_t ae;
         std::ptrdiff_t aeGog;
 
+        /**
+         * @brief Returns the function offset for the current Skyrim runtime family.
+         */
         [[nodiscard]] std::ptrdiff_t Get() const noexcept
         {
             const auto version = REL::Module::get().version();
             if (version < Runtimes::SkyrimAEStart) {
                 return se;
             }
+
             if (version >= Runtimes::Skyrim17Start) {
                 return aeGog;
             }
+
             return ae;
         }
     };

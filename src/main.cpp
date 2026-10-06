@@ -35,6 +35,7 @@ namespace
         if (freopen_s(&stream, "CONOUT$", "w", stdout) != 0) {
             return false;
         }
+
         SetConsoleTitleW(L"Skyrim Load Progress - Debug");
         return true;
     }
@@ -48,6 +49,7 @@ namespace
         if (!path) {
             return false;
         }
+
         *path /= "SkyrimLoadProgress.log";
         auto file = std::make_shared<spdlog::sinks::basic_file_sink_mt>(path->string(), true);
 
@@ -96,16 +98,25 @@ namespace
         // SKSE emits this before the new game is loaded, which gives the compositor time to select its
         // one-time black loading presentation. MQ101's later FadeOutGame call remains authoritative.
         if (a_message->type == SKSE::MessagingInterface::kNewGame) {
+
             load_progress::CellTransitioner::BeginNewGameTransition();
             return;
         }
 
+        // Skyrim emits this before a saved game is loaded, which allows the compositor to cancel any
+        // new game transition that might have been initiated.
         if (a_message->type == SKSE::MessagingInterface::kPreLoadGame) {
+
             load_progress::CellTransitioner::CancelNewGameTransition();
             return;
         }
 
+        // Skyrim emits this after all game data has been loaded, which is the appropriate time to install
+        // hooks for load progress tracking.
+        // Install engine hooks only after game data is ready. Plugin entry initializes SKSE
+        // and registers this listener earlier, when the required engine objects may not exist.
         if (a_message->type == SKSE::MessagingInterface::kDataLoaded) {
+
             try {
                 load_progress::Settings::GetSingleton().Load();
                 load_progress::transitions::InstallHooks();
@@ -121,7 +132,12 @@ namespace
     }
 }
 
-// Initializes SKSE, logging, and the data-loaded listener.
+/**
+ * @brief Initializes SKSE, logging, and the plugin message listener.
+ *
+ * @param a_skse SKSE load interface provided by the plugin host.
+ * @return True when initialization and listener registration succeed; false on failure.
+ */
 SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
     try {
@@ -139,11 +155,15 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 
         // Reserve enough room for the six queue-counter stubs, three optional loaded-entry stubs,
         // and every transition branch island.
+        // The SKSE trampoline is executable storage for generated hook stubs and nearby
+        // branch relays. Reserving it before installing hooks gives those patches a shared
+        // allocation; it is unrelated to the GPU resources used by transition rendering.
         constexpr std::size_t trampolineSize = 1 << 14;
         SKSE::AllocTrampoline(trampolineSize);
 
         auto* messaging = SKSE::GetMessagingInterface();
         if (!messaging || !messaging->RegisterListener("SKSE", MessageHandler)) {
+
             logger::critical("could not register SKSE message listener");
             return false;
         }

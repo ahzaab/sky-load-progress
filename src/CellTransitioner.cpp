@@ -2,6 +2,7 @@
 // Copyright (c) 2026 ahzaab
 
 #include "PCH.h"
+#include "Atomic.h"
 #include "CellTransitioner.h"
 #include "IdsAndOffsets.h"
 #include "LoadingProgress.h"
@@ -106,12 +107,15 @@ namespace load_progress
             if (callbackVtable == normalDoor.address() || callbackVtable == autoDoor.address()) {
                 return NativeLoadPath::door;
             }
+
             if (callbackVtable == fastTravel.address()) {
                 return NativeLoadPath::fastTravel;
             }
+
             if (callbackVtable == loadSave.address()) {
                 return NativeLoadPath::loadSave;
             }
+
             return NativeLoadPath::none;
         }
 
@@ -121,76 +125,87 @@ namespace load_progress
             if (a_path == NativeLoadPath::fastTravel) {
                 return settings.UseTransitionsForFastTravel();
             }
+
             if (a_path == NativeLoadPath::loadSave) {
                 return settings.UseTransitionsForSaveLoads();
             }
+
             return true;
         }
 
     }
 
-    // Returns the singleton that owns all cell-transition state.
+    /**
+     * @brief Returns the singleton that owns all cell-transition state.
+     */
     CellTransitioner& CellTransitioner::GetSingleton()
     {
         static CellTransitioner singleton;
         return singleton;
     }
 
-    // Disables transition hooks and restores presentation mutated while the compositor owned the screen.
+    /**
+     * @brief Disables transition hooks and restores presentation mutated while the compositor owned the
+     * screen.
+     */
     void CellTransitioner::DisableHooks(std::string_view a_reason) noexcept
     {
         // Coordinate with LoadingProgress so one fail-closed path cannot leave the other armed.
         DisablePlugin(a_reason);
     }
 
-    // Clears compositor atomics and restores Fader/HUD. Invoked only from DisablePlugin.
+    /**
+     * @brief Clears compositor atomics and restores Fader/HUD. Invoked only from DisablePlugin.
+     */
     void CellTransitioner::ResetOnDisable() noexcept
     {
-        hooksEnabled.store(false, std::memory_order_release);
-        epochActive.store(false, std::memory_order_release);
-        frozenFrameLocked.store(false, std::memory_order_release);
-        preLoadDoorCaptureLocked.store(false, std::memory_order_release);
-        preLoadDoorTransitionActive.store(false, std::memory_order_release);
-        preLoadOwnedFader.store(false, std::memory_order_release);
-        vanillaLoadPending.store(false, std::memory_order_release);
-        fastTravelBlackPending.store(false, std::memory_order_release);
-        fastTravelBlackActive.store(false, std::memory_order_release);
-        loadOwnedFader.store(false, std::memory_order_release);
-        loadFaderCloseQueued.store(false, std::memory_order_release);
-        sleepFadeRequestDeadline.store(0, std::memory_order_release);
-        sleepFaderActive.store(false, std::memory_order_release);
-        awaitingControlRestore.store(false, std::memory_order_release);
-        newGameTransitionActive.store(false, std::memory_order_release);
-        newGameFadeRequestSeen.store(false, std::memory_order_release);
-        mainMenuLoadPending.store(false, std::memory_order_release);
-        mainMenuLoadActive.store(false, std::memory_order_release);
-        postLoadFadePending.store(false, std::memory_order_release);
-        postLoadReleasePending.store(false, std::memory_order_release);
-        postLoadRecoveryDeadline.store(0, std::memory_order_release);
-        postLoadFadeStart.store(0, std::memory_order_release);
-        worldRenderedSincePresent.store(false, std::memory_order_release);
-        dominantColorPending.store(false, std::memory_order_release);
-        loadingTransitionStart.store(0, std::memory_order_release);
-        loadingMenuFadeElapsedMs.store(0, std::memory_order_release);
+        Atomic::set(hooksEnabled, false);
+        Atomic::set(epochActive, false);
+        Atomic::set(frozenFrameLocked, false);
+        Atomic::set(preLoadDoorCaptureLocked, false);
+        Atomic::set(preLoadDoorTransitionActive, false);
+        Atomic::set(preLoadOwnedFader, false);
+        Atomic::set(vanillaLoadPending, false);
+        Atomic::set(fastTravelBlackPending, false);
+        Atomic::set(fastTravelBlackActive, false);
+        Atomic::set(loadOwnedFader, false);
+        Atomic::set(loadFaderCloseQueued, false);
+        Atomic::set(sleepFadeRequestDeadline, 0);
+        Atomic::set(sleepFaderActive, false);
+        Atomic::set(awaitingControlRestore, false);
+        Atomic::set(newGameTransitionActive, false);
+        Atomic::set(newGameFadeRequestSeen, false);
+        Atomic::set(mainMenuLoadPending, false);
+        Atomic::set(mainMenuLoadActive, false);
+        Atomic::set(postLoadFadePending, false);
+        Atomic::set(postLoadReleasePending, false);
+        Atomic::set(postLoadRecoveryDeadline, 0);
+        Atomic::set(postLoadFadeStart, 0);
+        Atomic::set(worldRenderedSincePresent, false);
+        Atomic::set(dominantColorPending, false);
+        Atomic::set(loadingTransitionStart, 0);
+        Atomic::set(loadingMenuFadeElapsedMs, 0);
 
         // FaderMenuAdvanceMovie returns early once hooksEnabled is false, so any movie we hid for
         // load ownership must be restored here. Every UI/D3D pointer is treated as possibly null.
         try {
-            if (faderPresentationSuppressed.load(std::memory_order_acquire)) {
+            if (Atomic::get(faderPresentationSuppressed)) {
+
                 auto* ui = RE::UI::GetSingleton();
                 if (!ui) {
-                    faderPresentationSuppressed.store(false, std::memory_order_release);
+                    Atomic::set(faderPresentationSuppressed, false);
                 } else {
+
                     auto menu = ui->GetMenu(RE::FaderMenu::MENU_NAME);
                     if (menu && menu->uiMovie) {
                         RestoreFaderPresentation(menu.get());
                     } else {
-                        faderPresentationSuppressed.store(false, std::memory_order_release);
+                        Atomic::set(faderPresentationSuppressed, false);
                     }
                 }
             }
         } catch (...) {
-            faderPresentationSuppressed.store(false, std::memory_order_release);
+            Atomic::set(faderPresentationSuppressed, false);
             REX::W32::OutputDebugStringA(
                 "Skyrim Load Progress: could not restore FaderMenu presentation during disable\n");
         }
@@ -198,7 +213,9 @@ namespace load_progress
         RestoreHUDVisibility();
     }
 
-    // Checks that a callback target is committed executable memory.
+    /**
+     * @brief Checks that a callback target is committed executable memory.
+     */
     bool CellTransitioner::IsExecutableAddress(std::uintptr_t a_address) noexcept
     {
         if (!a_address) {
@@ -228,11 +245,16 @@ namespace load_progress
     // fragile. This resolver instead searches the caller for the call whose decoded destination is the
     // expected Address Library function.
     //
-    // RtlLookupFunctionEntry reads the executable's x64 unwind table. Its begin/end RVAs provide the
-    // exact compiled-function boundary, keeping the search out of adjacent functions and padding. The
-    // resolver fails closed if the boundary is invalid, the call is absent, or more than one matching
-    // call exists. A future runtime therefore disables plugin initialization instead of patching an
-    // uncertain instruction.
+    /**
+     * @brief Finds the unique relative call from the relocated caller to the callee, rejecting ambiguous
+     * or invalid sites.
+     *
+     * @details RtlLookupFunctionEntry reads the executable's x64 unwind table. Its begin/end RVAs provide the
+     * exact compiled-function boundary, keeping the search out of adjacent functions and
+     * padding. The resolver fails closed if the boundary is invalid, the call is absent, or
+     * more than one matching call exists. A future runtime therefore disables plugin
+     * initialization instead of patching an uncertain instruction.
+     */
     std::uintptr_t CellTransitioner::FindUniqueRelativeCall(
         REL::RelocationID a_callerID,
         REL::RelocationID a_calleeID,
@@ -280,11 +302,13 @@ namespace load_progress
             // end of the five-byte instruction. Copy the unaligned displacement instead of casting an
             // int32_t pointer, then reproduce the CPU's destination calculation.
             if (decoded.opcode == 0xE8 && length == relativeCallSize) {
+
                 std::int32_t displacement = 0;
                 std::memcpy(&displacement,
                     reinterpret_cast<const void*>(instruction + 1), sizeof(displacement));
                 const auto target = instruction + relativeCallSize + displacement;
                 if (target == callee) {
+
                     // Multiple calls to the same helper would make the intended semantic position
                     // ambiguous. Refuse the hook instead of guessing which occurrence is correct.
                     if (match != 0) {
@@ -309,7 +333,9 @@ namespace load_progress
         return match;
     }
 
-    // Resolves a render call while preserving an existing hook installed by another plugin.
+    /**
+     * @brief Resolves a render call while preserving an existing hook installed by another plugin.
+     */
     std::pair<std::uintptr_t, std::uintptr_t> CellTransitioner::FindChainableRelativeCall(
         REL::RelocationID a_callerID,
         REL::RelocationID a_calleeID,
@@ -356,50 +382,54 @@ namespace load_progress
         }
     }
 
-    // Locks the last world frame and configures the selected loading presentation.
+    /**
+     * @brief Locks the last world frame and configures the selected loading presentation.
+     */
     CellTransitioner::Presentation CellTransitioner::PrepareForLoad(RE::IMenu* a_menu)
     {
         const auto selected = ChoosePresentation();
-        presentation.store(selected, std::memory_order_release);
-        postLoadReleasePending.store(false, std::memory_order_release);
+        Atomic::set(presentation, selected);
+        Atomic::set(postLoadReleasePending, false);
 
         if (selected == Presentation::vanilla) {
-            frozenFrameLocked.store(false, std::memory_order_release);
-            preLoadDoorCaptureLocked.store(false, std::memory_order_release);
-            preLoadDoorTransitionActive.store(false, std::memory_order_release);
-            postLoadFadeStart.store(0, std::memory_order_release);
-            postLoadFadePending.store(false, std::memory_order_release);
-            postLoadRecoveryDeadline.store(0, std::memory_order_release);
-            loadingTransitionStart.store(0, std::memory_order_release);
-            loadingMenuFadeElapsedMs.store(0, std::memory_order_release);
-            dominantColorPending.store(false, std::memory_order_release);
+
+            Atomic::set(frozenFrameLocked, false);
+            Atomic::set(preLoadDoorCaptureLocked, false);
+            Atomic::set(preLoadDoorTransitionActive, false);
+            Atomic::set(postLoadFadeStart, 0);
+            Atomic::set(postLoadFadePending, false);
+            Atomic::set(postLoadRecoveryDeadline, 0);
+            Atomic::set(loadingTransitionStart, 0);
+            Atomic::set(loadingMenuFadeElapsedMs, 0);
+            Atomic::set(dominantColorPending, false);
             RestoreHUDVisibility();
             return selected;
         }
 
         // This is the capture gate. Once closed, the rolling texture remains the last pre-load world frame.
-        frozenFrameLocked.store(true, std::memory_order_release);
-        preLoadDoorCaptureLocked.store(false, std::memory_order_release);
-        postLoadFadeStart.store(0, std::memory_order_release);
-        postLoadFadePending.store(false, std::memory_order_release);
-        postLoadRecoveryDeadline.store(0, std::memory_order_release);
-        postProcessingPassesSincePresent.store(0, std::memory_order_release);
-        worldRenderedSincePresent.store(false, std::memory_order_release);
+        Atomic::set(frozenFrameLocked, true);
+        Atomic::set(preLoadDoorCaptureLocked, false);
+        Atomic::set(postLoadFadeStart, 0);
+        Atomic::set(postLoadFadePending, false);
+        Atomic::set(postLoadRecoveryDeadline, 0);
+        Atomic::set(postProcessingPassesSincePresent, 0);
+        Atomic::set(worldRenderedSincePresent, false);
         // Menu construction and renderer suspension can consume the configured fade before the first
         // loading frame is presented. Start the visible color fade from Present instead.
-        loadingTransitionStart.store(0, std::memory_order_release);
+        Atomic::set(loadingTransitionStart, 0);
         // Scaleform fade elapsed is advanced only from LoadingMenu::AdvanceMovie.
-        loadingMenuFadeElapsedMs.store(0, std::memory_order_release);
+        Atomic::set(loadingMenuFadeElapsedMs, 0);
 
         const bool selectCapturedColor =
-            transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&
-            colorSource.load(std::memory_order_acquire) == Settings::ColorSource::dominant;
+            Atomic::get(transitionType) == Settings::TransitionType::color &&
+            Atomic::get(colorSource) == Settings::ColorSource::dominant;
 
-        dominantColorPending.store(selectCapturedColor, std::memory_order_release);
+        Atomic::set(dominantColorPending, selectCapturedColor);
 
         HideHUDForLoad();
 
         if (!a_menu) {
+
             logger::warn("could not update LoadingMenu flags because the menu pointer was null");
             return selected;
         }
@@ -415,142 +445,157 @@ namespace load_progress
         return selected;
     }
 
-    // Marks the transition as actively loading.
+    /**
+     * @brief Marks the transition as actively loading.
+     */
     void CellTransitioner::BeginLoad()
     {
-        if (presentation.load(std::memory_order_acquire) == Presentation::vanilla) {
-            preLoadOwnedFader.store(false, std::memory_order_release);
-            fastTravelBlackPending.store(false, std::memory_order_release);
-            fastTravelBlackActive.store(false, std::memory_order_release);
-            loadOwnedFader.store(false, std::memory_order_release);
-            loadFaderCloseQueued.store(false, std::memory_order_release);
-            epochActive.store(false, std::memory_order_release);
-            preLoadDoorTransitionActive.store(false, std::memory_order_release);
+        if (Atomic::get(presentation) == Presentation::vanilla) {
+
+            Atomic::set(preLoadOwnedFader, false);
+            Atomic::set(fastTravelBlackPending, false);
+            Atomic::set(fastTravelBlackActive, false);
+            Atomic::set(loadOwnedFader, false);
+            Atomic::set(loadFaderCloseQueued, false);
+            Atomic::set(epochActive, false);
+            Atomic::set(preLoadDoorTransitionActive, false);
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                renderObservationState.store(0, std::memory_order_release);
+                Atomic::set(renderObservationState, 0);
             }
+
             return;
         }
 
         auto* ui = RE::UI::GetSingleton();
-        faderPresentAtLoadStart.store(
-            ui && ui->IsMenuOpen(RE::FaderMenu::MENU_NAME), std::memory_order_release);
+        Atomic::set(faderPresentAtLoadStart, ui && ui->IsMenuOpen(RE::FaderMenu::MENU_NAME));
         // The native fader that initiates a door, fast-travel, or save load is submitted before
         // LoadingMenu opens. Preserve the callback-derived ownership across that boundary.
-        loadOwnedFader.store(
-            preLoadOwnedFader.exchange(false, std::memory_order_acq_rel),
-            std::memory_order_release);
-        loadFaderCloseQueued.store(false, std::memory_order_release);
+        Atomic::set(loadOwnedFader, Atomic::get_and_clear(preLoadOwnedFader));
+        Atomic::set(loadFaderCloseQueued, false);
 
         // Present uses this gate to choose an active loading presentation instead of the post-load fade.
-        epochActive.store(true, std::memory_order_release);
-        preLoadDoorTransitionActive.store(false, std::memory_order_release);
-        fastTravelBlackPending.store(false, std::memory_order_release);
+        Atomic::set(epochActive, true);
+        Atomic::set(preLoadDoorTransitionActive, false);
+        Atomic::set(fastTravelBlackPending, false);
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            renderObservationState.store(1, std::memory_order_release);
+            Atomic::set(renderObservationState, 1);
         }
     }
 
-    // Starts the retained-frame fade and post-load control diagnostics.
+    /**
+     * @brief Starts the retained-frame fade and post-load control diagnostics.
+     */
     void CellTransitioner::EndLoad()
     {
         // MQ101 owns its first-gameplay fade. Its native FaderMenu remains below TitleSequenceMenu, so release
         // our loading cover without adding the ordinary post-load compositor above those title cards.
-        const bool newGame = newGameTransitionActive.load(std::memory_order_acquire);
-        const bool vanilla = presentation.load(std::memory_order_acquire) == Presentation::vanilla;
-        const bool nativeFastTravelFade = fastTravelBlackActive.load(std::memory_order_acquire);
+        const bool newGame = Atomic::get(newGameTransitionActive);
+        const bool vanilla = Atomic::get(presentation) == Presentation::vanilla;
+        const bool nativeFastTravelFade = Atomic::get(fastTravelBlackActive);
 
         // Opening the post-load gate lets Present composite over the destination cell as soon as it returns.
-        epochActive.store(false, std::memory_order_release);
-        preLoadDoorTransitionActive.store(false, std::memory_order_release);
-        postLoadReleasePending.store(false, std::memory_order_release);
+        Atomic::set(epochActive, false);
+        Atomic::set(preLoadDoorTransitionActive, false);
+        Atomic::set(postLoadReleasePending, false);
         const auto now = CurrentTimeMilliseconds();
         const bool deferToPostProcessing =
             !newGame && !vanilla && !nativeFastTravelFade && compositeAfterPostProcessing;
-        postLoadFadeStart.store(
-            newGame || vanilla || nativeFastTravelFade || deferToPostProcessing ? 0 : now,
-            std::memory_order_release);
-        postLoadFadePending.store(deferToPostProcessing, std::memory_order_release);
+        Atomic::set(postLoadFadeStart, newGame || vanilla || nativeFastTravelFade || deferToPostProcessing ? 0 : now);
+        Atomic::set(postLoadFadePending, deferToPostProcessing);
         // A visual transition must never retain ownership indefinitely if its source/target is absent.
         // Expiry releases the overlay; it does not start blending against an unready destination.
-        postLoadRecoveryDeadline.store(
+        Atomic::set(postLoadRecoveryDeadline,
             newGame || vanilla || nativeFastTravelFade ? 0 :
-                now + holdAfterLoad.load(std::memory_order_acquire) +
-                    fadeOutDuration.load(std::memory_order_acquire) + 5000,
-            std::memory_order_release);
-        postProcessingPassesSincePresent.store(0, std::memory_order_release);
-        worldRenderedSincePresent.store(false, std::memory_order_release);
+                now + Atomic::get(holdAfterLoad) +
+                    Atomic::get(fadeOutDuration) + 5000);
+        Atomic::set(postProcessingPassesSincePresent, 0);
+        Atomic::set(worldRenderedSincePresent, false);
         // 1.0.7 keeps the retained frame up after LoadingMenu closes (especially the CS post-process
         // fade). Restoring HUD here paints health/stamina over that cover even when
         // show_hud_during_loading is false. Hold the hide until the presentation finishes.
         const bool holdHUDForTransition =
             !newGame && !vanilla && !nativeFastTravelFade &&
-            (mainMenuLoadActive.load(std::memory_order_acquire) ||
+            (Atomic::get(mainMenuLoadActive) ||
                 !Settings::GetSingleton().ShowHUDDuringLoading());
         if (holdHUDForTransition) {
             HideHUDForLoad();
         } else {
             RestoreHUDVisibility();
         }
+
         if (newGame || vanilla || nativeFastTravelFade) {
-            frozenFrameLocked.store(false, std::memory_order_release);
+            Atomic::set(frozenFrameLocked, false);
         }
+
         if (newGame && Settings::GetSingleton().IsLoadingLoggingEnabled()) {
             logger::info("handed the new-game transition from the loading compositor to Skyrim's FaderMenu");
         }
 
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            const auto renderState = renderObservationState.load(std::memory_order_acquire);
+
+            const auto renderState = Atomic::get(renderObservationState);
             if (renderState == 1 || renderState == 2) {
-                renderObservationState.store(3, std::memory_order_release);
+                Atomic::set(renderObservationState, 3);
             }
 
             {
                 std::scoped_lock lock(controlStateLock);
                 lastControlState.reset();
             }
-            awaitingControlRestore.store(true, std::memory_order_release);
+            Atomic::set(awaitingControlRestore, true);
             ObserveControlRestore();
         }
+
         if (!newGame && !vanilla) {
             CloseResidualLoadingMenus(nativeFastTravelFade);
         }
     }
 
-    // Arms the one-time black loading presentation before SKSE lets Skyrim create the new game.
+    /**
+     * @brief Arms the one-time black loading presentation before SKSE lets Skyrim create the new game.
+     */
     void CellTransitioner::BeginNewGameTransition()
     {
-        newGameFadeRequestSeen.store(false, std::memory_order_release);
-        newGameTransitionActive.store(true, std::memory_order_release);
+        Atomic::set(newGameFadeRequestSeen, false);
+        Atomic::set(newGameTransitionActive, true);
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
             logger::info("armed the new-game black/title-sequence transition");
         }
     }
 
-    // Clears a pending intro when a save load supersedes it or transition hooks fail.
+    /**
+     * @brief Clears a pending intro when a save load supersedes it or transition hooks fail.
+     */
     void CellTransitioner::CancelNewGameTransition()
     {
-        newGameTransitionActive.store(false, std::memory_order_release);
-        newGameFadeRequestSeen.store(false, std::memory_order_release);
+        Atomic::set(newGameTransitionActive, false);
+        Atomic::set(newGameFadeRequestSeen, false);
     }
 
-    // Remembers the Main Menu as the origin after its movie closes and before LoadingMenu opens.
+    /**
+     * @brief Remembers the Main Menu as the origin after its movie closes and before LoadingMenu opens.
+     */
     void CellTransitioner::ObserveMainMenuOpening()
     {
-        mainMenuLoadPending.store(true, std::memory_order_release);
+        Atomic::set(mainMenuLoadPending, true);
     }
 
-    // Reapplies the load-scoped HUD policy when Skyrim creates HUDMenu during a Main Menu save load.
+    /**
+     * @brief Reapplies the load-scoped HUD policy when Skyrim creates HUDMenu during a Main Menu save
+     * load.
+     */
     void CellTransitioner::ObserveHUDMenuOpening()
     {
-        if (frozenFrameLocked.load(std::memory_order_acquire) &&
-            postLoadFadeStart.load(std::memory_order_acquire) <= 0) {
+        if (Atomic::get(frozenFrameLocked) &&
+            Atomic::get(postLoadFadeStart) <= 0) {
             HideHUDForLoad();
         }
     }
 
-    // Hides only the top-level HUD movie, preserving all child alpha and animation state.
-    // Main Menu save loads never expose gameplay HUD; the setting applies only to in-game transitions.
+    /**
+     * @brief Hides only the top-level HUD movie, preserving all child alpha and animation state. Main Menu
+     * save loads never expose gameplay HUD; the setting applies only to in-game transitions.
+     */
     void CellTransitioner::HideHUDForLoad()
     {
         if (IsVanilla()) {
@@ -558,7 +603,7 @@ namespace load_progress
         }
 
         const bool showHUD = Settings::GetSingleton().ShowHUDDuringLoading();
-        const bool forceHidden = mainMenuLoadActive.load(std::memory_order_acquire);
+        const bool forceHidden = Atomic::get(mainMenuLoadActive);
         if (showHUD && !forceHidden) {
             return;
         }
@@ -569,7 +614,8 @@ namespace load_progress
             return;
         }
 
-        if (!hudVisibilityOwned.load(std::memory_order_acquire)) {
+        if (!Atomic::get(hudVisibilityOwned)) {
+
             // Dialogue and other modal menus can temporarily hide HUDMenu before initiating a load.
             // Do not claim an already-hidden movie: Skyrim may restore it while LoadingMenu is open,
             // and writing the stale hidden state back at EndLoad would leave the gameplay HUD disabled.
@@ -577,7 +623,7 @@ namespace load_progress
                 return;
             }
 
-            hudVisibilityOwned.store(true, std::memory_order_release);
+            Atomic::set(hudVisibilityOwned, true);
 
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("claimed visible HUDMenu for loading");
@@ -587,35 +633,39 @@ namespace load_progress
         movie->SetVisible(false);
     }
 
-    // Reapplies or releases the HUD policy. Safe to schedule from Present; the movie is touched
-    // only inside the UI task.
+    /**
+     * @brief Reapplies or releases the HUD policy. Safe to schedule from Present; the movie is touched
+     * only inside the UI task.
+     */
     void CellTransitioner::QueueHUDVisibilitySync() noexcept
     {
-        if (hudSyncQueued.exchange(true, std::memory_order_acq_rel)) {
+        if (Atomic::get_and_set(hudSyncQueued, true)) {
             return;
         }
 
         auto* tasks = SKSE::GetTaskInterface();
         if (!tasks) {
-            hudSyncQueued.store(false, std::memory_order_release);
+
+            Atomic::set(hudSyncQueued, false);
             return;
         }
 
         tasks->AddUITask([]() {
-            hudSyncQueued.store(false, std::memory_order_release);
-            if (!hooksEnabled.load(std::memory_order_acquire)) {
+            Atomic::set(hudSyncQueued, false);
+            if (!Atomic::get(hooksEnabled)) {
+
                 RestoreHUDVisibility();
                 return;
             }
 
             const bool transitionVisible =
-                epochActive.load(std::memory_order_acquire) ||
-                preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
-                postLoadFadePending.load(std::memory_order_acquire) ||
-                postLoadFadeStart.load(std::memory_order_acquire) > 0;
+                Atomic::get(epochActive) ||
+                Atomic::get(preLoadDoorTransitionActive) ||
+                Atomic::get(postLoadFadePending) ||
+                Atomic::get(postLoadFadeStart) > 0;
             const bool hide =
                 transitionVisible && !IsVanilla() &&
-                (mainMenuLoadActive.load(std::memory_order_acquire) ||
+                (Atomic::get(mainMenuLoadActive) ||
                     !Settings::GetSingleton().ShowHUDDuringLoading());
             if (hide) {
                 HideHUDForLoad();
@@ -625,10 +675,12 @@ namespace load_progress
         });
     }
 
-    // Restores exactly the movie visibility observed before this transition claimed it.
+    /**
+     * @brief Restores exactly the movie visibility observed before this transition claimed it.
+     */
     void CellTransitioner::RestoreHUDVisibility() noexcept
     {
-        if (!hudVisibilityOwned.exchange(false, std::memory_order_acq_rel)) {
+        if (!Atomic::get_and_clear(hudVisibilityOwned)) {
             return;
         }
 
@@ -636,6 +688,7 @@ namespace load_progress
             auto* ui = RE::UI::GetSingleton();
             auto  movie = ui ? ui->GetMovieView(RE::HUDMenu::MENU_NAME) : nullptr;
             if (movie) {
+
                 // Ownership is acquired only when this class changes the movie from visible to hidden.
                 movie->SetVisible(true);
                 if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
@@ -648,27 +701,38 @@ namespace load_progress
         }
     }
 
-    // Returns whether the current transition suppresses LoadingMenu Scaleform.
+    /**
+     * @brief Returns whether the current transition suppresses LoadingMenu Scaleform.
+     */
     bool CellTransitioner::IsSeamless()
     {
-        return presentation.load(std::memory_order_acquire) == Presentation::seamless;
+        return Atomic::get(presentation) == Presentation::seamless;
     }
 
-    // Returns whether Skyrim owns the current load presentation without compositor or menu suppression.
+    /**
+     * @brief Returns whether Skyrim owns the current load presentation without compositor or menu
+     * suppression.
+     */
     bool CellTransitioner::IsVanilla()
     {
-        return presentation.load(std::memory_order_acquire) == Presentation::vanilla;
+        return Atomic::get(presentation) == Presentation::vanilla;
     }
 
-    // Computes LoadingMenu Scaleform opacity for custom cold presentations.
-    // Queued exterior destinations are intentionally treated as cold; fading the menu in gives the
-    // retained frame time to cover that conservative classification (see GetQueuedDestinationCell).
-    // Elapsed time advances only from LoadingMenu::AdvanceMovie intervals so Scaleform writes stay on
-    // the UI/movie path rather than ProcessMessage, Present, or an external timer.
+    /**
+     * @brief Advances the custom LoadingMenu fade using movie intervals and returns its alpha in the range
+     * [0, 1].
+     *
+     * @details Computes LoadingMenu Scaleform opacity for custom cold presentations.
+     * Queued exterior destinations are intentionally treated as cold; fading the menu in gives
+     * the retained frame time to cover that conservative classification (see
+     * GetQueuedDestinationCell). Elapsed time advances only from LoadingMenu::AdvanceMovie
+     * intervals so Scaleform writes stay on the UI/movie path rather than ProcessMessage,
+     * Present, or an external timer.
+     */
     float CellTransitioner::LoadingMenuFadeAlpha(float a_interval) noexcept
     {
-        if (!hooksEnabled.load(std::memory_order_acquire) ||
-            presentation.load(std::memory_order_acquire) != Presentation::loadingMenu) {
+        if (!Atomic::get(hooksEnabled) ||
+            Atomic::get(presentation) != Presentation::loadingMenu) {
             return 1.0F;
         }
 
@@ -679,11 +743,12 @@ namespace load_progress
 
         const auto step = std::max<std::int64_t>(
             0, static_cast<std::int64_t>(std::llround(std::max(0.0F, a_interval) * 1000.0F)));
-        auto elapsed = loadingMenuFadeElapsedMs.load(std::memory_order_relaxed);
+        auto elapsed = Atomic::get(loadingMenuFadeElapsedMs, std::memory_order_relaxed);
         while (true) {
             const auto next = std::min<std::int64_t>(duration, elapsed + step);
-            if (loadingMenuFadeElapsedMs.compare_exchange_weak(
+            if (Atomic::compare_and_set_weak(loadingMenuFadeElapsedMs,
                     elapsed, next, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+
                 elapsed = next;
                 break;
             }
@@ -692,7 +757,10 @@ namespace load_progress
         return std::clamp(static_cast<float>(elapsed) / static_cast<float>(duration), 0.0F, 1.0F);
     }
 
-    // Writes Menu_mc alpha from LoadingMenu::AdvanceMovie so tips and the progress meter fade together.
+    /**
+     * @brief Writes Menu_mc alpha from LoadingMenu::AdvanceMovie so tips and the progress meter fade
+     * together.
+     */
     void CellTransitioner::ApplyLoadingMenuFade(RE::IMenu* a_menu, float a_interval) noexcept
     {
         if (!a_menu || !a_menu->uiMovie) {
@@ -703,6 +771,7 @@ namespace load_progress
             const auto alphaPercent = static_cast<double>(LoadingMenuFadeAlpha(a_interval)) * 100.0;
             RE::GFxValue menu;
             if (a_menu->uiMovie->GetVariable(&menu, "_root.Menu_mc") && menu.IsObject()) {
+
                 RE::GFxValue alpha;
                 alpha.SetNumber(alphaPercent);
                 menu.SetMember("_alpha", alpha);
@@ -712,6 +781,7 @@ namespace load_progress
             // Replacement LoadingMenu movies may omit Menu_mc; fade the root clip instead.
             RE::GFxValue root;
             if (a_menu->uiMovie->GetVariable(&root, "_root") && root.IsObject()) {
+
                 RE::GFxValue alpha;
                 alpha.SetNumber(alphaPercent);
                 root.SetMember("_alpha", alpha);
@@ -722,7 +792,9 @@ namespace load_progress
         }
     }
 
-    // Compiles one of the small pixel shaders used by the loading compositor.
+    /**
+     * @brief Compiles one of the small pixel shaders used by the loading compositor.
+     */
     bool CellTransitioner::CreatePixelShader(
         ::ID3D11Device*       a_device,
         std::string_view      a_source,
@@ -737,9 +809,13 @@ namespace load_progress
         REX::W32::ID3DBlob* bytecode = nullptr;
         REX::W32::ID3DBlob* errors = nullptr;
 
+        // The shader is HLSL source until compilation produces bytecode in an ID3DBlob.
+        // main is the entry point; ps_5_0 selects a Shader Model 5 pixel shader. Compilation
+        // can return a diagnostic blob even on success, so release both blobs on every path.
         const auto result = REX::W32::D3DCompile(a_source.data(), a_source.size(), a_name.data(), nullptr, nullptr,
             "main", "ps_5_0", 0, 0, &bytecode, &errors);
         if (FAILED(result) || !bytecode) {
+
             const auto* errorText = errors && errors->GetBufferPointer() ?
                                         static_cast<const char*>(errors->GetBufferPointer()) :
                                         "unknown error";
@@ -764,10 +840,13 @@ namespace load_progress
         const auto* buffer = bytecode->GetBufferPointer();
         const auto  bufferSize = bytecode->GetBufferSize();
         if (!buffer || bufferSize == 0) {
+
             bytecode->Release();
             return false;
         }
 
+        // Shader objects belong to the D3D device and retain their compiled program. The
+        // temporary bytecode blob can be released after CreatePixelShader returns.
         const auto createResult =
             a_device->CreatePixelShader(buffer, bufferSize, nullptr, a_shader);
         bytecode->Release();
@@ -775,9 +854,15 @@ namespace load_progress
         return SUCCEEDED(createResult);
     }
 
-    // Creates the shader that recovers alpha from Skyrim's opaque UI target.
+    /**
+     * @brief Creates the shader that recovers alpha from Skyrim's opaque UI target.
+     */
     bool CellTransitioner::CreateLoadingOverlayShader(::ID3D11Device* a_device)
     {
+        // Vanilla UI is copied from an opaque target, so its alpha cannot isolate the widgets.
+        // This shader estimates coverage from RGB intensity: smoothstep fades nearly black
+        // background pixels to transparent. It is a heuristic, so dark widget details can also
+        // lose coverage. The separate native HDR UI path does not need this reconstruction.
         constexpr std::string_view source = R"(
 Texture2D overlayTexture : register(t0);
 SamplerState overlaySampler : register(s0);
@@ -794,9 +879,14 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         return CreatePixelShader(a_device, source, "loading overlay", &loadingOverlayShader);
     }
 
-    // Creates the shader used to blend to the captured frame's dominant color.
+    /**
+     * @brief Creates the shader used to blend to the captured frame's dominant color.
+     */
     bool CellTransitioner::CreateSolidColorShader(::ID3D11Device* a_device)
     {
+        // SpriteBatch supplies a quad and COLOR0 even when no texture sampling is needed.
+        // Returning that color fills the screen; the blend state decides whether its alpha
+        // replaces the destination or crossfades over the previously drawn image.
         constexpr std::string_view source = R"(
 float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Target
 {
@@ -807,7 +897,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         return CreatePixelShader(a_device, source, "solid color", &solidColorShader);
     }
 
-    // Returns a monotonic timestamp for transition timing.
+    /**
+     * @brief Returns a monotonic timestamp for transition timing.
+     */
     std::int64_t CellTransitioner::CurrentTimeMilliseconds()
     {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -815,27 +907,38 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             .count();
     }
 
-    // SleepWaitMenu opens before Skyrim queues the fade that blacks out the time-advance sequence.
-    // Keep its persistent FaderMenu movie visible even if an earlier load left that movie hidden.
+    /**
+     * @brief Preserves the native sleep/wait fader when SleepWaitMenu opens.
+     *
+     * @details SleepWaitMenu opens before Skyrim queues the fade that blacks out the time-advance sequence.
+     * Keep its persistent FaderMenu movie visible even if an earlier load left that movie
+     * hidden.
+     */
     void CellTransitioner::ObserveSleepWaitMenuOpening()
     {
-        sleepFaderActive.store(true, std::memory_order_release);
+        Atomic::set(sleepFaderActive, true);
     }
 
-    // Marks the callback-free black recovery fade queued while SleepWaitMenu handles its close
-    // message. The deadline is a fallback if the menu-open notification was not observed.
+    /**
+     * @brief Marks the callback-free black recovery fade queued while SleepWaitMenu handles its close
+     * message. The deadline is a fallback if the menu-open notification was not observed.
+     */
     void CellTransitioner::ObserveSleepWaitMenuClosing()
     {
         constexpr std::int64_t sleepFadeRequestWindow = 5000;
         const auto             deadline = CurrentTimeMilliseconds() + sleepFadeRequestWindow;
-        sleepFadeRequestDeadline.store(deadline, std::memory_order_release);
+        Atomic::set(sleepFadeRequestDeadline, deadline);
     }
 
-    // Creates the inexpensive single-pass blur used on the frozen world frame.
+    /**
+     * @brief Creates the inexpensive single-pass blur used on the frozen world frame.
+     */
     bool CellTransitioner::CreateFrozenFrameBlurShader(::ID3D11Device* a_device)
     {
         std::string source = FrozenFramePixelShader;
 
+        // Substitute the configured blur radius into HLSL before compiling. A zero radius
+        // keeps the same shader interface and opacity handling while disabling spatial blur.
         constexpr std::string_view token = "$BLUR_AMOUNT$";
         const auto& settings = Settings::GetSingleton();
         const auto amount = fmt::format("{:.3f}", settings.IsBlurEnabled() ? settings.GetBlurAmount() : 0.0F);
@@ -846,44 +949,58 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         return CreatePixelShader(a_device, source, "frozen frame blur", &frozenFrameBlurShader);
     }
 
-    // Resolves only queued destinations that the active TES grid can safely expose.
+    /**
+     * @brief Resolves only queued destinations that the active TES grid can safely expose.
+     */
     RE::TESObjectCELL* CellTransitioner::GetQueuedDestinationCell()
     {
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player) {
+
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("queued destination resolver: player is unavailable; using a cold presentation");
             }
+
             return nullptr;
         }
 
         // Snapshot the record so every decision in this pass uses the same destination fields.
         const auto target = player->GetPlayerRuntimeData().queuedTargetLoc;
         if (!target.isValid) {
+
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("queued destination resolver: no valid queued target; using a cold presentation");
             }
+
             return nullptr;
         }
+
         if (target.interior) {
+
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("queued destination resolver: using the published interior cell");
             }
+
             return target.interior;
         }
+
         if (!target.world) {
+
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("queued destination resolver: exterior target has no world; using a cold presentation");
             }
+
             return nullptr;
         }
 
         auto* tes = RE::TES::GetSingleton();
         if (!tes || tes->GetRuntimeData2().worldSpace != target.world) {
+
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info(
                     "queued destination resolver: target world is not active; using a cold presentation");
             }
+
             return nullptr;
         }
 
@@ -891,67 +1008,77 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             logger::info(
                 "queued destination resolver: exterior target in active world; using a cold presentation");
         }
+
         return nullptr;
     }
 
-    // Chooses the warm or cold presentation before the Loading Menu opens.
+    /**
+     * @brief Chooses the warm or cold presentation before the Loading Menu opens.
+     */
     CellTransitioner::Presentation CellTransitioner::ChoosePresentation()
     {
-        mainMenuLoadActive.store(false, std::memory_order_release);
-        fastTravelBlackActive.store(false, std::memory_order_release);
+        Atomic::set(mainMenuLoadActive, false);
+        Atomic::set(fastTravelBlackActive, false);
 
-        if (newGameTransitionActive.load(std::memory_order_acquire)) {
-            mainMenuLoadPending.store(false, std::memory_order_release);
-            vanillaLoadPending.store(false, std::memory_order_release);
+        if (Atomic::get(newGameTransitionActive)) {
+
+            Atomic::set(mainMenuLoadPending, false);
+            Atomic::set(vanillaLoadPending, false);
             // The loading compositor supplies opaque black beneath LoadingMenu. Once loading ends, Skyrim's
             // native FaderMenu takes over so TitleSequenceMenu retains its higher UI depth.
-            transitionType.store(Settings::TransitionType::color, std::memory_order_release);
-            colorSource.store(Settings::ColorSource::fixed, std::memory_order_release);
-            transitionColor.store(0x000000, std::memory_order_release);
-            fadeInDuration.store(0, std::memory_order_release);
-            holdAfterLoad.store(0, std::memory_order_release);
-            fadeOutDuration.store(0, std::memory_order_release);
+            Atomic::set(transitionType, Settings::TransitionType::color);
+            Atomic::set(colorSource, Settings::ColorSource::fixed);
+            Atomic::set(transitionColor, 0x000000);
+            Atomic::set(fadeInDuration, 0);
+            Atomic::set(holdAfterLoad, 0);
+            Atomic::set(fadeOutDuration, 0);
 
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("selected the opaque new-game loading presentation");
             }
+
             return Presentation::loadingMenu;
         }
 
         auto*      ui = RE::UI::GetSingleton();
-        const bool fromMainMenu = mainMenuLoadPending.exchange(false, std::memory_order_acq_rel) ||
+        const bool fromMainMenu = Atomic::get_and_clear(mainMenuLoadPending) ||
                                   (ui && ui->IsMenuOpen(RE::MainMenu::MENU_NAME));
         const bool pendingVanilla =
-            vanillaLoadPending.exchange(false, std::memory_order_acq_rel);
+            Atomic::get_and_clear(vanillaLoadPending);
         const bool useVanilla = pendingVanilla ||
                                 (fromMainMenu &&
                                     !Settings::GetSingleton().UseTransitionsForSaveLoads());
         if (useVanilla) {
-            fastTravelBlackPending.store(false, std::memory_order_release);
+
+            Atomic::set(fastTravelBlackPending, false);
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("selected Skyrim's vanilla loading presentation");
             }
+
             return Presentation::vanilla;
         }
-        if (fastTravelBlackPending.load(std::memory_order_acquire)) {
+
+        if (Atomic::get(fastTravelBlackPending)) {
+
             // MapMenu's 3D scene can be only partially rendered when its fast-travel fade closes it.
             // Continue the native black fade with an opaque compositor cover instead of exposing or
             // blurring that last captured map frame. Do not inspect the queued destination's worldspace
             // cell map here: the engine may still be materializing that map for scripted fast travel.
             const auto& cold = Settings::GetSingleton().GetColdTransition({});
-            transitionType.store(Settings::TransitionType::color, std::memory_order_release);
-            colorSource.store(Settings::ColorSource::fixed, std::memory_order_release);
-            transitionColor.store(0x000000, std::memory_order_release);
-            fadeInDuration.store(0, std::memory_order_release);
-            holdAfterLoad.store(cold.holdAfterLoad.count(), std::memory_order_release);
-            fadeOutDuration.store(cold.fadeOut.count(), std::memory_order_release);
-            fastTravelBlackActive.store(true, std::memory_order_release);
+            Atomic::set(transitionType, Settings::TransitionType::color);
+            Atomic::set(colorSource, Settings::ColorSource::fixed);
+            Atomic::set(transitionColor, 0x000000);
+            Atomic::set(fadeInDuration, 0);
+            Atomic::set(holdAfterLoad, cold.holdAfterLoad.count());
+            Atomic::set(fadeOutDuration, cold.fadeOut.count());
+            Atomic::set(fastTravelBlackActive, true);
 
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info(
                     "selected fixed black fast-travel presentation: hold={}ms fadeOut={}ms",
-                    holdAfterLoad.load(), fadeOutDuration.load());
+                    Atomic::get(holdAfterLoad, std::memory_order_seq_cst), Atomic::get(fadeOutDuration, std::memory_order_seq_cst));
             }
+
             // FaderMenu is the only black layer guaranteed to survive the upscaler's final
             // presentation path. Keep LoadingMenu active for its UI, suppress MistMenu separately,
             // and let Skyrim own the native black hold and destination fade-in.
@@ -964,65 +1091,73 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         const std::string_view editorID = editorIDText ? editorIDText : "";
 
         if (fromMainMenu) {
+
             // A menu movie is not a useful retained gameplay frame. Keep Skyrim's native fade to black,
             // then hold that same fixed black beneath LoadingMenu and fade it into the loaded save.
             const auto& cold = Settings::GetSingleton().GetColdTransition(editorID);
-            mainMenuLoadActive.store(true, std::memory_order_release);
-            transitionType.store(Settings::TransitionType::color, std::memory_order_release);
-            colorSource.store(Settings::ColorSource::fixed, std::memory_order_release);
-            transitionColor.store(0x000000, std::memory_order_release);
-            fadeInDuration.store(0, std::memory_order_release);
-            holdAfterLoad.store(cold.holdAfterLoad.count(), std::memory_order_release);
-            fadeOutDuration.store(cold.fadeOut.count(), std::memory_order_release);
+            Atomic::set(mainMenuLoadActive, true);
+            Atomic::set(transitionType, Settings::TransitionType::color);
+            Atomic::set(colorSource, Settings::ColorSource::fixed);
+            Atomic::set(transitionColor, 0x000000);
+            Atomic::set(fadeInDuration, 0);
+            Atomic::set(holdAfterLoad, cold.holdAfterLoad.count());
+            Atomic::set(fadeOutDuration, cold.fadeOut.count());
 
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info(
                     "selected fixed black main-menu loading presentation: cell={:08X} editorID='{}' hold={}ms fadeOut={}ms",
-                    cell ? cell->GetFormID() : 0, editorID, holdAfterLoad.load(), fadeOutDuration.load());
+                    cell ? cell->GetFormID() : 0, editorID, Atomic::get(holdAfterLoad, std::memory_order_seq_cst), Atomic::get(fadeOutDuration, std::memory_order_seq_cst));
             }
+
             return Presentation::loadingMenu;
         }
 
         const auto selected = resident ? Presentation::seamless : Presentation::loadingMenu;
         if (selected == Presentation::seamless) {
+
             const auto& warm = Settings::GetSingleton().GetWarmTransition();
-            transitionType.store(Settings::TransitionType::blur, std::memory_order_release);
-            colorSource.store(Settings::ColorSource::fixed, std::memory_order_release);
-            transitionColor.store(0xFFFFFF, std::memory_order_release);
-            fadeInDuration.store(0, std::memory_order_release);
-            holdAfterLoad.store(warm.holdAfterLoad.count(), std::memory_order_release);
-            fadeOutDuration.store(warm.fadeOut.count(), std::memory_order_release);
+            Atomic::set(transitionType, Settings::TransitionType::blur);
+            Atomic::set(colorSource, Settings::ColorSource::fixed);
+            Atomic::set(transitionColor, 0xFFFFFF);
+            Atomic::set(fadeInDuration, 0);
+            Atomic::set(holdAfterLoad, warm.holdAfterLoad.count());
+            Atomic::set(fadeOutDuration, warm.fadeOut.count());
         } else {
+
             const auto& cold = Settings::GetSingleton().GetColdTransition(editorID);
-            transitionType.store(cold.type, std::memory_order_release);
-            colorSource.store(cold.colorSource, std::memory_order_release);
-            transitionColor.store(cold.color, std::memory_order_release);
-            fadeInDuration.store(cold.fadeIn.count(), std::memory_order_release);
-            holdAfterLoad.store(cold.holdAfterLoad.count(), std::memory_order_release);
-            fadeOutDuration.store(cold.fadeOut.count(), std::memory_order_release);
+            Atomic::set(transitionType, cold.type);
+            Atomic::set(colorSource, cold.colorSource);
+            Atomic::set(transitionColor, cold.color);
+            Atomic::set(fadeInDuration, cold.fadeIn.count());
+            Atomic::set(holdAfterLoad, cold.holdAfterLoad.count());
+            Atomic::set(fadeOutDuration, cold.fadeOut.count());
         }
 
-        const auto type = transitionType.load(std::memory_order_acquire);
+        const auto type = Atomic::get(transitionType);
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+
             logger::info(
                 "loading destination: cell={:08X} editorID='{}' loadedData={} attached={} presentation={} transition={} "
                 "fadeIn={}ms hold={}ms fadeOut={}ms",
                 cell ? cell->GetFormID() : 0, editorID, resident,
                 cell && cell->IsAttached(), selected == Presentation::seamless ? "seamless" : "loading-menu",
-                type == Settings::TransitionType::color ? "color" : "blur", fadeInDuration.load(),
-                holdAfterLoad.load(), fadeOutDuration.load());
+                type == Settings::TransitionType::color ? "color" : "blur", Atomic::get(fadeInDuration, std::memory_order_seq_cst),
+                Atomic::get(holdAfterLoad, std::memory_order_seq_cst), Atomic::get(fadeOutDuration, std::memory_order_seq_cst));
 
             if (type == Settings::TransitionType::color) {
                 logger::info("color transition: source={} fallback=#{:06X}",
-                    colorSource.load(std::memory_order_acquire) == Settings::ColorSource::dominant ?
+                    Atomic::get(colorSource) == Settings::ColorSource::dominant ?
                         "dominant" :
                         "fixed",
-                    transitionColor.load(std::memory_order_acquire));
+                    Atomic::get(transitionColor));
             }
         }
+
         return selected;
     }
-    // Collects the input and menu state used by post-load diagnostics.
+    /**
+     * @brief Collects the input and menu state used by post-load diagnostics.
+     */
     std::optional<CellTransitioner::ControlState> CellTransitioner::GetControlState()
     {
         auto* controls = RE::ControlMap::GetSingleton();
@@ -1043,11 +1178,13 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             playerControls->data.remapMode, ui->numPausesGame };
     }
 
-    // Logs each post-load input-state change until gameplay controls return.
+    /**
+     * @brief Logs each post-load input-state change until gameplay controls return.
+     */
     void CellTransitioner::ObserveControlRestore()
     {
         if (!Settings::GetSingleton().IsLoadingLoggingEnabled() ||
-            !awaitingControlRestore.load(std::memory_order_acquire)) {
+            !Atomic::get(awaitingControlRestore)) {
             return;
         }
 
@@ -1060,6 +1197,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             std::scoped_lock lock(controlStateLock);
             if (Settings::GetSingleton().IsLoadingLoggingEnabled() &&
                 (!lastControlState || *state != *lastControlState)) {
+
                 logger::info(
                     "post-load controls: enabled={:08X} stored={:08X} blockInput={} paused={} fader={} mist={} movementHandler={} lookHandler={} ignoreKeyboardMouse={} modal={} remapMode={} pauseCount={}",
                     state->enabled, state->stored, state->blockInput, state->paused, state->faderOpen,
@@ -1079,14 +1217,18 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                    state->movementHandlerEnabled && state->lookHandlerEnabled &&
                                    !state->ignoreKeyboardMouse && !state->modal && !state->remapMode;
         if (gameplayReady) {
+
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("post-load gameplay controls are ready");
             }
-            awaitingControlRestore.store(false, std::memory_order_release);
+
+            Atomic::set(awaitingControlRestore, false);
         }
     }
 
-    // Checks whether the cached textures still match the active render target.
+    /**
+     * @brief Checks whether the cached textures still match the active render target.
+     */
     bool CellTransitioner::MatchesFrozenFrame(const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
     {
         return frozenFrame && frozenFrameDesc.width == a_desc.width && frozenFrameDesc.height == a_desc.height &&
@@ -1094,7 +1236,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                frozenFrameDesc.sampleDesc.quality == a_desc.sampleDesc.quality;
     }
 
-    // Checks whether the pre-upscale scene capture matches Community Shaders' active scene target.
+    /**
+     * @brief Checks whether the pre-upscale scene capture matches Community Shaders' active scene target.
+     */
     bool CellTransitioner::MatchesSceneFrame(const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
     {
         return sceneFrame && sceneFrameDesc.width == a_desc.width && sceneFrameDesc.height == a_desc.height &&
@@ -1102,71 +1246,93 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                sceneFrameDesc.sampleDesc.quality == a_desc.sampleDesc.quality;
     }
 
-    // Releases textures that must be recreated when the render target changes.
+    /**
+     * @brief Releases textures that must be recreated when the render target changes.
+     */
     void CellTransitioner::ReleaseFrameResources()
     {
         transitionUiOverlay.ReleaseTextures();
         retainedHdrConversion.Invalidate();
         if (communityShadersUiTargetView) {
+
             communityShadersUiTargetView->Release();
             communityShadersUiTargetView = nullptr;
         }
+
         if (communityShadersUiTarget) {
+
             communityShadersUiTarget->Release();
             communityShadersUiTarget = nullptr;
         }
+
         if (communityShadersHdrTargetView) {
+
             communityShadersHdrTargetView->Release();
             communityShadersHdrTargetView = nullptr;
         }
 
         if (communityShadersHdrTarget) {
+
             communityShadersHdrTarget->Release();
             communityShadersHdrTarget = nullptr;
         }
+
         communityShadersHdrTargetDesc = {};
 
         if (frozenFrame) {
+
             frozenFrame->Release();
             frozenFrame = nullptr;
         }
 
         if (frozenFrameView) {
+
             frozenFrameView->Release();
             frozenFrameView = nullptr;
         }
 
         if (dominantColorReadback) {
+
             dominantColorReadback->Release();
             dominantColorReadback = nullptr;
         }
 
         if (loadingOverlayView) {
+
             loadingOverlayView->Release();
             loadingOverlayView = nullptr;
         }
 
         if (loadingOverlay) {
+
             loadingOverlay->Release();
             loadingOverlay = nullptr;
         }
     }
 
-    // Releases the separate rolling scene capture used while the CS upscaler owns presentation.
+    /**
+     * @brief Releases the separate rolling scene capture used while the CS upscaler owns presentation.
+     */
     void CellTransitioner::ReleaseSceneFrameResources()
     {
         if (sceneFrameView) {
+
             sceneFrameView->Release();
             sceneFrameView = nullptr;
         }
+
         if (sceneFrame) {
+
             sceneFrame->Release();
             sceneFrame = nullptr;
         }
+
         sceneFrameDesc = {};
     }
 
-    // Allocates the frozen frame, CPU readback, and Scaleform overlay textures.
+    /**
+     * @brief Allocates the frozen frame, CPU readback, and Scaleform overlay textures.
+     */
     bool CellTransitioner::PrepareFrozenFrame(
         REX::W32::ID3D11Device* a_device, const REX::W32::D3D11_TEXTURE2D_DESC& a_backBufferDesc)
     {
@@ -1178,8 +1344,13 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return true;
         }
 
+        // Texture storage cannot be resized in place. A changed descriptor invalidates the
+        // retained texture and all views/copies associated with that capture.
         ReleaseFrameResources();
 
+        // A texture is image storage; a shader-resource view describes how a shader reads it.
+        // Keep size/format/sample layout compatible with the source for GPU copies, then
+        // replace swap-chain-specific usage flags with those required by our private resources.
         auto desc = a_backBufferDesc;
 
         // The GPU copy is sampled while Skyrim's normal world rendering is paused.
@@ -1189,12 +1360,16 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         desc.miscFlags = 0;
         if (a_device->CreateTexture2D(&desc, nullptr, &frozenFrame) < 0 ||
             a_device->CreateShaderResourceView(frozenFrame, nullptr, &frozenFrameView) < 0) {
+
             logger::error("could not allocate the frozen loading frame texture");
             ReleaseFrameResources();
             return false;
         }
 
         // A staging copy lets us choose a transition color without mapping a GPU texture.
+        // STAGING resources support CPU access but cannot be bound as shader inputs/outputs.
+        // This separate allocation is used only for color selection; the displayed photograph
+        // remains in the GPU-only texture and is never sampled from staging storage.
         desc.usage = REX::W32::D3D11_USAGE_STAGING;
         desc.bindFlags = 0;
         desc.cpuAccessFlags = REX::W32::D3D11_CPU_ACCESS_READ;
@@ -1208,6 +1383,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         desc.cpuAccessFlags = 0;
         if (a_device->CreateTexture2D(&desc, nullptr, &loadingOverlay) < 0 ||
             a_device->CreateShaderResourceView(loadingOverlay, nullptr, &loadingOverlayView) < 0) {
+
             logger::error("could not allocate the loading-menu overlay texture");
             ReleaseFrameResources();
             return false;
@@ -1221,13 +1397,16 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         return true;
     }
 
-    // Allocates a shader-readable copy in the native scene format consumed by the CS Present proxy.
+    /**
+     * @brief Allocates a shader-readable copy in the native scene format consumed by the CS Present proxy.
+     */
     bool CellTransitioner::PrepareSceneFrame(
         REX::W32::ID3D11Device* a_device, const REX::W32::D3D11_TEXTURE2D_DESC& a_sceneDesc)
     {
         if (!a_device || a_sceneDesc.width == 0 || a_sceneDesc.height == 0) {
             return false;
         }
+
         if (MatchesSceneFrame(a_sceneDesc)) {
             return true;
         }
@@ -1240,6 +1419,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         desc.miscFlags = 0;
         if (a_device->CreateTexture2D(&desc, nullptr, &sceneFrame) < 0 ||
             a_device->CreateShaderResourceView(sceneFrame, nullptr, &sceneFrameView) < 0) {
+
             logger::error("could not allocate the pre-upscale scene capture texture");
             ReleaseSceneFrameResources();
             return false;
@@ -1249,21 +1429,27 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         return true;
     }
 
-    // Returns true when the captured texture uses a supported BGRA byte layout.
+    /**
+     * @brief Returns true when the captured texture uses a supported BGRA byte layout.
+     */
     bool CellTransitioner::IsBgraFormat(REX::W32::DXGI_FORMAT a_format)
     {
         return a_format == REX::W32::DXGI_FORMAT_B8G8R8A8_UNORM ||
                a_format == REX::W32::DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
     }
 
-    // Returns true when the captured texture uses a supported RGBA byte layout.
+    /**
+     * @brief Returns true when the captured texture uses a supported RGBA byte layout.
+     */
     bool CellTransitioner::IsRgbaFormat(REX::W32::DXGI_FORMAT a_format)
     {
         return a_format == REX::W32::DXGI_FORMAT_R8G8B8A8_UNORM ||
                a_format == REX::W32::DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     }
 
-    // Builds a reduced RGB histogram from every fourth captured pixel.
+    /**
+     * @brief Builds a reduced RGB histogram from every fourth captured pixel.
+     */
     std::array<std::uint32_t, 4096> CellTransitioner::BuildColorHistogram(
         const REX::W32::D3D11_MAPPED_SUBRESOURCE& a_mapped,
         REX::W32::DXGI_FORMAT                     a_format)
@@ -1282,6 +1468,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return histogram;
         }
 
+        // RowPitch is the actual byte stride between rows and may include driver padding.
+        // Never assume width * bytesPerPixel is the stride. Sampling every fourth row and
+        // column reduces this one-time palette calculation to roughly 1/16 of the pixels.
         constexpr std::uint32_t sampleStep = 4;
 
         for (std::uint32_t y = 0; y < frozenFrameDesc.height; y += sampleStep) {
@@ -1295,6 +1484,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 std::uint32_t alpha = 0;
 
                 if (hdr) {
+
                     std::array<DirectX::PackedVector::HALF, 4> channels{};
                     std::memcpy(channels.data(), pixel, sizeof(channels));
                     const auto quantize = [](DirectX::PackedVector::HALF a_channel) {
@@ -1308,6 +1498,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     // HDR scene alpha is not transparency; select the RGB photograph's palette.
                     alpha = 255;
                 } else if (rgb10) {
+
                     std::uint32_t packed = 0;
                     std::memcpy(&packed, pixel, sizeof(packed));
 
@@ -1319,6 +1510,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     blue = (((packed >> 20U) & 0x3FFU) * 255U + 511U) / 1023U;
                     alpha = ((packed >> 30U) & 0x03U) * 85U;
                 } else {
+
                     red = bgra ? pixel[2] : pixel[0];
                     green = pixel[1];
                     blue = bgra ? pixel[0] : pixel[2];
@@ -1330,6 +1522,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     continue;
                 }
 
+                // Keep the upper four bits of each RGB channel: 16 * 16 * 16 = 4096 palette bins.
+                // Grouping nearby colors avoids treating small lighting/noise differences as distinct colors.
                 const auto bin = static_cast<std::size_t>((red >> 4) << 8 | (green >> 4) << 4 | (blue >> 4));
                 ++histogram[bin];
             }
@@ -1338,7 +1532,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         return histogram;
     }
 
-    // Converts the most populated histogram bin back into a packed RGB color.
+    /**
+     * @brief Converts the most populated histogram bin back into a packed RGB color.
+     */
     std::optional<std::uint32_t> CellTransitioner::SelectDominantColor(
         const std::array<std::uint32_t, 4096>& a_histogram)
     {
@@ -1355,10 +1551,13 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         return (red << 16) | (green << 8) | blue;
     }
 
-    // Reads the locked source frame and selects the color used by dominant-color transitions.
+    /**
+     * @brief Reads the locked source frame and selects the color used by dominant-color transitions.
+     */
     void CellTransitioner::UpdateTransitionColor(REX::W32::ID3D11DeviceContext* a_context)
     {
         if (!a_context || !frozenFrame || !dominantColorReadback) {
+
             logger::warn("using the default transition color because no captured frame is readable");
             return;
         }
@@ -1368,15 +1567,20 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                frozenFrameDesc.format == REX::W32::DXGI_FORMAT_R10G10B10A2_UNORM ||
                                frozenFrameDesc.format == REX::W32::DXGI_FORMAT_R16G16B16A16_FLOAT;
         if (!supported) {
+
             logger::warn("using the default transition color for unsupported texture format {}",
                 std::to_underlying(frozenFrameDesc.format));
             return;
         }
 
+        // The copy stays on the GPU, but Map(READ) must make its result available to the CPU
+        // and can wait for pending GPU work. Do this for the locked transition capture, not
+        // on every Present. The mapped pointer is valid only until Unmap.
         a_context->CopyResource(dominantColorReadback, frozenFrame);
 
         REX::W32::D3D11_MAPPED_SUBRESOURCE mapped{};
         if (a_context->Map(dominantColorReadback, 0, REX::W32::D3D11_MAP_READ, 0, &mapped) < 0) {
+
             logger::warn("could not read the captured frame for transition color selection");
             return;
         }
@@ -1386,38 +1590,47 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
         const auto color = SelectDominantColor(histogram);
         if (!color) {
+
             logger::warn("using the default transition color because the captured frame had no usable pixels");
             return;
         }
 
-        transitionColor.store(*color, std::memory_order_release);
+        Atomic::set(transitionColor, *color);
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            logger::info("selected captured-frame transition color #{:06X}", transitionColor.load());
+            logger::info("selected captured-frame transition color #{:06X}", Atomic::get(transitionColor, std::memory_order_seq_cst));
         }
     }
 
-    // Converts the packed transition color and caller-supplied alpha for SpriteBatch.
+    /**
+     * @brief Converts the packed transition color and caller-supplied alpha for SpriteBatch.
+     */
     DirectX::XMVECTOR CellTransitioner::TransitionColor(float a_alpha)
     {
-        const auto color = transitionColor.load(std::memory_order_acquire);
+        const auto color = Atomic::get(transitionColor);
         return DirectX::XMVectorSet(static_cast<float>((color >> 16) & 0xFF) / 255.0F,
             static_cast<float>((color >> 8) & 0xFF) / 255.0F,
             static_cast<float>(color & 0xFF) / 255.0F, a_alpha);
     }
 
-    // The shader also supplies explicit photograph alpha when its blur radius is zero.
+    /**
+     * @brief Returns the photograph shader, including explicit opacity when the blur radius is zero.
+     */
     ::ID3D11PixelShader* CellTransitioner::GetFrozenFrameShader()
     {
         return frozenFrameBlurShader;
     }
 
-    // Returns a full-screen destination rectangle for the current back buffer.
+    /**
+     * @brief Returns a full-screen destination rectangle for the current back buffer.
+     */
     RECT CellTransitioner::GetDestinationRect(const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
     {
         return { 0, 0, static_cast<LONG>(a_desc.width), static_cast<LONG>(a_desc.height) };
     }
 
-    // Draws one full-screen compositor layer with an explicit pixel shader.
+    /**
+     * @brief Draws one full-screen compositor layer with an explicit pixel shader.
+     */
     void CellTransitioner::DrawFullscreenLayer(
         REX::W32::ID3D11DeviceContext*      a_context,
         REX::W32::ID3D11ShaderResourceView* a_texture,
@@ -1433,18 +1646,29 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return;
         }
 
+        // SpriteBatch renders a screen-space quad with a vertex shader and pixel shader.
+        // This guard saves its affected bindings; the caller separately owns render-target
+        // and viewport restoration because this helper draws into whichever target is bound.
         const ScopedSpritePipelineState savedPipeline(context);
         if (a_shader) {
+            // Deferred mode queues Draw until End. The callback installs our pixel shader when
+            // the batch actually prepares its pipeline, after SpriteBatch installs its defaults.
             spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, a_blendState, a_samplerState, nullptr, nullptr,
                 [context, a_shader] { context->PSSetShader(a_shader, nullptr, 0); });
         } else {
             spriteBatch->Begin(DirectX::SpriteSortMode_Deferred, a_blendState, a_samplerState);
         }
+
+        // The blend state controls how shader output combines with the current target. Opaque
+        // replaces it; NonPremultiplied uses source alpha for RGB blending. LinearClamp supplies
+        // filtered texture reads without wrapping fullscreen edge samples.
         spriteBatch->Draw(texture, a_destination, a_color);
         spriteBatch->End();
     }
 
-    // Replaces the loading frame with the captured pre-load world image and configured blur.
+    /**
+     * @brief Replaces the loading frame with the captured pre-load world image and configured blur.
+     */
     void CellTransitioner::PresentSeamlessFrame(
         REX::W32::ID3D11DeviceContext*        a_context,
         REX::W32::ID3D11Texture2D*            a_backBuffer,
@@ -1461,16 +1685,20 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (!sourceView) {
             return;
         }
+
         DrawFullscreenLayer(a_context, sourceView, GetDestinationRect(a_desc),
             commonStates->Opaque(), commonStates->LinearClamp(), GetFrozenFrameShader());
 
         if (Settings::GetSingleton().IsLoadingLoggingEnabled() && !loggedFrozenPresentation) {
+
             logger::info("presenting the blurred frozen pre-load frame");
             loggedFrozenPresentation = true;
         }
     }
 
-    // Draws the blurred source frame and then restores Scaleform above it.
+    /**
+     * @brief Draws the blurred source frame and then restores Scaleform above it.
+     */
     void CellTransitioner::PresentLoadingMenuFrame(
         REX::W32::ID3D11DeviceContext*        a_context,
         REX::W32::ID3D11Texture2D*            a_backBuffer,
@@ -1479,9 +1707,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
     {
         auto* sourceView = frozenFrameView;
         const bool opaqueFixedColor =
-            transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&
-            colorSource.load(std::memory_order_acquire) == Settings::ColorSource::fixed &&
-            fadeInDuration.load(std::memory_order_acquire) <= 0;
+            Atomic::get(transitionType) == Settings::TransitionType::color &&
+            Atomic::get(colorSource) == Settings::ColorSource::fixed &&
+            Atomic::get(fadeInDuration) <= 0;
         if (!a_context || !a_backBuffer || !commonStates || !sourceView ||
             (!opaqueFixedColor && !MatchesFrozenFrame(a_desc)) ||
             (!a_separateUI && (!loadingOverlay || !loadingOverlayView))) {
@@ -1494,7 +1722,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         const auto destination = GetDestinationRect(a_desc);
-        if (mainMenuLoadActive.load(std::memory_order_acquire) || opaqueFixedColor) {
+        if (Atomic::get(mainMenuLoadActive) || opaqueFixedColor) {
             // Immediate fixed-color transitions do not sample the retained texture. This also lets
             // them cover an upscaler's internal loading target when its format differs from the
             // post-processed frame captured before the load.
@@ -1505,13 +1733,15 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 commonStates->LinearClamp(), GetFrozenFrameShader());
         }
 
-        if (!mainMenuLoadActive.load(std::memory_order_acquire) && !opaqueFixedColor &&
-            transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color) {
+        if (!Atomic::get(mainMenuLoadActive) && !opaqueFixedColor &&
+            Atomic::get(transitionType) == Settings::TransitionType::color) {
+
             const auto now = CurrentTimeMilliseconds();
-            auto       start = loadingTransitionStart.load(std::memory_order_acquire);
+            auto       start = Atomic::get(loadingTransitionStart);
             if (start == 0) {
-                if (loadingTransitionStart.compare_exchange_strong(
+                if (Atomic::compare_and_set(loadingTransitionStart,
                         start, now, std::memory_order_acq_rel, std::memory_order_acquire)) {
+
                     start = now;
 
                     if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
@@ -1521,7 +1751,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             }
 
             const auto elapsed = std::max<std::int64_t>(now - start, 0);
-            const auto duration = fadeInDuration.load(std::memory_order_acquire);
+            const auto duration = Atomic::get(fadeInDuration);
             const auto colorAlpha = duration > 0 ?
                                         std::clamp(static_cast<float>(elapsed) / static_cast<float>(duration), 0.0F, 1.0F) :
                                         1.0F;
@@ -1538,19 +1768,23 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
     }
 
-    // Release presentation ownership without modifying Skyrim's pause counter or player controls.
+    /**
+     * @brief Release presentation ownership without modifying Skyrim's pause counter or player controls.
+     */
     void CellTransitioner::FinishPostLoadPresentation()
     {
-        postLoadReleasePending.store(false, std::memory_order_release);
-        postLoadFadeStart.store(0, std::memory_order_release);
-        postLoadFadePending.store(false, std::memory_order_release);
-        postLoadRecoveryDeadline.store(0, std::memory_order_release);
-        frozenFrameLocked.store(false, std::memory_order_release);
-        mainMenuLoadActive.store(false, std::memory_order_release);
+        Atomic::set(postLoadReleasePending, false);
+        Atomic::set(postLoadFadeStart, 0);
+        Atomic::set(postLoadFadePending, false);
+        Atomic::set(postLoadRecoveryDeadline, 0);
+        Atomic::set(frozenFrameLocked, false);
+        Atomic::set(mainMenuLoadActive, false);
         QueueHUDVisibilitySync();
     }
 
-    // Draws the retained frame over the new cell until the post-load crossfade ends.
+    /**
+     * @brief Draws the retained frame over the new cell until the post-load crossfade ends.
+     */
     void CellTransitioner::PresentPostLoadFrame(
         REX::W32::ID3D11DeviceContext* a_context, const REX::W32::D3D11_TEXTURE2D_DESC& a_desc)
     {
@@ -1558,26 +1792,28 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return;
         }
 
-        const auto fadeStart = postLoadFadeStart.load(std::memory_order_acquire);
-        const bool fadePending = postLoadFadePending.load(std::memory_order_acquire);
+        const auto fadeStart = Atomic::get(postLoadFadeStart);
+        const bool fadePending = Atomic::get(postLoadFadePending);
         if (fadeStart <= 0 && !fadePending) {
             return;
         }
 
         // While the preferred CS compositor has not resumed yet, keep the retained frame fully opaque.
         // This closes the handoff between LoadingMenu's last Present and the first post-load fade pass.
-        const auto delay = holdAfterLoad.load(std::memory_order_acquire);
+        const auto delay = Atomic::get(holdAfterLoad);
         const auto fadeElapsed = fadePending ? 0 : CurrentTimeMilliseconds() - fadeStart - delay;
-        const auto duration = fadeOutDuration.load(std::memory_order_acquire);
+        const auto duration = Atomic::get(fadeOutDuration);
 
         if (!fadePending && fadeElapsed >= duration) {
+
             // Alpha has reached zero, but CS still consumes the scene and UI later
             // inside Present. Do not change UI suppression or restore the HUD midway
             // through this frame. Release only after the chained Present returns.
-            if (!postLoadReleasePending.exchange(true, std::memory_order_acq_rel) &&
+            if (!Atomic::get_and_set(postLoadReleasePending, true) &&
                 Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("post-load crossfade reached zero alpha; retaining UI policy through final Present");
             }
+
             return;
         }
 
@@ -1585,12 +1821,14 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return;
         }
 
+        // The destination world is already underneath this draw. Start at photograph alpha 1
+        // and reduce it toward 0 after the configured hold; blending then reveals the new cell.
         const auto fadeProgress = duration > 0 ?
                                       std::clamp(static_cast<float>(fadeElapsed) / static_cast<float>(duration), 0.0F, 1.0F) :
                                       1.0F;
         const auto alpha = 1.0F - fadeProgress;
         const auto usesColor =
-            transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color;
+            Atomic::get(transitionType) == Settings::TransitionType::color;
         const auto color = usesColor ?
                                TransitionColor(alpha) :
                                DirectX::XMVectorSet(1.0F, 1.0F, 1.0F, alpha);
@@ -1601,7 +1839,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             usesColor ? solidColorShader : GetFrozenFrameShader(), color);
     }
 
-    // Selects the compositor path for the current loading state.
+    /**
+     * @brief Selects the compositor path for the current loading state.
+     */
     void CellTransitioner::CompositeLoadingFrame(
         REX::W32::ID3D11DeviceContext*        a_context,
         REX::W32::ID3D11Texture2D*            a_backBuffer,
@@ -1613,20 +1853,22 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         // epochActive is the main loading gate. postLoadFadeStart handles the short tail after it closes.
-        const bool loading = preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
-                             epochActive.load(std::memory_order_acquire);
+        const bool loading = Atomic::get(preLoadDoorTransitionActive) ||
+                             Atomic::get(epochActive);
 
-        if (loading && transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&
-            dominantColorPending.exchange(false, std::memory_order_acq_rel)) {
+        if (loading && Atomic::get(transitionType) == Settings::TransitionType::color &&
+            Atomic::get_and_clear(dominantColorPending)) {
             UpdateTransitionColor(a_context);
         }
 
         if (!loading) {
+
             PresentPostLoadFrame(a_context, a_desc);
             return;
         }
 
-        if (presentation.load(std::memory_order_acquire) == Presentation::seamless) {
+        if (Atomic::get(presentation) == Presentation::seamless) {
+
             PresentSeamlessFrame(a_context, a_backBuffer, a_desc);
             return;
         }
@@ -1634,17 +1876,21 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         PresentLoadingMenuFrame(a_context, a_backBuffer, a_desc, a_separateUI);
     }
 
-    // Hooks IDXGISwapChain::Present to composite the retained loading frame.
+    /**
+     * @brief Saves a GPU texture as a DDS file when transition texture diagnostics are enabled.
+     */
     void CellTransitioner::SaveDiagnosticTexture(
         REX::W32::ID3D11DeviceContext* a_context, REX::W32::ID3D11Resource* a_source, std::string_view a_stage)
     {
         if (!Settings::GetSingleton().IsTransitionTextureCaptureEnabled()) {
             return;
         }
+
         auto path = logger::log_directory();
         if (!path || !a_source) {
             return;
         }
+
         *path /= std::string("SkyrimLoadProgress-") + std::string(a_stage) + ".dds";
         const auto result = DirectX::SaveDDSTextureToFile(
             reinterpret_cast<::ID3D11DeviceContext*>(a_context), reinterpret_cast<::ID3D11Resource*>(a_source), path->c_str());
@@ -1652,14 +1898,18 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             static_cast<std::uint32_t>(result), path->string());
     }
 
+    /**
+     * @brief Installs or refreshes chained GPU copy and dispatch observers for the context vtable.
+     */
     bool CellTransitioner::EnsureCopyObserver(REX::W32::ID3D11DeviceContext* a_context)
     {
         if (!a_context || !compositeAfterPostProcessing) {
             return false;
         }
+
         const bool traceCopies = Settings::GetSingleton().IsLoadingLoggingEnabled() ||
             (Settings::GetSingleton().IsTransitionTextureCaptureEnabled() &&
-                diagnosticCaptureStage.load(std::memory_order_acquire) < 4);
+                Atomic::get(diagnosticCaptureStage) < 4);
         // D3D11 can expose a different context vtable after initialization. Refresh
         // coverage on the rendering thread and preserve each table's original method.
         const auto vtable = *reinterpret_cast<const std::uintptr_t*>(a_context);
@@ -1672,10 +1922,12 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if ((!traceCopies || current == observer) && currentDispatch == dispatchObserver) {
             return true;
         }
+
         if (!IsExecutableAddress(current) || !IsExecutableAddress(currentDispatch)) {
             return false;
         }
-        const auto count = copyObserverRecordCount.load(std::memory_order_acquire);
+
+        const auto count = Atomic::get(copyObserverRecordCount);
         std::uint32_t record = 0;
         while (record < count && copyObserverRecords[record].vtable != vtable) {
             ++record;
@@ -1687,18 +1939,23 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 return false;
             }
         } else {
+
             if (count == copyObserverRecords.size()) {
                 return false;
             }
+
             copyObserverRecords[count] = { vtable, reinterpret_cast<CopyResource_t>(current), reinterpret_cast<Dispatch_t>(currentDispatch) };
-            copyObserverRecordCount.store(count + 1, std::memory_order_release);
+            Atomic::set(copyObserverRecordCount, count + 1);
         }
+
         if (!originalCopyResource) {
             originalCopyResource = reinterpret_cast<CopyResource_t>(current);
         }
+
         if (traceCopies) {
             REL::safe_write(slot, &observer, sizeof(observer), &current, sizeof(current));
         }
+
         REL::safe_write(dispatchSlot, &dispatchObserver, sizeof(dispatchObserver), &currentDispatch, sizeof(currentDispatch));
         const bool installed = (!traceCopies || *reinterpret_cast<const std::uintptr_t*>(slot) == observer) &&
                                *reinterpret_cast<const std::uintptr_t*>(dispatchSlot) == dispatchObserver;
@@ -1707,32 +1964,40 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             logger::info("GPU copy/dispatch observers refreshed: context={:X} vtable={:X} original={:X} installed={}",
                 reinterpret_cast<std::uintptr_t>(a_context), vtable, current, installed);
         }
+
         return installed;
     }
 
+    /**
+     * @brief Clears the native HDR UI target when an owned door transition requires the HUD to be hidden.
+     */
     void CellTransitioner::PrepareHdrUiForTransition(REX::W32::ID3D11DeviceContext* a_context, const void* a_caller)
     {
-        if (!hooksEnabled.load(std::memory_order_acquire) || Settings::GetSingleton().ShowHUDDuringLoading() ||
-            epochActive.load(std::memory_order_acquire) || mainMenuLoadActive.load(std::memory_order_acquire)) {
+        if (!Atomic::get(hooksEnabled) || Settings::GetSingleton().ShowHUDDuringLoading() ||
+            Atomic::get(epochActive) || Atomic::get(mainMenuLoadActive)) {
             return;
         }
-        const bool active = preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
-                            postLoadFadePending.load(std::memory_order_acquire) ||
-                            postLoadFadeStart.load(std::memory_order_acquire) > 0;
+
+        const bool active = Atomic::get(preLoadDoorTransitionActive) ||
+                            Atomic::get(postLoadFadePending) ||
+                            Atomic::get(postLoadFadeStart) > 0;
         if (!active || !frozenFrameView) {
             return;
         }
+
         auto* ui = RE::UI::GetSingleton();
         if (ui && (ui->GameIsPaused() || ui->IsMenuOpen(RE::Console::MENU_NAME) ||
                       ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME))) {
             return;
         }
+
         REX::W32::MEMORY_BASIC_INFORMATION callerMemory{};
         const auto csModule = GetModuleHandleW(L"CommunityShaders.dll");
         if (!csModule || REX::W32::VirtualQuery(a_caller, &callerMemory, sizeof(callerMemory)) == 0 ||
             callerMemory.allocationBase != csModule) {
             return;
         }
+
         REX::W32::ComPtr<REX::W32::ID3D11UnorderedAccessView> outputView;
         REX::W32::ComPtr<REX::W32::ID3D11Resource> outputResource;
         REX::W32::ComPtr<REX::W32::ID3D11Texture2D> output;
@@ -1740,11 +2005,13 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (!outputView.Get()) {
             return;
         }
+
         outputView->GetResource(outputResource.GetAddressOf());
         if (!outputResource.Get() || outputResource->QueryInterface(REX::W32::IID_ID3D11Texture2D,
                 reinterpret_cast<void**>(output.GetAddressOf())) < 0) {
             return;
         }
+
         REX::W32::D3D11_TEXTURE2D_DESC outputDesc{};
         output->GetDesc(&outputDesc);
         const auto* graphics = RE::BSGraphics::State::GetSingleton();
@@ -1752,6 +2019,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             outputDesc.format != REX::W32::DXGI_FORMAT_R10G10B10A2_UNORM) {
             return;
         }
+
         REX::W32::ComPtr<REX::W32::ID3D11ShaderResourceView> uiView;
         REX::W32::ComPtr<REX::W32::ID3D11Resource> uiResource;
         REX::W32::ComPtr<REX::W32::ID3D11Texture2D> uiTexture;
@@ -1759,34 +2027,42 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (!uiView.Get()) {
             return;
         }
+
         uiView->GetResource(uiResource.GetAddressOf());
         if (!uiResource.Get() || uiResource.Get() == communityShadersHdrTarget || uiResource.Get() == outputResource.Get() ||
             uiResource->QueryInterface(REX::W32::IID_ID3D11Texture2D,
                 reinterpret_cast<void**>(uiTexture.GetAddressOf())) < 0) {
             return;
         }
+
         REX::W32::D3D11_TEXTURE2D_DESC uiDesc{};
         uiTexture->GetDesc(&uiDesc);
         if (uiDesc.width != outputDesc.width || uiDesc.height != outputDesc.height || uiDesc.sampleDesc.count != 1 ||
             !(IsRgbaFormat(uiDesc.format) || IsBgraFormat(uiDesc.format))) {
             return;
         }
+
         if (communityShadersUiTarget != uiTexture.Get()) {
+
             REX::W32::ComPtr<REX::W32::ID3D11Device> device;
             REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> clearView;
             a_context->GetDevice(device.GetAddressOf());
             if (!device.Get() || device->CreateRenderTargetView(uiTexture.Get(), nullptr, clearView.GetAddressOf()) < 0) {
                 return;
             }
+
             if (communityShadersUiTargetView) {
                 communityShadersUiTargetView->Release();
             }
+
             if (communityShadersUiTarget) {
                 communityShadersUiTarget->Release();
             }
+
             communityShadersUiTarget = uiTexture.Detach();
             communityShadersUiTargetView = clearView.Detach();
         }
+
         // The hidden-HUD pre-door/exit path needs only the retained HDR scene.
         // LoadingMenu keeps its UI layer for the meter. Operate on the actual
         // bound HDR UI input, after every native/menu writer has finished.
@@ -1797,9 +2073,11 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         auto* restoreView = uiView.Get();
         a_context->CSSetShaderResources(1, 1, &restoreView);
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+
             static unsigned lastReportedPhase{};
-            const unsigned phase = preLoadDoorTransitionActive.load(std::memory_order_acquire) ? 1 : 2;
+            const unsigned phase = Atomic::get(preLoadDoorTransitionActive) ? 1 : 2;
             if (phase != lastReportedPhase) {
+
                 logger::info("suppressed non-loading CS UI at HDR dispatch: phase={} target={:X} callerRVA={:X}", phase,
                     reinterpret_cast<std::uintptr_t>(communityShadersUiTarget),
                     reinterpret_cast<std::uintptr_t>(a_caller) - reinterpret_cast<std::uintptr_t>(csModule));
@@ -1808,19 +2086,25 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
     }
 
+    /**
+     * @brief Observes native HDR conversion dispatches and applies retained-scene conversion and UI
+     * composition.
+     */
     void CellTransitioner::TraceHdrDispatch(REX::W32::ID3D11DeviceContext* a_context,
         std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z)
     {
         const auto vtable = *reinterpret_cast<const std::uintptr_t*>(a_context);
-        const auto records = copyObserverRecordCount.load(std::memory_order_acquire);
+        const auto records = Atomic::get(copyObserverRecordCount);
         Dispatch_t original{};
         for (std::uint32_t record = 0; record < records; ++record) {
             if (copyObserverRecords[record].vtable == vtable) {
+
                 original = copyObserverRecords[record].originalDispatch;
                 break;
             }
         }
         if (!original) {
+
             // A runtime-switched table can differ from the table that dispatched this
             // callback. Chain its current native entry rather than dropping GPU work.
             const auto current = *reinterpret_cast<const std::uintptr_t*>(vtable + 41 * sizeof(std::uintptr_t));
@@ -1828,26 +2112,29 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 original = reinterpret_cast<Dispatch_t>(current);
             }
         }
+
         TransitionUiOverlay::Binding overlayBinding;
         TransitionUiOverlay::Binding diagnosticBinding;
         const bool loadingDiagnostics = Settings::GetSingleton().IsLoadingLoggingEnabled();
         static thread_local unsigned rollingDiagnosticReports{};
-        const bool overlayOwnsImage = hooksEnabled.load(std::memory_order_acquire) && !IsVanilla() &&
-            frozenFrameView && (epochActive.load(std::memory_order_acquire) ||
-                preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
-                postLoadFadePending.load(std::memory_order_acquire) ||
-                postLoadFadeStart.load(std::memory_order_acquire) > 0 ||
-                postLoadReleasePending.load(std::memory_order_acquire));
+        const bool overlayOwnsImage = Atomic::get(hooksEnabled) && !IsVanilla() &&
+            frozenFrameView && (Atomic::get(epochActive) ||
+                Atomic::get(preLoadDoorTransitionActive) ||
+                Atomic::get(postLoadFadePending) ||
+                Atomic::get(postLoadFadeStart) > 0 ||
+                Atomic::get(postLoadReleasePending));
         const bool inspectRollingDiagnostics = loadingDiagnostics && rollingDiagnosticReports < 8 &&
-            completedHdrSceneSincePresent.load(std::memory_order_acquire) &&
-            !frozenFrameLocked.load(std::memory_order_acquire);
-        if (hooksEnabled.load(std::memory_order_acquire) &&
+            Atomic::get(completedHdrSceneSincePresent) &&
+            !Atomic::get(frozenFrameLocked);
+        if (Atomic::get(hooksEnabled) &&
             (overlayOwnsImage || captureHdrConversionThisPresent || inspectRollingDiagnostics) && original) {
+
             REX::W32::MEMORY_BASIC_INFORMATION callerMemory{};
             const auto csModule = GetModuleHandleW(L"CommunityShaders.dll");
             const auto* graphics = RE::BSGraphics::State::GetSingleton();
             if (csModule && graphics && REX::W32::VirtualQuery(_ReturnAddress(), &callerMemory, sizeof(callerMemory)) != 0 &&
                 callerMemory.allocationBase == csModule) {
+
                 auto binding = transitionUiOverlay.Inspect(reinterpret_cast<ID3D11DeviceContext*>(a_context),
                     graphics->screenWidth, graphics->screenHeight);
                 if (overlayOwnsImage || captureHdrConversionThisPresent) {
@@ -1858,6 +2145,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 }
             }
         }
+
         try {
             PrepareHdrUiForTransition(a_context, _ReturnAddress());
         } catch (const std::exception& error) {
@@ -1865,77 +2153,105 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         } catch (...) {
             logger::warn("CS UI preparation failed; continuing native HDR dispatch");
         }
+        // There are two native conversions to observe: display conversion produces the HDR
+        // photograph, then a paired UI conversion prepares the frame-generation UI layer.
+        // While fully holding the photograph, keep its captured scene-encoding flags; once
+        // the crossfade starts, native live-scene conversion takes over again.
         HRESULT conversionResult = S_FALSE;
         HRESULT conversionCaptureResult = S_FALSE;
         bool holdingImage{};
         if (overlayBinding.pass == TransitionUiOverlay::Pass::display) {
+
             if (captureHdrConversionThisPresent && overlayBinding.scene.Get() ==
                 reinterpret_cast<ID3D11Texture2D*>(communityShadersHdrTarget)) {
+
                 conversionResult = retainedHdrConversion.Capture(reinterpret_cast<ID3D11DeviceContext*>(a_context),
                     overlayBinding.constants.Get(), overlayBinding.scene.Get());
                 if (loadingDiagnostics) conversionCaptureResult = conversionResult;
             }
-            const auto fadeStart = postLoadFadeStart.load(std::memory_order_acquire);
-            holdingImage = overlayOwnsImage && (preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
-                epochActive.load(std::memory_order_acquire) || postLoadFadePending.load(std::memory_order_acquire) ||
-                (fadeStart > 0 && CurrentTimeMilliseconds() - fadeStart <= holdAfterLoad.load(std::memory_order_acquire)));
+
+            const auto fadeStart = Atomic::get(postLoadFadeStart);
+            holdingImage = overlayOwnsImage && (Atomic::get(preLoadDoorTransitionActive) ||
+                Atomic::get(epochActive) || Atomic::get(postLoadFadePending) ||
+                (fadeStart > 0 && CurrentTimeMilliseconds() - fadeStart <= Atomic::get(holdAfterLoad)));
             if (holdingImage) {
+
                 conversionResult = retainedHdrConversion.Apply(reinterpret_cast<ID3D11DeviceContext*>(a_context),
                     overlayBinding.constants.Get(), overlayBinding.scene.Get(),
                     reinterpret_cast<RetainedHdrConversion::Dispatch>(original));
                 if (conversionResult == S_OK && Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+
                     static unsigned lastReportedPhase{};
-                    const unsigned phase = epochActive.load(std::memory_order_acquire) ? 2 :
-                        preLoadDoorTransitionActive.load(std::memory_order_acquire) ? 1 : 3;
+                    const unsigned phase = Atomic::get(epochActive) ? 2 :
+                        Atomic::get(preLoadDoorTransitionActive) ? 1 : 3;
                     if (phase != lastReportedPhase) {
+
                         logger::info("retained HDR scene conversion during image hold: phase={}; native UI/FG policy preserved", phase);
                         lastReportedPhase = phase;
                     }
                 }
             }
         }
+
+        // Always run the original GPU dispatch exactly once. Capturing display output or
+        // composing onto UI happens afterward, when native conversion has finished writing it.
         if (original) {
             original(a_context, a_x, a_y, a_z);
         }
+
         // Restore before the native UI pass observes the original constant-buffer identity.
         if (overlayBinding.pass == TransitionUiOverlay::Pass::display) {
+
             auto* nativeConstants = overlayBinding.constants.Get();
             reinterpret_cast<ID3D11DeviceContext*>(a_context)->CSSetConstantBuffers(0, 1, &nativeConstants);
         }
+
         if (FAILED(conversionResult)) {
+
             static bool failureReported{};
             if (!failureReported) {
+
                 logger::warn("retained HDR conversion unavailable ({:08X}); using native scene conversion",
                     static_cast<std::uint32_t>(conversionResult));
                 failureReported = true;
             }
         }
+
+        // Capture the converted display in the first pass, then insert it beneath the native
+        // UI in the matching second pass. An opaque UI cover also covers generated world frames;
+        // drawing only into a late swap-chain buffer would not establish that coverage.
         HRESULT overlayResult = S_FALSE;
         if (overlayOwnsImage && overlayBinding.pass == TransitionUiOverlay::Pass::display) {
             overlayResult = transitionUiOverlay.Capture(reinterpret_cast<ID3D11DeviceContext*>(a_context), overlayBinding);
         } else if (overlayOwnsImage && overlayBinding.pass == TransitionUiOverlay::Pass::ui) {
+
             overlayResult = transitionUiOverlay.Compose(reinterpret_cast<ID3D11DeviceContext*>(a_context), overlayBinding,
                 reinterpret_cast<TransitionUiOverlay::Dispatch>(original));
             if (overlayResult == S_OK && Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+
                 static unsigned lastReportedPhase{};
-                const unsigned phase = epochActive.load(std::memory_order_acquire) ? 2 :
-                    preLoadDoorTransitionActive.load(std::memory_order_acquire) ? 1 : 3;
+                const unsigned phase = Atomic::get(epochActive) ? 2 :
+                    Atomic::get(preLoadDoorTransitionActive) ? 1 : 3;
                 if (phase != lastReportedPhase) {
+
                     logger::info("transition image composed into native frame-generation UI: phase={} size={}x{}",
                         phase, overlayBinding.desc.Width, overlayBinding.desc.Height);
                     lastReportedPhase = phase;
                 }
             }
         }
+
         if (loadingDiagnostics) {
+
             const auto& observed = overlayBinding.pass != TransitionUiOverlay::Pass::none || overlayBinding.texture ?
                 overlayBinding : diagnosticBinding;
             const bool reportRolling = observed.pass == TransitionUiOverlay::Pass::display &&
                 !overlayOwnsImage && rollingDiagnosticReports < 8;
             if (observed.pass == TransitionUiOverlay::Pass::display && (overlayOwnsImage || reportRolling)) {
+
                 const auto state = retainedHdrConversion.InspectDiagnostics(observed.constants.Get());
-                const auto phase = epochActive.load(std::memory_order_acquire) ? 2U :
-                    preLoadDoorTransitionActive.load(std::memory_order_acquire) ? 1U :
+                const auto phase = Atomic::get(epochActive) ? 2U :
+                    Atomic::get(preLoadDoorTransitionActive) ? 1U :
                     overlayOwnsImage ? 3U : 0U;
                 logger::info("HDR frame trace: frame={} phase={} insidePresent={} insideChain={} captureEligible={} "
                     "captureResult={:08X} hold={} applyResult={:08X} expectedScene={:X} nativeScene={:X} "
@@ -1952,11 +2268,13 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     reinterpret_cast<std::uintptr_t>(observed.ui.Get()), static_cast<std::uint32_t>(overlayResult));
                 if (reportRolling) ++rollingDiagnosticReports;
                 if (overlayOwnsImage) {
+
                     ++transitionFrameDiagnostics.displays;
                     transitionFrameDiagnostics.snapshots += overlayResult == S_OK;
                     transitionFrameDiagnostics.displayTexture = reinterpret_cast<std::uintptr_t>(observed.texture.Get());
                 }
             } else if (overlayOwnsImage && observed.pass == TransitionUiOverlay::Pass::ui) {
+
                 ++transitionFrameDiagnostics.uiPasses;
                 transitionFrameDiagnostics.compositions += overlayResult == S_OK;
                 logger::info("UI frame trace: frame={} insidePresent={} insideChain={} target={:X} cb={:X} compose={:08X}",
@@ -1965,12 +2283,14 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     reinterpret_cast<std::uintptr_t>(observed.constants.Get()), static_cast<std::uint32_t>(overlayResult));
             } else if (overlayOwnsImage && observed.texture.Get() ==
                 reinterpret_cast<ID3D11Texture2D*>(communityShadersHdrTarget) && observed.texture) {
+
                 ++transitionFrameDiagnostics.sceneDispatches;
                 logger::info("scene compute write trace: frame={} insidePresent={} insideChain={} target={:X}",
                     transitionFrameDiagnostics.frame, transitionFrameDiagnostics.insidePresent,
                     transitionFrameDiagnostics.insideChain, reinterpret_cast<std::uintptr_t>(observed.texture.Get()));
             } else if (overlayOwnsImage && observed.texture && observed.desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM &&
                 observed.texture.Get() == reinterpret_cast<ID3D11Texture2D*>(communityShadersUiTarget)) {
+
                 ++transitionFrameDiagnostics.unpairedUi;
                 logger::info("UI frame trace: frame={} insidePresent={} insideChain={} target={:X} cb={:X} unpaired=true",
                     transitionFrameDiagnostics.frame, transitionFrameDiagnostics.insidePresent,
@@ -1978,28 +2298,35 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     reinterpret_cast<std::uintptr_t>(observed.constants.Get()));
             }
         }
+
         if (FAILED(overlayResult)) {
+
             static bool failureReported{};
             if (!failureReported) {
+
                 logger::warn("transition UI overlay unavailable ({:08X}); retaining scene composition",
                     static_cast<std::uint32_t>(overlayResult));
                 failureReported = true;
             }
         }
+
         if (!Settings::GetSingleton().IsTransitionTextureCaptureEnabled()) {
             return;
         }
-        const auto stage = diagnosticCaptureStage.load(std::memory_order_acquire);
+
+        const auto stage = Atomic::get(diagnosticCaptureStage);
         static thread_local bool readingBack = false;
-        if (readingBack || stage == 0 || stage >= 4 || !hooksEnabled.load(std::memory_order_acquire)) {
+        if (readingBack || stage == 0 || stage >= 4 || !Atomic::get(hooksEnabled)) {
             return;
         }
-        const bool loading = epochActive.load(std::memory_order_acquire);
-        const bool destination = postLoadFadeStart.load(std::memory_order_acquire) > 0;
+
+        const bool loading = Atomic::get(epochActive);
+        const bool destination = Atomic::get(postLoadFadeStart) > 0;
         const std::uint8_t phase = destination ? 4 : loading ? 2 : 1;
-        if (diagnosticDispatchSamples.load(std::memory_order_acquire) & phase) {
+        if (Atomic::get(diagnosticDispatchSamples) & phase) {
             return;
         }
+
         REX::W32::MEMORY_BASIC_INFORMATION callerMemory{};
         const auto caller = _ReturnAddress();
         const auto csModule = GetModuleHandleW(L"CommunityShaders.dll");
@@ -2007,6 +2334,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             callerMemory.allocationBase != csModule) {
             return;
         }
+
         // Observe bound resources at the actual output dispatch; no CS-private offsets.
         // ApplyHDR leaves these bindings intact until this callback returns.
         REX::W32::ComPtr<REX::W32::ID3D11UnorderedAccessView> outputView;
@@ -2016,11 +2344,13 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (!outputView.Get()) {
             return;
         }
+
         outputView->GetResource(outputResource.GetAddressOf());
         if (!outputResource.Get() || outputResource->QueryInterface(REX::W32::IID_ID3D11Texture2D,
                 reinterpret_cast<void**>(output.GetAddressOf())) < 0) {
             return;
         }
+
         REX::W32::D3D11_TEXTURE2D_DESC desc{};
         output->GetDesc(&desc);
         const auto* graphics = RE::BSGraphics::State::GetSingleton();
@@ -2028,6 +2358,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             desc.format != REX::W32::DXGI_FORMAT_R10G10B10A2_UNORM) {
             return;
         }
+
         diagnosticDispatchSamples.fetch_or(phase, std::memory_order_acq_rel);
         readingBack = true;
         try {
@@ -2044,11 +2375,13 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 if (!retainedViews[index].Get()) {
                     continue;
                 }
+
                 REX::W32::ComPtr<REX::W32::ID3D11Resource> inputResource;
                 REX::W32::ComPtr<REX::W32::ID3D11Texture2D> input;
                 retainedViews[index]->GetResource(inputResource.GetAddressOf());
                 if (inputResource.Get() && inputResource->QueryInterface(REX::W32::IID_ID3D11Texture2D,
                         reinterpret_cast<void**>(input.GetAddressOf())) >= 0) {
+
                     const auto name = std::string(index == 0 ? "hdr-scene-" : "hdr-ui-") +
                                       (destination ? "destination" : loading ? "loading" : "door");
                     SaveDiagnosticTexture(a_context, input.Get(), name);
@@ -2064,17 +2397,20 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         readingBack = false;
     }
 
-    // Observe CS's final output copy before the proxy clears its buffer. Copies themselves
-    // remain unchanged; only the first ordinary door in a diagnostic run is read back.
+    /**
+     * @brief Observe CS's final output copy before the proxy clears its buffer. Copies themselves remain
+     * unchanged; only the first ordinary door in a diagnostic run is read back.
+     */
     void CellTransitioner::TraceOutputCopy(
         REX::W32::ID3D11DeviceContext* a_context, REX::W32::ID3D11Resource* a_destination,
         REX::W32::ID3D11Resource* a_source)
     {
         auto original = originalCopyResource;
         const auto vtable = *reinterpret_cast<const std::uintptr_t*>(a_context);
-        const auto records = copyObserverRecordCount.load(std::memory_order_acquire);
+        const auto records = Atomic::get(copyObserverRecordCount);
         for (std::uint32_t record = 0; record < records; ++record) {
             if (copyObserverRecords[record].vtable == vtable) {
+
                 original = copyObserverRecords[record].original;
                 break;
             }
@@ -2082,12 +2418,14 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (original) {
             original(a_context, a_destination, a_source);
         }
-        if (Settings::GetSingleton().IsLoadingLoggingEnabled() && hooksEnabled.load(std::memory_order_acquire) &&
-            frozenFrameView && (epochActive.load(std::memory_order_acquire) ||
-                preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
-                postLoadFadePending.load(std::memory_order_acquire) ||
-                postLoadFadeStart.load(std::memory_order_acquire) > 0 ||
-                postLoadReleasePending.load(std::memory_order_acquire))) {
+
+        if (Settings::GetSingleton().IsLoadingLoggingEnabled() && Atomic::get(hooksEnabled) &&
+            frozenFrameView && (Atomic::get(epochActive) ||
+                Atomic::get(preLoadDoorTransitionActive) ||
+                Atomic::get(postLoadFadePending) ||
+                Atomic::get(postLoadFadeStart) > 0 ||
+                Atomic::get(postLoadReleasePending))) {
+
             const auto source = reinterpret_cast<std::uintptr_t>(a_source);
             const auto destination = reinterpret_cast<std::uintptr_t>(a_destination);
             const bool sceneWrite = communityShadersHdrTarget && destination ==
@@ -2096,6 +2434,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             const bool displayRead = transitionFrameDiagnostics.displayTexture &&
                 source == transitionFrameDiagnostics.displayTexture;
             if (sceneWrite || frozenWrite || displayRead) {
+
                 transitionFrameDiagnostics.sceneCopies += sceneWrite;
                 transitionFrameDiagnostics.frozenCopies += frozenWrite;
                 transitionFrameDiagnostics.displayCopies += displayRead;
@@ -2106,17 +2445,21 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     reinterpret_cast<std::uintptr_t>(_ReturnAddress()));
             }
         }
+
         if (!Settings::GetSingleton().IsTransitionTextureCaptureEnabled()) {
             return;
         }
+
         static thread_local bool readingBack = false;
-        if (readingBack || !hooksEnabled.load(std::memory_order_acquire)) {
+        if (readingBack || !Atomic::get(hooksEnabled)) {
             return;
         }
-        const auto stage = diagnosticCaptureStage.load(std::memory_order_acquire);
+
+        const auto stage = Atomic::get(diagnosticCaptureStage);
         if (stage == 0 || stage >= 4) {
             return;
         }
+
         // CS can finish its output copy before our vtable Present hook is entered.
         // Identify the CS caller and encoded display-sized source, independently of
         // the Present window and COM interface pointer aliases.
@@ -2127,70 +2470,85 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         // Record coverage before applying the caller/texture filters. Absence of a saved
         // output must not be mistaken for absence of CS rendering.
         static std::atomic_uint32_t coverageSamples{};
-        if (coverageSamples.fetch_add(1, std::memory_order_relaxed) < 8) {
+        if (Atomic::get_and_add(coverageSamples, 1, std::memory_order_relaxed) < 8) {
             logger::info("GPU copy coverage: stage={} context={:X} caller={:X} module={:X} csModule={:X}",
                 stage, reinterpret_cast<std::uintptr_t>(a_context), reinterpret_cast<std::uintptr_t>(caller),
                 callerResolved ? reinterpret_cast<std::uintptr_t>(callerMemory.allocationBase) : 0,
                 reinterpret_cast<std::uintptr_t>(csModule));
         }
+
         if (!csModule || !a_source || !callerResolved || callerMemory.allocationBase != csModule) {
             return;
         }
+
         REX::W32::ComPtr<REX::W32::ID3D11Texture2D> outputSource;
         if (a_source->QueryInterface(REX::W32::IID_ID3D11Texture2D,
                 reinterpret_cast<void**>(outputSource.GetAddressOf())) < 0 || !outputSource.Get()) {
             return;
         }
+
         REX::W32::D3D11_TEXTURE2D_DESC desc{};
         outputSource->GetDesc(&desc);
         static std::atomic_uint32_t csSamples{};
-        if (csSamples.fetch_add(1, std::memory_order_relaxed) < 8) {
+        if (Atomic::get_and_add(csSamples, 1, std::memory_order_relaxed) < 8) {
             logger::info("CS copy candidate: stage={} callerRVA={:X} source={}x{} format={}", stage,
                 reinterpret_cast<std::uintptr_t>(caller) - reinterpret_cast<std::uintptr_t>(csModule),
                 desc.width, desc.height, std::to_underlying(desc.format));
         }
+
         const auto* graphics = RE::BSGraphics::State::GetSingleton();
         if (!graphics || desc.width != graphics->screenWidth || desc.height != graphics->screenHeight ||
             !(desc.format == REX::W32::DXGI_FORMAT_R10G10B10A2_UNORM || IsRgbaFormat(desc.format) || IsBgraFormat(desc.format))) {
             return;
         }
-        const bool loading = epochActive.load(std::memory_order_acquire);
-        const bool destination = postLoadFadeStart.load(std::memory_order_acquire) > 0;
+
+        const bool loading = Atomic::get(epochActive);
+        const bool destination = Atomic::get(postLoadFadeStart) > 0;
         if (stage == 2 && !loading && !destination) {
             return;
         }
+
         if (stage == 3 && !destination) {
             return;
         }
+
         readingBack = true;
         try {
             logger::info("CS display output copy: stage={} insidePresent={} callerRVA={:X} source={}x{} format={}",
-                stage, diagnosticOutputTarget.load(std::memory_order_acquire) != 0,
+                stage, Atomic::get(diagnosticOutputTarget) != 0,
                 reinterpret_cast<std::uintptr_t>(caller) - reinterpret_cast<std::uintptr_t>(csModule),
                 desc.width, desc.height, std::to_underlying(desc.format));
             if (stage == 1) {
-                if (frozenFrame && !diagnosticFrozenSaved.exchange(true, std::memory_order_acq_rel)) {
+
+                if (frozenFrame && !Atomic::get_and_set(diagnosticFrozenSaved, true)) {
                     SaveDiagnosticTexture(a_context, frozenFrame, "frozen-source");
                 }
+
                 SaveDiagnosticTexture(a_context, a_source, "door-output");
-                diagnosticCaptureStage.store(2, std::memory_order_release);
+                Atomic::set(diagnosticCaptureStage, 2);
             } else if (loading) {
+
                 SaveDiagnosticTexture(a_context, a_source, "loading-output");
-                diagnosticCaptureStage.store(3, std::memory_order_release);
+                Atomic::set(diagnosticCaptureStage, 3);
             } else {
+
                 SaveDiagnosticTexture(a_context, a_source, "destination-output");
-                diagnosticCaptureStage.store(4, std::memory_order_release);
+                Atomic::set(diagnosticCaptureStage, 4);
             }
         } catch (const std::exception& error) {
             logger::warn("GPU transition capture failed: {}", error.what());
-            diagnosticCaptureStage.store(4, std::memory_order_release);
+            Atomic::set(diagnosticCaptureStage, 4);
         } catch (...) {
             logger::warn("GPU transition capture failed with an unknown exception");
-            diagnosticCaptureStage.store(4, std::memory_order_release);
+            Atomic::set(diagnosticCaptureStage, 4);
         }
         readingBack = false;
     }
 
+    /**
+     * @brief Composites the owned transition, chains the original Present, and releases completed
+     * presentation state.
+     */
     REX::W32::HRESULT CellTransitioner::PresentFrozenFrame(
         REX::W32::IDXGISwapChain* a_swapChain, std::uint32_t a_syncInterval, std::uint32_t a_flags)
     {
@@ -2201,73 +2559,84 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         transitionUiOverlay.BeginPresent();
-        const bool completedHdrScene = completedHdrSceneSincePresent.exchange(false, std::memory_order_acq_rel);
-        captureHdrConversionThisPresent = hooksEnabled.load(std::memory_order_acquire) && completedHdrScene &&
-            worldRenderedSincePresent.load(std::memory_order_acquire) &&
-            !frozenFrameLocked.load(std::memory_order_acquire);
+        const bool completedHdrScene = Atomic::get_and_clear(completedHdrSceneSincePresent);
+        captureHdrConversionThisPresent = Atomic::get(hooksEnabled) && completedHdrScene &&
+            Atomic::get(worldRenderedSincePresent) &&
+            !Atomic::get(frozenFrameLocked);
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+
             const auto nextFrame = transitionFrameDiagnostics.frame + 1;
             const auto displayTexture = transitionFrameDiagnostics.displayTexture;
             transitionFrameDiagnostics = {};
             transitionFrameDiagnostics.frame = nextFrame;
             transitionFrameDiagnostics.displayTexture = displayTexture;
             transitionFrameDiagnostics.insidePresent = true;
-            transitionFrameDiagnostics.owned = hooksEnabled.load(std::memory_order_acquire) && !IsVanilla() &&
-                frozenFrameView && (epochActive.load(std::memory_order_acquire) ||
-                    preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
-                    postLoadFadePending.load(std::memory_order_acquire) ||
-                    postLoadFadeStart.load(std::memory_order_acquire) > 0 ||
-                    postLoadReleasePending.load(std::memory_order_acquire));
+            transitionFrameDiagnostics.owned = Atomic::get(hooksEnabled) && !IsVanilla() &&
+                frozenFrameView && (Atomic::get(epochActive) ||
+                    Atomic::get(preLoadDoorTransitionActive) ||
+                    Atomic::get(postLoadFadePending) ||
+                    Atomic::get(postLoadFadeStart) > 0 ||
+                    Atomic::get(postLoadReleasePending));
             if (transitionFrameDiagnostics.owned || nextFrame <= 8) {
+
                 const auto state = retainedHdrConversion.InspectDiagnostics(nullptr);
                 logger::info("transition Present begin: frame={} thread={} flags={:08X} sync={} owned={} epoch={} door={} pending={} fadeStart={} "
                     "completedScene={} freshWorld={} locked={} captureEligible={} expectedScene={:X} frozen={:X} capturedScene={:X}",
                     nextFrame, ::GetCurrentThreadId(), a_flags, a_syncInterval, transitionFrameDiagnostics.owned,
-                    epochActive.load(std::memory_order_acquire),
-                    preLoadDoorTransitionActive.load(std::memory_order_acquire),
-                    postLoadFadePending.load(std::memory_order_acquire), postLoadFadeStart.load(std::memory_order_acquire),
-                    completedHdrScene, worldRenderedSincePresent.load(std::memory_order_acquire),
-                    frozenFrameLocked.load(std::memory_order_acquire), captureHdrConversionThisPresent,
+                    Atomic::get(epochActive),
+                    Atomic::get(preLoadDoorTransitionActive),
+                    Atomic::get(postLoadFadePending), Atomic::get(postLoadFadeStart),
+                    completedHdrScene, Atomic::get(worldRenderedSincePresent),
+                    Atomic::get(frozenFrameLocked), captureHdrConversionThisPresent,
                     reinterpret_cast<std::uintptr_t>(communityShadersHdrTarget), reinterpret_cast<std::uintptr_t>(frozenFrame),
                     reinterpret_cast<std::uintptr_t>(state.capturedSource));
             }
         }
 
-        if (hooksEnabled.load(std::memory_order_acquire)) {
+        if (Atomic::get(hooksEnabled)) {
+
             try {
                 if (compositeAfterPostProcessing) {
+
                     auto* observerRenderer = RE::BSGraphics::Renderer::GetSingleton();
                     EnsureCopyObserver(observerRenderer ? observerRenderer->GetRuntimeData().context : nullptr);
                 }
+
                 const auto captureStage = Settings::GetSingleton().IsTransitionTextureCaptureEnabled() ?
-                    diagnosticCaptureStage.load(std::memory_order_acquire) : 0;
+                    Atomic::get(diagnosticCaptureStage) : 0;
                 if (captureStage > 0 && captureStage < 4 && originalCopyResource) {
+
                     static std::uintptr_t lastContext{};
                     static std::uintptr_t lastCopySlot{};
                     auto* traceRenderer = RE::BSGraphics::Renderer::GetSingleton();
                     auto* traceContext = traceRenderer ? traceRenderer->GetRuntimeData().context : nullptr;
                     if (traceContext) {
+
                         const auto contextIdentity = reinterpret_cast<std::uintptr_t>(traceContext);
                         const auto contextVtable = *reinterpret_cast<const std::uintptr_t*>(traceContext);
                         const auto copySlot = *reinterpret_cast<const std::uintptr_t*>(contextVtable + 47 * sizeof(std::uintptr_t));
                         if (contextIdentity != lastContext || copySlot != lastCopySlot) {
+
                             logger::info("GPU observer coverage at Present: context={:X} CopyResource={:X} observerInstalled={}",
                                 contextIdentity, copySlot, copySlot == reinterpret_cast<std::uintptr_t>(TraceOutputCopy));
                             lastContext = contextIdentity;
                             lastCopySlot = copySlot;
                         }
                     }
-                    diagnosticOutputTarget.store(0, std::memory_order_release);
+
+                    Atomic::set(diagnosticOutputTarget, 0);
                     REX::W32::ComPtr<REX::W32::ID3D11Texture2D> output;
                     if (a_swapChain->GetBuffer(0, REX::W32::IID_ID3D11Texture2D,
                             reinterpret_cast<void**>(output.GetAddressOf())) >= 0) {
-                        diagnosticOutputTarget.store(reinterpret_cast<std::uintptr_t>(output.Get()), std::memory_order_release);
+
+                        Atomic::set(diagnosticOutputTarget, reinterpret_cast<std::uintptr_t>(output.Get()));
                         // Log this checkpoint, but do not read back the cleared proxy again:
                         // the prior run established that it is not final output at hook entry.
-                        const bool nativeLoading = epochActive.load(std::memory_order_acquire);
-                        const bool destinationFade = postLoadFadeStart.load(std::memory_order_acquire) > 0;
+                        const bool nativeLoading = Atomic::get(epochActive);
+                        const bool destinationFade = Atomic::get(postLoadFadeStart) > 0;
                         const std::uint8_t phase = destinationFade ? 4 : nativeLoading ? 2 : 1;
                         if (traceContext && !(diagnosticPresentSamples.fetch_or(phase, std::memory_order_acq_rel) & phase)) {
+
                             REX::W32::D3D11_TEXTURE2D_DESC outputDesc{};
                             output->GetDesc(&outputDesc);
                             logger::info("GPU Present-entry checkpoint: phase={} output={}x{} format={} retainedHdr={:X}",
@@ -2275,18 +2644,22 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                 reinterpret_cast<std::uintptr_t>(communityShadersHdrTarget));
                         }
                     }
-                    if (frozenFrame && !diagnosticFrozenSaved.exchange(true, std::memory_order_acq_rel)) {
+
+                    if (frozenFrame && !Atomic::get_and_set(diagnosticFrozenSaved, true)) {
+
                         auto* traceRenderer = RE::BSGraphics::Renderer::GetSingleton();
                         if (auto* traceContext = traceRenderer ? traceRenderer->GetRuntimeData().context : nullptr) {
                             SaveDiagnosticTexture(traceContext, frozenFrame, "frozen-source");
                         }
                     }
                 }
+
                 ObserveControlRestore();
-                const auto recoveryDeadline = postLoadRecoveryDeadline.load(std::memory_order_acquire);
-                if (!epochActive.load(std::memory_order_acquire) &&
-                    !preLoadDoorTransitionActive.load(std::memory_order_acquire) &&
+                const auto recoveryDeadline = Atomic::get(postLoadRecoveryDeadline);
+                if (!Atomic::get(epochActive) &&
+                    !Atomic::get(preLoadDoorTransitionActive) &&
                     recoveryDeadline > 0 && CurrentTimeMilliseconds() >= recoveryDeadline) {
+
                     logger::warn("post-load presentation exceeded its recovery deadline; releasing overlay and HUD ownership");
                     FinishPostLoadPresentation();
                 }
@@ -2294,37 +2667,41 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 // The image-space call is not guaranteed to run for every frame Skyrim presents,
                 // particularly while menu/loading render paths are changing. Treat it as the preferred
                 // CS/Upscaler path, but retain this final compositor as a watchdog for any frame it misses.
-                const bool loading = preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
-                                     epochActive.load(std::memory_order_acquire);
-                bool       fadePending = postLoadFadePending.load(std::memory_order_acquire);
+                const bool loading = Atomic::get(preLoadDoorTransitionActive) ||
+                                     Atomic::get(epochActive);
+                bool       fadePending = Atomic::get(postLoadFadePending);
                 const bool transitionActive = loading || fadePending ||
-                                        postLoadFadeStart.load(std::memory_order_acquire) > 0;
+                                        Atomic::get(postLoadFadeStart) > 0;
                 const auto postProcessingPasses = compositeAfterPostProcessing ?
-                                                      postProcessingPassesSincePresent.exchange(
-                                                          0, std::memory_order_acq_rel) :
+                                                      Atomic::get_and_set(postProcessingPassesSincePresent, 0) :
                                                       0;
                 const bool postProcessingComposited = postProcessingPasses > 0;
                 if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+
                     const unsigned gates = (loading ? 1U : 0U) | (fadePending ? 2U : 0U) |
                                            (transitionActive ? 4U : 0U) | (postProcessingComposited ? 8U : 0U) |
-                                           (worldRenderedSincePresent.load(std::memory_order_acquire) ? 16U : 0U);
+                                           (Atomic::get(worldRenderedSincePresent) ? 16U : 0U);
                     static unsigned lastLoggedGates = ~0U;
                     if (gates != lastLoggedGates) {
+
                         logger::info("Present gates: loading={} pending={} active={} postProcessPasses={} freshWorld={} hdrTarget={}",
                             loading, fadePending, transitionActive, postProcessingPasses,
                             (gates & 16U) != 0, communityShadersHdrTarget != nullptr);
                         lastLoggedGates = gates;
                     }
                 }
+
                 // A missing world/post-process frame supplies no new destination to blend with.
                 // Re-arm the opaque hold instead of accumulating alpha over our own previous cover.
                 if (compositeAfterPostProcessing && !loading && transitionActive &&
                     !postProcessingComposited && !fadePending) {
-                    postLoadReleasePending.store(false, std::memory_order_release);
-                    postLoadFadeStart.store(0, std::memory_order_release);
-                    postLoadFadePending.store(true, std::memory_order_release);
+
+                    Atomic::set(postLoadReleasePending, false);
+                    Atomic::set(postLoadFadeStart, 0);
+                    Atomic::set(postLoadFadePending, true);
                     fadePending = true;
                 }
+
                 const bool waitingForPostProcessing =
                     compositeAfterPostProcessing && !loading && fadePending;
                 const bool usePresentFallback = !compositeAfterPostProcessing || loading ||
@@ -2332,15 +2709,18 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 const bool fallbackNeeded = transitionActive && usePresentFallback &&
                                             !postProcessingComposited;
                 if (fallbackNeeded) {
+
                     REX::W32::ComPtr<REX::W32::ID3D11Texture2D> backBuffer;
                     const auto                                  result = a_swapChain->GetBuffer(0, REX::W32::IID_ID3D11Texture2D,
                                                          reinterpret_cast<void**>(backBuffer.GetAddressOf()));
                     if (result >= 0 && backBuffer.Get()) {
+
                         auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
                         auto* device = RE::BSGraphics::Renderer::GetDevice();
                         auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
 
                         if (device && context) {
+
                             auto& framebuffer = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 
                             REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> boundView;
@@ -2352,6 +2732,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                             context->OMGetRenderTargets(
                                 1, boundView.GetAddressOf(), boundDepth.GetAddressOf());
                             if (boundView.Get()) {
+
                                 boundView->GetResource(boundResource.GetAddressOf());
                                 if (boundResource.Get()) {
                                     boundResource->QueryInterface(
@@ -2359,7 +2740,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                         reinterpret_cast<void**>(boundTexture.GetAddressOf()));
                                 }
                             }
+
                             if (framebuffer.SRV) {
+
                                 reinterpret_cast<REX::W32::ID3D11ShaderResourceView*>(
                                     framebuffer.SRV)
                                     ->GetResource(sceneResource.GetAddressOf());
@@ -2378,6 +2761,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                             bool compositedIntoCommunityShadersHdr = false;
                             if (communityShadersHdrTarget && communityShadersHdrTargetView &&
                                 MatchesFrozenFrame(communityShadersHdrTargetDesc)) {
+
                                 std::array<REX::W32::D3D11_VIEWPORT,
                                     D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE>
                                               previousViewports{};
@@ -2385,6 +2769,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                     static_cast<std::uint32_t>(previousViewports.size());
                                 context->RSGetViewports(&viewportCount, previousViewports.data());
 
+                                // A render-target view (RTV) makes this texture the output of Draw calls;
+                                // its SRV exposes the same storage for later shader reads. The viewport
+                                // must match this target's dimensions, not a previously bound upscaler
+                                // target, or the fullscreen photograph can be cropped or scaled incorrectly.
                                 auto* target = communityShadersHdrTargetView;
                                 context->OMSetRenderTargets(1, &target, nullptr);
                                 const REX::W32::D3D11_VIEWPORT viewport{
@@ -2418,11 +2806,12 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                 sceneTexture.Get() && boundTexture.Get() &&
                                 sceneTexture.Get() != boundTexture.Get();
                             const bool compositeIntoScene =
-                                presentation.load(std::memory_order_acquire) != Presentation::seamless &&
+                                Atomic::get(presentation) != Presentation::seamless &&
                                 separateUIAvailable;
                             if (compositedIntoCommunityShadersHdr) {
                                 // CS's Present hook consumes the HDR target after this hook returns.
                             } else if (compositeIntoScene) {
+
                                 REX::W32::D3D11_TEXTURE2D_DESC sceneDesc{};
                                 sceneTexture->GetDesc(&sceneDesc);
 
@@ -2430,6 +2819,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                 if (device->CreateRenderTargetView(
                                         sceneTexture.Get(), nullptr, sceneView.GetAddressOf()) >= 0 &&
                                     sceneView.Get()) {
+
                                     std::array<REX::W32::D3D11_VIEWPORT,
                                         D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE>
                                                   previousViewports{};
@@ -2457,6 +2847,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                     }
                                 }
                             } else {
+
                                 // The completed swap buffer contains the final scene and Scaleform output.
                                 // Bind it explicitly; drawing with CS's internal viewport still active clips
                                 // the cover to the upper-left portion of the output-sized destination rect.
@@ -2466,6 +2857,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                 if (device->CreateRenderTargetView(
                                         backBuffer.Get(), nullptr, backBufferView.GetAddressOf()) >= 0 &&
                                     backBufferView.Get()) {
+
                                     std::array<REX::W32::D3D11_VIEWPORT,
                                         D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE>
                                                   previousViewports{};
@@ -2504,14 +2896,14 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 // HUD hidden for the retained-frame presentation, and release it on the UI thread
                 // once that presentation ends. Movie writes never happen in Present itself.
                 const bool hudTransition =
-                    epochActive.load(std::memory_order_acquire) ||
-                    preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
-                    postLoadFadePending.load(std::memory_order_acquire) ||
-                    postLoadFadeStart.load(std::memory_order_acquire) > 0;
+                    Atomic::get(epochActive) ||
+                    Atomic::get(preLoadDoorTransitionActive) ||
+                    Atomic::get(postLoadFadePending) ||
+                    Atomic::get(postLoadFadeStart) > 0;
                 const bool wantsHUDHidden =
-                    mainMenuLoadActive.load(std::memory_order_acquire) ||
+                    Atomic::get(mainMenuLoadActive) ||
                     !Settings::GetSingleton().ShowHUDDuringLoading();
-                if (hudVisibilityOwned.load(std::memory_order_acquire) ||
+                if (Atomic::get(hudVisibilityOwned) ||
                     (hudTransition && wantsHUDHidden && !IsVanilla())) {
                     QueueHUDVisibilitySync();
                 }
@@ -2522,16 +2914,23 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             }
         }
 
-        worldRenderedSincePresent.store(false, std::memory_order_release);
-        if (hooksEnabled.load(std::memory_order_acquire) && compositeAfterPostProcessing) {
+        Atomic::set(worldRenderedSincePresent, false);
+        if (Atomic::get(hooksEnabled) && compositeAfterPostProcessing) {
+
             auto* observerRenderer = RE::BSGraphics::Renderer::GetSingleton();
             EnsureCopyObserver(observerRenderer ? observerRenderer->GetRuntimeData().context : nullptr);
         }
+
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
             transitionFrameDiagnostics.insideChain = true;
         }
+
+        // Present is the handoff to the swap chain and any chained rendering integrations.
+        // Keep retained-image and HUD ownership until that chain has consumed this frame;
+        // reaching zero fade alpha earlier in a Draw call is not yet a completed handoff.
         const auto result = originalPresent(a_swapChain, a_syncInterval, a_flags);
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+
             if (transitionFrameDiagnostics.owned) {
                 logger::info("transition Present end: frame={} thread={} flags={:08X} result={:08X} displays={} snapshots={} uiPasses={} "
                     "compositions={} unpairedUi={} sceneCopies={} frozenCopies={} sceneDispatches={} displayReads={}",
@@ -2542,27 +2941,34 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     transitionFrameDiagnostics.frozenCopies, transitionFrameDiagnostics.sceneDispatches,
                     transitionFrameDiagnostics.displayCopies);
             }
+
             transitionFrameDiagnostics.insideChain = false;
             transitionFrameDiagnostics.insidePresent = false;
         }
+
         captureHdrConversionThisPresent = false;
         transitionUiOverlay.BeginPresent();
         if (Settings::GetSingleton().IsTransitionTextureCaptureEnabled()) {
-            diagnosticOutputTarget.store(0, std::memory_order_release);
+            Atomic::set(diagnosticOutputTarget, 0);
         }
-        if (result >= 0 && hooksEnabled.load(std::memory_order_acquire) &&
-            !epochActive.load(std::memory_order_acquire) &&
-            !preLoadDoorTransitionActive.load(std::memory_order_acquire) &&
-            postLoadReleasePending.exchange(false, std::memory_order_acq_rel)) {
+
+        if (result >= 0 && Atomic::get(hooksEnabled) &&
+            !Atomic::get(epochActive) &&
+            !Atomic::get(preLoadDoorTransitionActive) &&
+            Atomic::get_and_clear(postLoadReleasePending)) {
+
             FinishPostLoadPresentation();
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("post-load frozen-frame crossfade completed after final Present; releasing UI policy and HUD");
             }
         }
+
         return result;
     }
 
-    // Logs the world state at the two render milestones used by this experiment.
+    /**
+     * @brief Logs the world state at the two render milestones used by this experiment.
+     */
     void CellTransitioner::LogRenderState(std::string_view a_timing)
     {
         if (!Settings::GetSingleton().IsLoadingLoggingEnabled()) {
@@ -2576,10 +2982,15 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             RE::Main::WorldRootCamera() != nullptr, player && player->Get3D() != nullptr);
     }
 
-    // Improved Camera applies NPCEyeBone height after Skyrim updates the first-person camera.
-    // During a cell handoff that offset can accumulate while Skyrim's camera anchor stays fixed.
-    // Correct only that extra positive displacement, before drawing the destination world. The
-    // baseline retains Improved Camera's intended first-person offset; moving the player opts out.
+    /**
+     * @brief Corrects excess Improved Camera eye-height displacement during a stationary cell transition.
+     *
+     * @details Improved Camera applies NPCEyeBone height after Skyrim updates the first-person camera.
+     * During a cell handoff that offset can accumulate while Skyrim's camera anchor stays
+     * fixed. Correct only that extra positive displacement, before drawing the destination
+     * world. The baseline retains Improved Camera's intended first-person offset; moving the
+     * player opts out.
+     */
     void CellTransitioner::CorrectImprovedCameraTransitionBounce() noexcept
     {
         constexpr float maximumInitialOffset = 8.0F;
@@ -2594,11 +3005,12 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
         // Master's existing post-load fade flags bound the destination-camera handoff window.
         const bool destinationRendering =
-            !epochActive.load(std::memory_order_acquire) &&
-            (postLoadFadePending.load(std::memory_order_acquire) ||
-                postLoadFadeStart.load(std::memory_order_acquire) > 0);
-        if (!hooksEnabled.load(std::memory_order_acquire) || !destinationRendering ||
+            !Atomic::get(epochActive) &&
+            (Atomic::get(postLoadFadePending) ||
+                Atomic::get(postLoadFadeStart) > 0);
+        if (!Atomic::get(hooksEnabled) || !destinationRendering ||
             !GetModuleHandleW(L"ImprovedCameraSE.dll")) {
+
             active = false;
             abandoned = false;
             return;
@@ -2608,6 +3020,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!camera || !camera->IsInFirstPerson() || !player ||
             player->AsActorState()->IsWeaponDrawn()) {
+
             active = false;
             abandoned = true;
             return;
@@ -2624,41 +3037,52 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         const auto anchor = camera->GetRuntimeData2().pos;
         const float offset = root->world.translate.z - anchor.z;
         if (!std::isfinite(offset)) {
+
             abandoned = true;
             return;
         }
+
         if (!active) {
+
             // A large first sample means we missed the stable camera; leave it untouched.
             if (std::abs(offset) > maximumInitialOffset) {
+
                 abandoned = true;
                 return;
             }
+
             baseline = offset;
             initialPlayerPosition = player->GetPosition();
             active = true;
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("Improved Camera transition correction armed: camera offset {:.3f}", baseline);
             }
+
             return;
         }
 
         const auto position = player->GetPosition();
         const auto displacement = position - initialPlayerPosition;
         if (displacement.Length() > movementTolerance) {
+
             abandoned = true;
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("Improved Camera transition correction released for player movement");
             }
+
             return;
         }
 
         const float excess = offset - baseline;
         if (excess < -bounceThreshold || excess > maximumBounce) {
+
             // A new camera state is not the small repeatable handoff pulse.
             abandoned = true;
             return;
         }
+
         if (excess > bounceThreshold) {
+
             root->local.translate.z -= excess;
             root->world.translate.z -= excess;
             cameraNode->world.translate.z -= excess;
@@ -2668,16 +3092,19 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
     }
 
-    // Observes when Skyrim stops and resumes its normal world-render call.
+    /**
+     * @brief Observes when Skyrim stops and resumes its normal world-render call.
+     */
     void CellTransitioner::ObserveRenderWorld(bool a_firstPerson)
     {
         CorrectImprovedCameraTransitionBounce();
-        if (hooksEnabled.load(std::memory_order_acquire) && Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+        if (Atomic::get(hooksEnabled) && Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+
             try {
-                auto state = renderObservationState.load(std::memory_order_acquire);
-                if (state == 1 && renderObservationState.compare_exchange_strong(state, 2)) {
+                auto state = Atomic::get(renderObservationState);
+                if (state == 1 && Atomic::compare_and_set(renderObservationState, state, 2, std::memory_order_seq_cst)) {
                     LogRenderState("while Loading Menu is open");
-                } else if (state == 3 && renderObservationState.compare_exchange_strong(state, 0)) {
+                } else if (state == 3 && Atomic::compare_and_set(renderObservationState, state, 0, std::memory_order_seq_cst)) {
                     LogRenderState("for the first time after Loading Menu closed");
                 }
             } catch (const std::exception& error) {
@@ -2688,12 +3115,15 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         if (originalRenderWorld.address()) {
+
             originalRenderWorld(a_firstPerson);
-            worldRenderedSincePresent.store(true, std::memory_order_release);
+            Atomic::set(worldRenderedSincePresent, true);
         }
     }
 
-    // Copies the currently bound world target into the rolling frozen-frame texture.
+    /**
+     * @brief Copies the currently bound world target into the rolling frozen-frame texture.
+     */
     void CellTransitioner::CaptureBoundWorldTarget()
     {
         auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
@@ -2706,6 +3136,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> renderTargetView;
         context->OMGetRenderTargets(1, renderTargetView.GetAddressOf(), nullptr);
         if (!renderTargetView.Get()) {
+
             logger::warn("no render target was bound before Scaleform rendering");
             return;
         }
@@ -2721,10 +3152,12 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         if (!isTexture) {
             logger::warn("bound UI render target was not a texture");
         } else {
+
             auto&                                       framebuffer = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
             REX::W32::ComPtr<REX::W32::ID3D11Resource>  framebufferResource;
             REX::W32::ComPtr<REX::W32::ID3D11Texture2D> framebufferScene;
             if (framebuffer.SRV) {
+
                 reinterpret_cast<REX::W32::ID3D11ShaderResourceView*>(
                     framebuffer.SRV)
                     ->GetResource(framebufferResource.GetAddressOf());
@@ -2748,6 +3181,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                       PrepareSceneFrame(device, desc) :
                                       PrepareFrozenFrame(device, desc);
             if (prepared) {
+
                 // This is a framebuffer-space fallback. HDRDisplay restores kFRAMEBUFFER.SRV after
                 // ISHDR, so it is not interchangeable with our primary floating-point HDR capture.
                 context->CopyResource(useSceneCapture ? sceneFrame : frozenFrame, renderTarget);
@@ -2756,6 +3190,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 }
 
                 if (Settings::GetSingleton().IsLoadingLoggingEnabled() && !loggedFrozenFrame) {
+
                     if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                         logger::info(
                             "capturing rolling {}x{} world frames before Scaleform ({}; {})",
@@ -2766,25 +3201,30 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                 "bound target",
                             useSceneCapture ? "CS scene copy" : "primary copy");
                     }
+
                     loggedFrozenFrame = true;
                 }
             }
         }
     }
 
-    // Captures after Skyrim binds the Scaleform target but before it draws the UI.
+    /**
+     * @brief Captures after Skyrim binds the Scaleform target but before it draws the UI.
+     */
     void CellTransitioner::CaptureAfterScaleformBegin(void* a_renderer)
     {
         // The original call must run first because it binds the render target that contains the finished world.
         if (!originalBeginScaleform.address()) {
             return;
         }
+
         originalBeginScaleform(a_renderer);
 
-        if (hooksEnabled.load(std::memory_order_acquire)) {
+        if (Atomic::get(hooksEnabled)) {
+
             try {
                 // Locking preserves the last complete world frame throughout the loading epoch.
-                if (!frozenFrameLocked.load(std::memory_order_acquire)) {
+                if (!Atomic::get(frozenFrameLocked)) {
                     CaptureBoundWorldTarget();
                 }
             } catch (const std::exception& error) {
@@ -2795,9 +3235,11 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
     }
 
-    // Lets Community Shaders finish upscaling/HDR work, then composites into the final image-space
-    // target it leaves bound. This keeps the captured frame and destination in the same temporal and
-    // viewport space instead of feeding a retained color image through live DLSS motion data.
+    /**
+     * @brief Lets Community Shaders finish upscaling/HDR work, then composites into the final image-space
+     * target it leaves bound. This keeps the captured frame and destination in the same temporal
+     * and viewport space instead of feeding a retained color image through live DLSS motion data.
+     */
     void CellTransitioner::CompositeAfterPostProcessing(
         RE::ImageSpaceManager* a_manager, std::uint32_t a_3, RE::RENDER_TARGET a_target,
         void* a_4, bool a_5)
@@ -2806,12 +3248,14 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             originalImageSpacePostProcessing(a_manager, a_3, a_target, a_4, a_5);
         }
 
-        if (hooksEnabled.load(std::memory_order_acquire)) {
+        if (Atomic::get(hooksEnabled)) {
+
             try {
                 auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
                 auto* device = RE::BSGraphics::Renderer::GetDevice();
                 auto* context = renderer ? renderer->GetRuntimeData().context : nullptr;
                 if (device && context) {
+
                     REX::W32::ComPtr<REX::W32::ID3D11RenderTargetView> targetView;
                     REX::W32::ComPtr<REX::W32::ID3D11DepthStencilView> targetDepth;
                     REX::W32::ComPtr<REX::W32::ID3D11Resource>         targetResource;
@@ -2821,6 +3265,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     if (targetView.Get()) {
                         targetView->GetResource(targetResource.GetAddressOf());
                     }
+
                     if (targetResource.Get()) {
                         targetResource->QueryInterface(
                             REX::W32::IID_ID3D11Texture2D,
@@ -2828,6 +3273,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     }
 
                     if (targetView.Get() && targetTexture.Get()) {
+
                         REX::W32::D3D11_TEXTURE2D_DESC desc{};
                         targetTexture->GetDesc(&desc);
 
@@ -2837,11 +3283,12 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         if (Settings::GetSingleton().IsLoadingLoggingEnabled() &&
                             (desc.width != lastLoggedDesc.width || desc.height != lastLoggedDesc.height ||
                                 desc.format != lastLoggedDesc.format)) {
+
                             logger::info("post-CS output target={}x{} format={} frozen={}x{} format={} locked={} freshWorld={}",
                                 desc.width, desc.height, std::to_underlying(desc.format),
                                 frozenFrameDesc.width, frozenFrameDesc.height, std::to_underlying(frozenFrameDesc.format),
-                                frozenFrameLocked.load(std::memory_order_acquire),
-                                worldRenderedSincePresent.load(std::memory_order_acquire));
+                                Atomic::get(frozenFrameLocked),
+                                Atomic::get(worldRenderedSincePresent));
                             lastLoggedDesc = desc;
                         }
 
@@ -2855,38 +3302,45 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         const bool displaySize = graphics && desc.width == graphics->screenWidth &&
                                                  desc.height == graphics->screenHeight;
                         if (!sceneColorFormat || !displaySize || desc.sampleDesc.count != 1) {
+
                             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+
                                 static REX::W32::D3D11_TEXTURE2D_DESC lastRejectedDesc{};
                                 if (desc.width != lastRejectedDesc.width || desc.height != lastRejectedDesc.height ||
                                     desc.format != lastRejectedDesc.format) {
+
                                     logger::info("ignoring intermediate post-CS target={}x{} format={}; awaiting display-sized scene color",
                                         desc.width, desc.height, std::to_underlying(desc.format));
                                     lastRejectedDesc = desc;
                                 }
                             }
+
                             return;
                         }
 
-                        const bool freshWorld = worldRenderedSincePresent.load(std::memory_order_acquire);
-                        completedHdrSceneSincePresent.store(freshWorld, std::memory_order_release);
-                        const bool loading = preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
-                                             epochActive.load(std::memory_order_acquire);
-                        const bool postLoadTransition = postLoadFadePending.load(std::memory_order_acquire) ||
-                                                        postLoadFadeStart.load(std::memory_order_acquire) > 0;
+                        const bool freshWorld = Atomic::get(worldRenderedSincePresent);
+                        Atomic::set(completedHdrSceneSincePresent, freshWorld);
+                        const bool loading = Atomic::get(preLoadDoorTransitionActive) ||
+                                             Atomic::get(epochActive);
+                        const bool postLoadTransition = Atomic::get(postLoadFadePending) ||
+                                                        Atomic::get(postLoadFadeStart) > 0;
                         if (Settings::GetSingleton().IsLoadingLoggingEnabled() && (loading || postLoadTransition)) {
                             logger::info("post-CS scene trace: frame={} insidePresent={} target={:X} expectedScene={:X} "
                                 "freshWorld={} locked={} matchesFrozen={} size={}x{} format={}",
                                 transitionFrameDiagnostics.frame, transitionFrameDiagnostics.insidePresent,
                                 reinterpret_cast<std::uintptr_t>(targetTexture.Get()),
                                 reinterpret_cast<std::uintptr_t>(communityShadersHdrTarget), freshWorld,
-                                frozenFrameLocked.load(std::memory_order_acquire), MatchesFrozenFrame(desc),
+                                Atomic::get(frozenFrameLocked), MatchesFrozenFrame(desc),
                                 desc.width, desc.height, std::to_underlying(desc.format));
                         }
+
                         if (freshWorld && !loading && postLoadTransition && !MatchesFrozenFrame(desc)) {
-                            if (mainMenuLoadActive.load(std::memory_order_acquire) &&
-                                transitionType.load(std::memory_order_acquire) == Settings::TransitionType::color &&
-                                colorSource.load(std::memory_order_acquire) == Settings::ColorSource::fixed &&
+
+                            if (Atomic::get(mainMenuLoadActive) &&
+                                Atomic::get(transitionType) == Settings::TransitionType::color &&
+                                Atomic::get(colorSource) == Settings::ColorSource::fixed &&
                                 PrepareFrozenFrame(device, desc)) {
+
                                 // Startup has no pre-load world photograph. Allocate the binding resource
                                 // for the fixed-black shader, which does not sample this destination copy.
                                 context->CopyResource(frozenFrame, targetTexture.Get());
@@ -2894,6 +3348,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                     logger::info("initialized main-menu fixed-color transition on the first rendered world frame");
                                 }
                             } else {
+
                                 logger::warn(
                                     "no compatible retained scene after loading (source={}x{} format={}, target={}x{} format={}); releasing presentation",
                                     frozenFrameDesc.width, frozenFrameDesc.height, std::to_underlying(frozenFrameDesc.format),
@@ -2901,18 +3356,23 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                 FinishPostLoadPresentation();
                             }
                         }
-                        if (freshWorld && !frozenFrameLocked.load(std::memory_order_acquire) &&
+
+                        if (freshWorld && !Atomic::get(frozenFrameLocked) &&
                             PrepareFrozenFrame(device, desc)) {
+
                             context->CopyResource(frozenFrame, targetTexture.Get());
                             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                                 loggedFrozenPresentation = false;
                             }
+
                             if (Settings::GetSingleton().IsLoadingLoggingEnabled() && !loggedFrozenFrame) {
+
                                 if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                                     logger::info(
                                         "capturing rolling {}x{} world frames after CS post-processing",
                                         desc.width, desc.height);
                                 }
+
                                 loggedFrozenFrame = true;
                             }
                         }
@@ -2920,12 +3380,15 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         if (desc.format == REX::W32::DXGI_FORMAT_R16G16B16A16_FLOAT &&
                             MatchesFrozenFrame(desc) &&
                             communityShadersHdrTarget != targetTexture.Get()) {
+
                             if (communityShadersHdrTargetView) {
                                 communityShadersHdrTargetView->Release();
                             }
+
                             if (communityShadersHdrTarget) {
                                 communityShadersHdrTarget->Release();
                             }
+
                             communityShadersHdrTarget = targetTexture.Get();
                             communityShadersHdrTarget->AddRef();
                             communityShadersHdrTargetView = targetView.Get();
@@ -2933,28 +3396,32 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                             communityShadersHdrTargetDesc = desc;
                         }
 
-                        if (!freshWorld && !loading && postLoadFadeStart.load(std::memory_order_acquire) > 0) {
-                            postLoadReleasePending.store(false, std::memory_order_release);
-                            postLoadFadeStart.store(0, std::memory_order_release);
-                            postLoadFadePending.store(true, std::memory_order_release);
+                        if (!freshWorld && !loading && Atomic::get(postLoadFadeStart) > 0) {
+
+                            Atomic::set(postLoadReleasePending, false);
+                            Atomic::set(postLoadFadeStart, 0);
+                            Atomic::set(postLoadFadePending, true);
                         }
+
                         if (freshWorld && MatchesFrozenFrame(desc) &&
-                            !preLoadDoorTransitionActive.load(std::memory_order_acquire) &&
-                            !epochActive.load(std::memory_order_acquire) &&
-                            postLoadFadePending.exchange(false, std::memory_order_acq_rel)) {
+                            !Atomic::get(preLoadDoorTransitionActive) &&
+                            !Atomic::get(epochActive) &&
+                            Atomic::get_and_clear(postLoadFadePending)) {
+
                             const auto now = CurrentTimeMilliseconds();
-                            postLoadFadeStart.store(now, std::memory_order_release);
+                            Atomic::set(postLoadFadeStart, now);
                             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                                 logger::info("world rendering and post-CS compositor resumed; starting post-load fade");
                             }
                         }
 
                         const bool transitionActive =
-                            preLoadDoorTransitionActive.load(std::memory_order_acquire) ||
-                            epochActive.load(std::memory_order_acquire) ||
-                            postLoadFadePending.load(std::memory_order_acquire) ||
-                            postLoadFadeStart.load(std::memory_order_acquire) > 0;
+                            Atomic::get(preLoadDoorTransitionActive) ||
+                            Atomic::get(epochActive) ||
+                            Atomic::get(postLoadFadePending) ||
+                            Atomic::get(postLoadFadeStart) > 0;
                         if (transitionActive && MatchesFrozenFrame(desc)) {
+
                             std::array<REX::W32::D3D11_VIEWPORT,
                                 D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE>
                                           previousViewports{};
@@ -2970,7 +3437,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                             };
                             context->RSSetViewports(1, &viewport);
                             CompositeLoadingFrame(context, targetTexture.Get(), desc, true);
-                            postProcessingPassesSincePresent.fetch_add(1, std::memory_order_acq_rel);
+                            Atomic::get_and_add(postProcessingPassesSincePresent, 1);
 
                             context->OMSetRenderTargets(1, &outputView, targetDepth.Get());
                             if (viewportCount > 0) {
@@ -2987,18 +3454,22 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
     }
 
-    // Records every engine fast-travel fade completion before its shared callback starts the load.
+    /**
+     * @brief Records every engine fast-travel fade completion before its shared callback starts the load.
+     */
     void CellTransitioner::FastTravelFadeCallbackRun(void* a_callback)
     {
-        if (hooksEnabled.load(std::memory_order_acquire)) {
+        if (Atomic::get(hooksEnabled)) {
+
             const bool useCustomTransition =
                 Settings::GetSingleton().UseTransitionsForFastTravel();
-            vanillaLoadPending.store(!useCustomTransition, std::memory_order_release);
-            fastTravelBlackPending.store(useCustomTransition, std::memory_order_release);
+            Atomic::set(vanillaLoadPending, !useCustomTransition);
+            Atomic::set(fastTravelBlackPending, useCustomTransition);
             if (!useCustomTransition) {
-                preLoadOwnedFader.store(false, std::memory_order_release);
-                loadOwnedFader.store(false, std::memory_order_release);
-                loadFaderCloseQueued.store(false, std::memory_order_release);
+
+                Atomic::set(preLoadOwnedFader, false);
+                Atomic::set(loadOwnedFader, false);
+                Atomic::set(loadFaderCloseQueued, false);
                 if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                     logger::info("fast travel selected Skyrim's vanilla loading presentation");
                 }
@@ -3010,18 +3481,22 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
     }
 
-    // Records every engine save-load fade completion before its shared callback starts the load.
+    /**
+     * @brief Records every engine save-load fade completion before its shared callback starts the load.
+     */
     void CellTransitioner::SaveLoadFadeCallbackRun(void* a_callback)
     {
-        if (hooksEnabled.load(std::memory_order_acquire)) {
-            fastTravelBlackPending.store(false, std::memory_order_release);
+        if (Atomic::get(hooksEnabled)) {
+
+            Atomic::set(fastTravelBlackPending, false);
             const bool useCustomTransition =
                 Settings::GetSingleton().UseTransitionsForSaveLoads();
-            vanillaLoadPending.store(!useCustomTransition, std::memory_order_release);
+            Atomic::set(vanillaLoadPending, !useCustomTransition);
             if (!useCustomTransition) {
-                preLoadOwnedFader.store(false, std::memory_order_release);
-                loadOwnedFader.store(false, std::memory_order_release);
-                loadFaderCloseQueued.store(false, std::memory_order_release);
+
+                Atomic::set(preLoadOwnedFader, false);
+                Atomic::set(loadOwnedFader, false);
+                Atomic::set(loadFaderCloseQueued, false);
                 if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                     logger::info("save load selected Skyrim's vanilla loading presentation");
                 }
@@ -3033,37 +3508,44 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
     }
 
-    // Restores only the persistent movie state changed by load-fader suppression.
+    /**
+     * @brief Restores only the persistent movie state changed by load-fader suppression.
+     */
     void CellTransitioner::RestoreFaderPresentation(RE::IMenu* a_menu)
     {
         if (!a_menu || !a_menu->uiMovie ||
-            !faderPresentationSuppressed.exchange(false, std::memory_order_acq_rel)) {
+            !Atomic::get_and_clear(faderPresentationSuppressed)) {
             return;
         }
 
         // FaderMenu is persistent. Restore the exact presentation state observed before suppression;
         // forcing an opaque Scaleform background here produces a gray frame during StatsMenu tweens.
-        a_menu->uiMovie->SetBackgroundAlpha(faderBackgroundAlpha.load(std::memory_order_acquire));
-        a_menu->uiMovie->SetVisible(faderWasVisible.load(std::memory_order_acquire));
+        a_menu->uiMovie->SetBackgroundAlpha(Atomic::get(faderBackgroundAlpha));
+        a_menu->uiMovie->SetVisible(Atomic::get(faderWasVisible));
     }
 
-    // Observes native fade requests, protecting only our internal rolling capture while Skyrim fades out.
-    // The original FaderData and menu behavior remain untouched for script-driven fades and image modifiers.
+    /**
+     * @brief Observes native fade requests, protecting only our internal rolling capture while Skyrim
+     * fades out. The original FaderData and menu behavior remain untouched for script-driven fades
+     * and image modifiers.
+     */
     RE::UI_MESSAGE_RESULTS CellTransitioner::FaderMenuProcessMessage(
         RE::IMenu* a_menu, RE::UIMessage& a_message)
     {
         bool queuePostLoadClose = false;
         bool restorePresentation = false;
 
-        if (hooksEnabled.load(std::memory_order_acquire)) {
-            const bool activeEpoch = epochActive.load(std::memory_order_acquire);
+        if (Atomic::get(hooksEnabled)) {
+
+            const bool activeEpoch = Atomic::get(epochActive);
             const bool postLoadTransition =
-                postLoadFadePending.load(std::memory_order_acquire) ||
-                postLoadFadeStart.load(std::memory_order_acquire) > 0;
+                Atomic::get(postLoadFadePending) ||
+                Atomic::get(postLoadFadeStart) > 0;
 
             if (a_message.data &&
                 (a_message.type == RE::UI_MESSAGE_TYPE::kShow ||
                     a_message.type == RE::UI_MESSAGE_TYPE::kUpdate)) {
+
                 const auto* data = static_cast<const RE::FaderData*>(a_message.data);
                 if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                     logger::info("native fader request: message={} callback={:X} out={} black={} pauses={} duration={} minDuration={} epoch={} postLoad={}",
@@ -3076,75 +3558,86 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 // time. Sleeping can open LoadingMenu before that queued request is handled, so do not
                 // let the ordinary new-black-fader-during-a-load fallback claim it.
                 const auto sleepFadeDeadline =
-                    sleepFadeRequestDeadline.load(std::memory_order_acquire);
+                    Atomic::get(sleepFadeRequestDeadline);
                 const bool sleepFadeRequest =
                     sleepFadeDeadline >= CurrentTimeMilliseconds() && !data->unk10 &&
                     data->isFadingOut && data->isBlack && !data->pausesGame;
                 const bool preserveSleepFader =
-                    sleepFadeRequest || sleepFaderActive.load(std::memory_order_acquire);
+                    sleepFadeRequest || Atomic::get(sleepFaderActive);
                 const auto nativeLoadPath = GetNativeLoadPath(*data);
                 const bool nativeLoadFade = nativeLoadPath != NativeLoadPath::none && data->isBlack;
                 const bool vanillaLoadFade = nativeLoadFade && !UsesCustomTransition(nativeLoadPath);
                 if (nativeLoadFade) {
-                    fastTravelBlackPending.store(
-                        nativeLoadPath == NativeLoadPath::fastTravel && !vanillaLoadFade,
-                        std::memory_order_release);
+                    Atomic::set(fastTravelBlackPending,
+                        nativeLoadPath == NativeLoadPath::fastTravel && !vanillaLoadFade);
                 }
+
                 auto*      ui = RE::UI::GetSingleton();
                 const bool mapMenuFade = !nativeLoadFade && ui &&
                                          ui->IsMenuOpen(RE::MapMenu::MENU_NAME);
                 if (vanillaLoadFade && data->isFadingOut) {
-                    vanillaLoadPending.store(true, std::memory_order_release);
-                    preLoadOwnedFader.store(false, std::memory_order_release);
-                    loadOwnedFader.store(false, std::memory_order_release);
-                    loadFaderCloseQueued.store(false, std::memory_order_release);
+
+                    Atomic::set(vanillaLoadPending, true);
+                    Atomic::set(preLoadOwnedFader, false);
+                    Atomic::set(loadOwnedFader, false);
+                    Atomic::set(loadFaderCloseQueued, false);
                 }
 
                 if (sleepFadeRequest) {
-                    sleepFadeRequestDeadline.store(0, std::memory_order_release);
-                    sleepFaderActive.store(true, std::memory_order_release);
+
+                    Atomic::set(sleepFadeRequestDeadline, 0);
+                    Atomic::set(sleepFaderActive, true);
                 }
+
                 if (preserveSleepFader) {
-                    preLoadOwnedFader.store(false, std::memory_order_release);
-                    loadOwnedFader.store(false, std::memory_order_release);
-                    loadFaderCloseQueued.store(false, std::memory_order_release);
+
+                    Atomic::set(preLoadOwnedFader, false);
+                    Atomic::set(loadOwnedFader, false);
+                    Atomic::set(loadFaderCloseQueued, false);
                 }
+
                 if (mapMenuFade) {
+
                     // MapMenu uses FaderMenu for its own camera transitions when opening and closing.
                     // Do not let stale or fallback load ownership hide that menu-owned fade. A real
                     // fast-travel request remains load-owned because it has a native load callback.
-                    preLoadOwnedFader.store(false, std::memory_order_release);
-                    loadOwnedFader.store(false, std::memory_order_release);
-                    loadFaderCloseQueued.store(false, std::memory_order_release);
+                    Atomic::set(preLoadOwnedFader, false);
+                    Atomic::set(loadOwnedFader, false);
+                    Atomic::set(loadFaderCloseQueued, false);
                 }
 
-                if (newGameTransitionActive.load(std::memory_order_acquire)) {
+                if (Atomic::get(newGameTransitionActive)) {
                     if (!data->isFadingOut && data->isBlack && data->fadeDuration > 0.0F) {
-                        newGameFadeRequestSeen.store(true, std::memory_order_release);
+                        Atomic::set(newGameFadeRequestSeen, true);
                     }
                 } else if (!preserveSleepFader && !mapMenuFade) {
+
                     // Static xrefs show that native load fades carry one of four dedicated completion
                     // callbacks. Papyrus FadeOutGame uses the separate callback-free builder, so this
                     // claims the initiating fader without suppressing arbitrary scripted fades.
                     if (nativeLoadFade && !vanillaLoadFade) {
-                        vanillaLoadPending.store(false, std::memory_order_release);
-                        loadOwnedFader.store(true, std::memory_order_release);
+
+                        Atomic::set(vanillaLoadPending, false);
+                        Atomic::set(loadOwnedFader, true);
                         if (!activeEpoch && !postLoadTransition) {
-                            preLoadOwnedFader.store(true, std::memory_order_release);
+
+                            Atomic::set(preLoadOwnedFader, true);
                             if (nativeLoadPath == NativeLoadPath::door) {
+
                                 bool expected = false;
-                                if (preLoadDoorCaptureLocked.compare_exchange_strong(
-                                        expected, true, std::memory_order_acq_rel)) {
+                                if (Atomic::compare_and_set(preLoadDoorCaptureLocked, expected, true)) {
+
                                     // The door callback can detach or disable a carried/dynamic light
                                     // before LoadingMenu opens. Retain the last fully presented frame
                                     // while the light is still visible, rather than locking several
                                     // frames later during LoadingMenu construction.
-                                    frozenFrameLocked.store(true, std::memory_order_release);
-                                    presentation.store(ChoosePresentation(), std::memory_order_release);
-                                    preLoadDoorTransitionActive.store(true, std::memory_order_release);
+                                    Atomic::set(frozenFrameLocked, true);
+                                    Atomic::set(presentation, ChoosePresentation());
+                                    Atomic::set(preLoadDoorTransitionActive, true);
                                     if (Settings::GetSingleton().IsTransitionTextureCaptureEnabled()) {
+
                                         std::uint8_t expected = 0;
-                                        diagnosticCaptureStage.compare_exchange_strong(expected, 1);
+                                        Atomic::compare_and_set(diagnosticCaptureStage, expected, 1, std::memory_order_seq_cst);
                                     }
                                 }
                             }
@@ -3156,36 +3649,39 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     // immediately; non-pausing script fades outside this transition window are untouched.
                     if (!vanillaLoadFade && data->isBlack && data->pausesGame &&
                         (activeEpoch || postLoadTransition)) {
-                        loadOwnedFader.store(true, std::memory_order_release);
+
+                        Atomic::set(loadOwnedFader, true);
                         if (postLoadTransition &&
-                            !loadFaderCloseQueued.exchange(true, std::memory_order_acq_rel)) {
+                            !Atomic::get_and_set(loadFaderCloseQueued, true)) {
                             queuePostLoadClose = true;
                         }
                     }
 
                     if (!vanillaLoadFade && activeEpoch &&
-                        !faderPresentAtLoadStart.load(std::memory_order_acquire) &&
+                        !Atomic::get(faderPresentAtLoadStart) &&
                         data->isBlack) {
-                        loadOwnedFader.store(true, std::memory_order_release);
+                        Atomic::set(loadOwnedFader, true);
                     }
                 }
 
                 // A prior load can leave this persistent movie hidden. Restore only for a request
                 // outside the load-suppression window (or for explicitly preserved native flows).
                 restorePresentation = preserveSleepFader || mapMenuFade || vanillaLoadFade ||
-                                      newGameTransitionActive.load(std::memory_order_acquire) ||
+                                      Atomic::get(newGameTransitionActive) ||
                                       (!activeEpoch && !postLoadTransition && !nativeLoadFade);
             } else if (a_message.type == RE::UI_MESSAGE_TYPE::kHide) {
-                sleepFadeRequestDeadline.store(0, std::memory_order_release);
-                sleepFaderActive.store(false, std::memory_order_release);
+
+                Atomic::set(sleepFadeRequestDeadline, 0);
+                Atomic::set(sleepFaderActive, false);
                 if (!activeEpoch) {
+
                     // FadeThenFastTravelCallback/FadeThenLoadCallback finish before LoadingMenu
                     // opens. Keep their decision latched across this native fader hide so
                     // PrepareForLoad can consume it when the actual load begins.
-                    preLoadOwnedFader.store(false, std::memory_order_release);
-                    loadOwnedFader.store(false, std::memory_order_release);
-                    loadFaderCloseQueued.store(false, std::memory_order_release);
-                    fastTravelBlackActive.store(false, std::memory_order_release);
+                    Atomic::set(preLoadOwnedFader, false);
+                    Atomic::set(loadOwnedFader, false);
+                    Atomic::set(loadFaderCloseQueued, false);
+                    Atomic::set(fastTravelBlackActive, false);
                 }
             }
         }
@@ -3195,14 +3691,15 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         const auto result = originalFaderProcessMessage ?
                                 originalFaderProcessMessage(a_menu, a_message) :
                                 RE::UI_MESSAGE_RESULTS::kPassOn;
-        if (hooksEnabled.load(std::memory_order_acquire) &&
+        if (Atomic::get(hooksEnabled) &&
             Settings::GetSingleton().IsLoadingLoggingEnabled() && a_menu) {
+
             logger::info("native fader processed: message={} result={} active={} closeQueued={} owned={}",
                 std::to_underlying(a_message.type.get()), std::to_underlying(result),
                 static_cast<RE::FaderMenu*>(a_menu)->GetRuntimeData().isActive, queuePostLoadClose,
-                loadOwnedFader.load(std::memory_order_acquire));
+                Atomic::get(loadOwnedFader));
             // A native request may arrive after EndLoad first reported restored controls.
-            awaitingControlRestore.store(true, std::memory_order_release);
+            Atomic::set(awaitingControlRestore, true);
             ObserveControlRestore();
         }
 
@@ -3219,37 +3716,45 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         return result;
     }
 
-    // Advances every FaderMenu normally and hides only the fade-in owned by the active ordinary load.
+    /**
+     * @brief Advances every FaderMenu normally and hides only the fade-in owned by the active ordinary
+     * load.
+     */
     void CellTransitioner::FaderMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
     {
         if (originalFaderAdvanceMovie) {
             originalFaderAdvanceMovie(a_menu, a_interval, a_currentTime);
         }
 
-        if (!hooksEnabled.load(std::memory_order_acquire)) {
+        if (!Atomic::get(hooksEnabled)) {
             return;
         }
 
         try {
             if (a_menu && a_menu->uiMovie) {
-                if (newGameTransitionActive.load(std::memory_order_acquire)) {
+
+                if (Atomic::get(newGameTransitionActive)) {
+
                     // Keep Skyrim's native black fade at menu depth 3, below TitleSequenceMenu at depth 4.
                     RestoreFaderPresentation(a_menu);
                     a_menu->uiMovie->SetVisible(true);
 
-                    const bool requestSeen = newGameFadeRequestSeen.load(std::memory_order_acquire);
+                    const bool requestSeen = Atomic::get(newGameFadeRequestSeen);
                     const bool fadeFinished =
                         requestSeen && !static_cast<RE::FaderMenu*>(a_menu)->GetRuntimeData().isActive;
                     if (fadeFinished) {
+
                         CancelNewGameTransition();
                         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                             logger::info("new-game native fade-in completed; restored custom transition suppression");
                         }
                     }
+
                     return;
                 }
 
-                if (sleepFaderActive.load(std::memory_order_acquire)) {
+                if (Atomic::get(sleepFaderActive)) {
+
                     // A load-owned request may have left this persistent movie hidden. Sleeping owns
                     // the complete native fade-out/fade-in lifetime, so explicitly restore it.
                     RestoreFaderPresentation(a_menu);
@@ -3257,37 +3762,40 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     return;
                 }
 
-                if (fastTravelBlackActive.load(std::memory_order_acquire)) {
+                if (Atomic::get(fastTravelBlackActive)) {
+
                     // Map fast travel keeps Skyrim's native FaderMenu above the loading presentation.
                     // Once loading ends, allow the same native movie to perform its destination fade-in.
                     RestoreFaderPresentation(a_menu);
-                    if (epochActive.load(std::memory_order_acquire)) {
+                    if (Atomic::get(epochActive)) {
                         a_menu->uiMovie->SetVisible(true);
                     }
+
                     return;
                 }
 
-                const bool transitionWindow = epochActive.load(std::memory_order_acquire) ||
-                                              postLoadFadePending.load(std::memory_order_acquire) ||
-                                              postLoadFadeStart.load(std::memory_order_acquire) > 0;
+                const bool transitionWindow = Atomic::get(epochActive) ||
+                                              Atomic::get(postLoadFadePending) ||
+                                              Atomic::get(postLoadFadeStart) > 0;
                 // Native door, fast-travel, and save-load callbacks submit their fader before
                 // LoadingMenu opens. Hide that already-identified load cover immediately so it cannot
                 // flash black in the short gap before the captured-frame transition takes over.
                 const bool suppressLoadFader =
-                    loadOwnedFader.load(std::memory_order_acquire) &&
-                    (transitionWindow || preLoadOwnedFader.load(std::memory_order_acquire)) &&
-                    !(fastTravelBlackPending.load(std::memory_order_acquire) && !transitionWindow) &&
-                    !(fastTravelBlackActive.load(std::memory_order_acquire) &&
-                        (epochActive.load(std::memory_order_acquire) ||
-                            postLoadFadePending.load(std::memory_order_acquire)));
+                    Atomic::get(loadOwnedFader) &&
+                    (transitionWindow || Atomic::get(preLoadOwnedFader)) &&
+                    !(Atomic::get(fastTravelBlackPending) && !transitionWindow) &&
+                    !(Atomic::get(fastTravelBlackActive) &&
+                        (Atomic::get(epochActive) ||
+                            Atomic::get(postLoadFadePending)));
                 if (suppressLoadFader) {
+
                     bool expected = false;
-                    if (faderPresentationSuppressed.compare_exchange_strong(
-                            expected, true, std::memory_order_acq_rel)) {
-                        faderWasVisible.store(a_menu->uiMovie->GetVisible(), std::memory_order_release);
-                        faderBackgroundAlpha.store(
-                            a_menu->uiMovie->GetBackgroundAlpha(), std::memory_order_release);
+                    if (Atomic::compare_and_set(faderPresentationSuppressed, expected, true)) {
+
+                        Atomic::set(faderWasVisible, a_menu->uiMovie->GetVisible());
+                        Atomic::set(faderBackgroundAlpha, a_menu->uiMovie->GetBackgroundAlpha());
                     }
+
                     a_menu->uiMovie->SetBackgroundAlpha(0.0F);
                     a_menu->uiMovie->SetVisible(false);
                 }
@@ -3299,42 +3807,50 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
     }
 
-    // Suppresses MistMenu presentation only while our loading compositor owns the screen. AdvanceMovie
-    // remains completely native: showMist and showLoadScreen are initialization guards, not visibility flags.
+    /**
+     * @brief Suppresses MistMenu presentation only while our loading compositor owns the screen.
+     * AdvanceMovie remains completely native: showMist and showLoadScreen are initialization
+     * guards, not visibility flags.
+     */
     void CellTransitioner::MistMenuPostDisplay(RE::IMenu* a_menu)
     {
         const bool suppressPresentation =
-            hooksEnabled.load(std::memory_order_acquire) &&
-            (epochActive.load(std::memory_order_acquire) ||
-                postLoadFadePending.load(std::memory_order_acquire) ||
-                postLoadFadeStart.load(std::memory_order_acquire) > 0 ||
-                fastTravelBlackActive.load(std::memory_order_acquire) ||
-                newGameTransitionActive.load(std::memory_order_acquire));
+            Atomic::get(hooksEnabled) &&
+            (Atomic::get(epochActive) ||
+                Atomic::get(postLoadFadePending) ||
+                Atomic::get(postLoadFadeStart) > 0 ||
+                Atomic::get(fastTravelBlackActive) ||
+                Atomic::get(newGameTransitionActive));
         if (!suppressPresentation && originalMistPostDisplay) {
             originalMistPostDisplay(a_menu);
         }
     }
 
-    // Closes only the FaderMenu claimed by this load, plus the load-specific MistMenu.
+    /**
+     * @brief Closes only the FaderMenu claimed by this load, plus the load-specific MistMenu.
+     */
     void CellTransitioner::CloseResidualLoadingMenus(bool a_preserveFader)
     {
         auto* ui = RE::UI::GetSingleton();
         auto* messages = RE::UIMessageQueue::GetSingleton();
         if (!ui || !messages) {
+
             logger::warn("could not close residual loading menus because UI services were unavailable");
             return;
         }
 
         const bool closeFader = !a_preserveFader &&
-                                loadOwnedFader.exchange(false, std::memory_order_acq_rel);
-        preLoadOwnedFader.store(false, std::memory_order_release);
+                                Atomic::get_and_clear(loadOwnedFader);
+        Atomic::set(preLoadOwnedFader, false);
         if (!a_preserveFader) {
-            faderPresentAtLoadStart.store(false, std::memory_order_release);
+            Atomic::set(faderPresentAtLoadStart, false);
         }
+
         if (closeFader && ui->IsMenuOpen(RE::FaderMenu::MENU_NAME) &&
-            !loadFaderCloseQueued.exchange(true, std::memory_order_acq_rel)) {
+            !Atomic::get_and_set(loadFaderCloseQueued, true)) {
             messages->AddMessage(RE::FaderMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
         }
+
         if (ui->IsMenuOpen(RE::MistMenu::MENU_NAME)) {
             messages->AddMessage(RE::MistMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
         }
@@ -3538,6 +4054,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 if (!CellTransitioner::CreateFrozenFrameBlurShader(reinterpret_cast<::ID3D11Device*>(device))) {
                     throw std::runtime_error("could not create the frozen-frame shader");
                 }
+
                 if (!Settings::GetSingleton().IsBlurEnabled()) {
                     logger::info("frozen-frame blur is disabled; photograph opacity shader remains active");
                 }
@@ -3552,11 +4069,13 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
                 // Compile outside the transition so the first covered frame does not hitch.
                 if (CellTransitioner::compositeAfterPostProcessing) {
+
                     const auto conversionStatus = retainedHdrConversion.Initialize(reinterpret_cast<::ID3D11Device*>(device));
                     if (FAILED(conversionStatus)) {
                         logger::warn("could not initialize retained HDR conversion ({:08X}); using native scene conversion",
                             static_cast<std::uint32_t>(conversionStatus));
                     }
+
                     const auto overlayStatus = transitionUiOverlay.Initialize(reinterpret_cast<::ID3D11Device*>(device));
                     if (FAILED(overlayStatus)) {
                         logger::warn("could not initialize native transition UI overlay ({:08X}); retaining scene composition",
@@ -3571,6 +4090,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 if (!vtableAddress) {
                     throw std::runtime_error("Skyrim's swap chain had no vtable");
                 }
+
                 REL::Relocation<std::uintptr_t> vtable{ vtableAddress };
                 const auto                      originalAddress = *reinterpret_cast<const std::uintptr_t*>(
                     vtable.address() + presentIndex * sizeof(std::uintptr_t));
@@ -3590,11 +4110,17 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     CellTransitioner::communityShadersFrameGenerationProxy =
                         presentMemory.allocationBase == communityShaders;
                 }
+
                 vtable.write_vfunc(presentIndex, CellTransitioner::PresentFrozenFrame);
 
                 if (CellTransitioner::compositeAfterPostProcessing && context) {
+
                     const bool installed = CellTransitioner::EnsureCopyObserver(context);
                     logger::info("CS HDR dispatch hook installed={}; sprite pipeline state preserved; GPU readbacks opt-in={}",
+                        /**
+                         * @brief Returns the settings instance loaded before the transition hooks are
+                         * installed.
+                         */
                         installed, Settings::GetSingleton().IsTransitionTextureCaptureEnabled());
                 }
 
@@ -3605,10 +4131,11 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
         }
 
-        // Installs every renderer and visual-transition hook.
+        /**
+         * @brief Installs renderer and visual-transition hooks.
+         */
         void InstallHooks()
         {
-            // Construct the transition controller before any callback can reach it.
             CellTransitioner::GetSingleton();
 
             InstallRenderObservationHook();
@@ -3619,7 +4146,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             InstallSaveLoadFadeCallbackHook();
             InstallFaderMenuHook();
             InstallMistMenuHooks();
-            CellTransitioner::hooksEnabled.store(true, std::memory_order_release);
+            Atomic::set(CellTransitioner::hooksEnabled, true);
             logger::info("transition recovery enabled; engine pause counter and player controls remain native");
         }
     }

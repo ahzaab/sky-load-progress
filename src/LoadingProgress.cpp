@@ -2,6 +2,7 @@
 // Copyright (c) 2026 ahzaab
 
 #include "PCH.h"
+#include "Atomic.h"
 #include "CellTransitioner.h"
 #include "IdsAndOffsets.h"
 #include "LoadingProgress.h"
@@ -13,23 +14,30 @@
 
 namespace load_progress
 {
-    // Returns the singleton that owns loading aggregation and event handling.
+    /**
+     * @brief Returns the singleton that owns loading aggregation and event handling.
+     */
     LoadingProgress& LoadingProgress::GetSingleton()
     {
         static LoadingProgress singleton;
         return singleton;
     }
 
-    // Sums the directly observed work that is still queued across all pools.
+    /**
+     * @brief Sums the directly observed work that is still queued across all pools.
+     */
     std::uint64_t LoadingProgress::GetLiveRemaining()
     {
         std::uint64_t remaining = 0;
         for (const auto& queue : liveRemaining) {
-            remaining += queue.load(std::memory_order_relaxed);
+            remaining += Atomic::get(queue, std::memory_order_relaxed);
         }
         return remaining;
     }
 
+    /**
+     * @brief Returns elapsed steady-clock time in milliseconds for progress diagnostics.
+     */
     std::uint64_t LoadingProgress::MonotonicMilliseconds() noexcept
     {
         return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -37,22 +45,27 @@ namespace load_progress
                                               .count());
     }
 
-    // Applies queue deltas outside the engine's queue-mutation call paths.
+    /**
+     * @brief Applies queue deltas outside the engine's queue-mutation call paths.
+     */
     void LoadingProgress::DrainQueueMutations()
     {
-        if (!epochActive.load(std::memory_order_acquire)) {
+        if (!Atomic::get(epochActive)) {
             return;
         }
 
         std::scoped_lock lock(stateLock);
         for (std::size_t i = 0; i < queueCount; ++i) {
-            const auto enqueued = pendingEnqueued[i].exchange(0, std::memory_order_acq_rel);
-            const auto completed = pendingCompleted[i].exchange(0, std::memory_order_acq_rel);
+            // Workers update atomic deltas without taking the UI state lock. Exchanging with zero
+            // claims this batch of deltas; increments arriving afterward belong to the next drain.
+            const auto enqueued = Atomic::get_and_set(pendingEnqueued[i], 0);
+            const auto completed = Atomic::get_and_set(pendingCompleted[i], 0);
             const auto queue = static_cast<Queue>(i);
 
             if (enqueued != 0) {
                 aggregator.Enqueue(queue, enqueued);
             }
+
             if (completed != 0) {
                 aggregator.Complete(queue, completed);
             }
@@ -60,20 +73,22 @@ namespace load_progress
         UpdateDisplayedProgress(aggregator.Current());
     }
 
-    // Resolves captured numeric IDs on the loading-menu thread and releases their ring slots.
+    /**
+     * @brief Resolves captured numeric IDs on the loading-menu thread and releases their ring slots.
+     */
     void LoadingProgress::DrainLoadedEntries(bool a_writeLog)
     {
         static constexpr auto typeNames = std::to_array<std::string_view>(
             { "object-reference", "transferred-reference", "distant-reference" });
 
         for (auto& slot : loadedEntries) {
-            if (slot.state.load(std::memory_order_acquire) != 2) {
+            if (Atomic::get(slot.state) != 2) {
                 continue;
             }
 
             const auto entry = slot.entry;
             // Release returns ownership only after this thread has copied the published record.
-            slot.state.store(0, std::memory_order_release);
+            Atomic::set(slot.state, 0);
 
             if (!a_writeLog) {
                 continue;
@@ -95,12 +110,14 @@ namespace load_progress
         }
     }
 
-    // Clears stale details and enables the lock-free producer path for a new Loading Menu lifetime.
+    /**
+     * @brief Clears stale details and enables the lock-free producer path for a new Loading Menu lifetime.
+     */
     void LoadingProgress::BeginLoadedEntryCapture()
     {
         const auto& settings = Settings::GetSingleton();
         if (!settings.IsLoadedEntryLoggingEnabled() ||
-            loadedEntryCaptureActive.load(std::memory_order_acquire)) {
+            Atomic::get(loadedEntryCaptureActive)) {
             return;
         }
 
@@ -109,17 +126,19 @@ namespace load_progress
 
         DrainLoadedEntries(false);
         for (auto& tally : loadedEntryTallies) {
-            tally.store(0, std::memory_order_relaxed);
+            Atomic::set(tally, 0, std::memory_order_relaxed);
         }
-        loadedEntryWriteCursor.store(0, std::memory_order_relaxed);
-        droppedLoadedEntryDetails.store(0, std::memory_order_relaxed);
-        loadedEntryCaptureActive.store(true, std::memory_order_release);
+        Atomic::set(loadedEntryWriteCursor, 0, std::memory_order_relaxed);
+        Atomic::set(droppedLoadedEntryDetails, 0, std::memory_order_relaxed);
+        Atomic::set(loadedEntryCaptureActive, true);
     }
 
-    // Stops producers, drains their final details, and writes exact per-category enqueue totals.
+    /**
+     * @brief Stops producers, drains their final details, and writes exact per-category enqueue totals.
+     */
     void LoadingProgress::EndLoadedEntryCapture()
     {
-        if (!loadedEntryCaptureActive.exchange(false, std::memory_order_acq_rel)) {
+        if (!Atomic::get_and_clear(loadedEntryCaptureActive)) {
             return;
         }
 
@@ -128,24 +147,28 @@ namespace load_progress
         DrainLoadedEntries(true);
         logger::info(
             "loaded-entry tally: object-references={} transferred-references={} distant-references={} dropped-details={}",
-            loadedEntryTallies[static_cast<std::size_t>(LoadedEntryType::objectReference)].load(
+            Atomic::get(loadedEntryTallies[static_cast<std::size_t>(LoadedEntryType::objectReference)],
                 std::memory_order_relaxed),
-            loadedEntryTallies[static_cast<std::size_t>(LoadedEntryType::transferredReference)].load(
+            Atomic::get(loadedEntryTallies[static_cast<std::size_t>(LoadedEntryType::transferredReference)],
                 std::memory_order_relaxed),
-            loadedEntryTallies[static_cast<std::size_t>(LoadedEntryType::distantReference)].load(
+            Atomic::get(loadedEntryTallies[static_cast<std::size_t>(LoadedEntryType::distantReference)],
                 std::memory_order_relaxed),
-            droppedLoadedEntryDetails.load(std::memory_order_relaxed));
+            Atomic::get(droppedLoadedEntryDetails, std::memory_order_relaxed));
     }
 
-    // Waits only after capture has been disabled. Producers never wait on the loading-menu thread.
+    /**
+     * @brief Waits only after capture has been disabled. Producers never wait on the loading-menu thread.
+     */
     void LoadingProgress::WaitForLoadedEntryWriters()
     {
-        while (loadedEntryWriters.load(std::memory_order_acquire) != 0) {
+        while (Atomic::get(loadedEntryWriters) != 0) {
             std::this_thread::yield();
         }
     }
 
-    // Converts the entry type into its independently configurable diagnostic switch.
+    /**
+     * @brief Converts the entry type into its independently configurable diagnostic switch.
+     */
     bool LoadingProgress::IsLoadedEntryTypeEnabled(LoadedEntryType a_type) noexcept
     {
         const auto& categories = Settings::GetSingleton().GetLoadedEntryLogging();
@@ -162,7 +185,9 @@ namespace load_progress
         }
     }
 
-    // Reserves one ring slot and publishes the completed record to the loading-menu consumer.
+    /**
+     * @brief Reserves one ring slot and publishes the completed record to the loading-menu consumer.
+     */
     bool LoadingProgress::TryStoreLoadedEntry(const LoadedEntry& a_entry) noexcept
     {
         // A few retries avoid dropping detail when the cursor meets a slot the consumer has not
@@ -170,40 +195,48 @@ namespace load_progress
         constexpr std::size_t reservationAttempts = 8;
 
         for (std::size_t attempt = 0; attempt < reservationAttempts; ++attempt) {
-            const auto index = loadedEntryWriteCursor.fetch_add(1, std::memory_order_relaxed) % loadedEntryCapacity;
+            const auto index = Atomic::get_and_add(loadedEntryWriteCursor, 1, std::memory_order_relaxed) % loadedEntryCapacity;
             auto       expectedState = std::uint8_t{ 0 };
             auto&      slot = loadedEntries[index];
 
             // State 0 is free, state 1 belongs to a producer, and state 2 is ready for the consumer.
             // The acquire/release pair ensures the consumer cannot see a partially written entry.
-            if (!slot.state.compare_exchange_strong(
+            if (!Atomic::compare_and_set(slot.state,
                     expectedState, std::uint8_t{ 1 }, std::memory_order_acq_rel, std::memory_order_relaxed)) {
                 continue;
             }
 
+            // The slot is already claimed as state 1. Publish its payload with a release write
+            // to state 2; the consumer's acquire read then makes the complete record visible.
             slot.entry = a_entry;
-            slot.state.store(2, std::memory_order_release);
+            Atomic::set(slot.state, 2);
             return true;
         }
 
         return false;
     }
 
-    // Copies only stable numeric identifiers from a loading worker into the diagnostic ring.
+    /**
+     * @brief Copies only stable numeric identifiers from a loading worker into the diagnostic ring.
+     */
     void LoadingProgress::CaptureLoadedEntry(
         LoadedEntryType a_type, RE::TESObjectREFR* a_reference, RE::TESObjectCELL* a_cell) noexcept
     {
         const auto typeIndex = static_cast<std::size_t>(a_type);
         if (!a_reference || !a_cell || typeIndex >= loadedEntryTypeCount ||
             !IsLoadedEntryTypeEnabled(a_type) ||
-            !loadedEntryCaptureActive.load(std::memory_order_acquire)) {
+            !Atomic::get(loadedEntryCaptureActive)) {
             return;
         }
 
         // Count active producers so EndLoadedEntryCapture cannot reclaim a slot mid-write.
-        loadedEntryWriters.fetch_add(1, std::memory_order_acq_rel);
-        if (!loadedEntryCaptureActive.load(std::memory_order_acquire)) {
-            loadedEntryWriters.fetch_sub(1, std::memory_order_release);
+        // Register as an in-flight producer, then recheck the capture gate. Shutdown can close
+        // the gate between the first check and registration; that second check lets this writer
+        // withdraw without publishing while shutdown waits for registered writers to finish.
+        Atomic::get_and_add(loadedEntryWriters, 1);
+        if (!Atomic::get(loadedEntryCaptureActive)) {
+
+            Atomic::get_and_subtract(loadedEntryWriters, 1, std::memory_order_release);
             return;
         }
 
@@ -213,42 +246,57 @@ namespace load_progress
         const LoadedEntry entry{
             a_type, a_reference->GetFormID(), base ? base->GetFormID() : 0, a_cell->GetFormID()
         };
-        loadedEntryTallies[typeIndex].fetch_add(1, std::memory_order_relaxed);
+        Atomic::get_and_add(loadedEntryTallies[typeIndex], 1, std::memory_order_relaxed);
 
         if (!TryStoreLoadedEntry(entry)) {
-            droppedLoadedEntryDetails.fetch_add(1, std::memory_order_relaxed);
+            Atomic::get_and_add(droppedLoadedEntryDetails, 1, std::memory_order_relaxed);
         }
-        loadedEntryWriters.fetch_sub(1, std::memory_order_release);
+
+        Atomic::get_and_subtract(loadedEntryWriters, 1, std::memory_order_release);
     }
 
-    // The ordinary object path keeps the reference in RDI and its cell in RCX at the enqueue call.
+    /**
+     * @brief The ordinary object path keeps the reference in RDI and its cell in RCX at the enqueue call.
+     */
     void LoadingProgress::ObjectReferenceQueued(CONTEXT& a_context) noexcept
     {
         CaptureLoadedEntry(LoadedEntryType::objectReference,
             reinterpret_cast<RE::TESObjectREFR*>(a_context.Rdi),
             reinterpret_cast<RE::TESObjectCELL*>(a_context.Rcx));
+        // The overwritten CALL would return its result in RAX. Store it in the saved CPU
+        // context so register restoration presents that same return value to Skyrim.
+        // The CONTEXT describes this particular decoded call site, not a general C++ argument list.
         if (originalReferenceEnqueue) {
             a_context.Rax = originalReferenceEnqueue(reinterpret_cast<RE::TESObjectCELL*>(a_context.Rcx));
         }
     }
 
-    // The transfer path keeps the moved reference in RBX and its destination cell in RCX.
+    /**
+     * @brief The transfer path keeps the moved reference in RBX and its destination cell in RCX.
+     */
     void LoadingProgress::TransferredReferenceQueued(CONTEXT& a_context) noexcept
     {
         CaptureLoadedEntry(LoadedEntryType::transferredReference,
             reinterpret_cast<RE::TESObjectREFR*>(a_context.Rbx),
             reinterpret_cast<RE::TESObjectCELL*>(a_context.Rcx));
+        // Object and transfer paths share this callee, but preserve the reference in different
+        // registers at their call sites. Capture above distinguishes their diagnostic categories;
+        // invoking the common original helper preserves the actual enqueue operation.
         if (originalReferenceEnqueue) {
             a_context.Rax = originalReferenceEnqueue(reinterpret_cast<RE::TESObjectCELL*>(a_context.Rcx));
         }
     }
 
-    // The distant path passes the reference to its counter helper in RDX and the cell in RCX.
+    /**
+     * @brief The distant path passes the reference to its counter helper in RDX and the cell in RCX.
+     */
     void LoadingProgress::DistantReferenceQueued(CONTEXT& a_context) noexcept
     {
         CaptureLoadedEntry(LoadedEntryType::distantReference,
             reinterpret_cast<RE::TESObjectREFR*>(a_context.Rdx),
             reinterpret_cast<RE::TESObjectCELL*>(a_context.Rcx));
+        // This helper takes two native arguments: RCX supplies the cell and RDX the reference.
+        // Use the captured values to reproduce the replaced call, then propagate its RAX result.
         if (originalDistantReferenceEnqueue) {
             a_context.Rax = originalDistantReferenceEnqueue(
                 reinterpret_cast<RE::TESObjectCELL*>(a_context.Rcx),
@@ -256,24 +304,25 @@ namespace load_progress
         }
     }
 
-    // Updates the progress widget and hides Scaleform for warm transitions.
+    /**
+     * @brief Updates the progress widget and hides Scaleform for warm transitions.
+     */
     void LoadingProgress::LoadingMenuAdvanceMovie(RE::IMenu* a_menu, float a_interval, std::uint32_t a_currentTime)
     {
         if (originalAdvanceMovie) {
             originalAdvanceMovie(a_menu, a_interval, a_currentTime);
         }
 
-        if (!hooksEnabled.load(std::memory_order_acquire)) {
+        if (!Atomic::get(hooksEnabled)) {
             return;
         }
 
         try {
             DrainQueueMutations();
-            if (loadedEntryCaptureActive.load(std::memory_order_acquire)) {
+            if (Atomic::get(loadedEntryCaptureActive)) {
                 DrainLoadedEntries(true);
             }
 
-            // HUDMenu can be created or made visible after LoadingMenu opens on a Main Menu save load.
             CellTransitioner::HideHUDForLoad();
 
             if (Settings::GetSingleton().IsVerboseQueueLoggingEnabled()) {
@@ -281,24 +330,27 @@ namespace load_progress
             }
 
             if (a_menu && a_menu->uiMovie) {
+
                 const bool seamless = CellTransitioner::IsSeamless();
                 const bool vanilla = CellTransitioner::IsVanilla();
                 const auto& progressBar = Settings::GetSingleton().GetProgressBar();
                 if (!vanilla) {
+
                     a_menu->uiMovie->SetBackgroundAlpha(0.0F);
                     if (!seamless) {
-                        // Apply alpha before making the movie visible so the first painted frame
-                        // cannot flash full-opacity tips over a false-cold retained presentation.
                         CellTransitioner::ApplyLoadingMenuFade(a_menu, a_interval);
                     }
+
                     a_menu->uiMovie->SetVisible(!seamless);
                 }
+
                 const bool showProgress =
                     progressBar.mode != Settings::ProgressBar::Mode::disabled &&
                     (!vanilla || progressBar.mode == Settings::ProgressBar::Mode::all);
                 ProgressMeter::GetSingleton().SetVisible(a_menu, showProgress);
                 if (!seamless && showProgress) {
-                    const auto basisPoints = displayedBasisPoints.load(std::memory_order_acquire);
+
+                    const auto basisPoints = Atomic::get(displayedBasisPoints);
                     ProgressMeter::GetSingleton().Update(
                         a_menu, static_cast<double>(basisPoints) / 100.0, a_interval);
                 }
@@ -310,11 +362,14 @@ namespace load_progress
         }
     }
 
-    // Locks the source frame and configures the selected presentation when the menu opens.
+    /**
+     * @brief Locks the source frame and configures the selected presentation when the menu opens.
+     */
     RE::UI_MESSAGE_RESULTS LoadingProgress::LoadingMenuProcessMessage(RE::IMenu* a_menu, RE::UIMessage& a_message)
     {
-        if (hooksEnabled.load(std::memory_order_acquire) &&
+        if (Atomic::get(hooksEnabled) &&
             a_message.type == RE::UI_MESSAGE_TYPE::kShow) {
+
             try {
                 BeginLoadedEntryCapture();
                 CellTransitioner::PrepareForLoad(a_menu);
@@ -324,11 +379,16 @@ namespace load_progress
                 DisableHooks("unknown exception in LoadingMenu::ProcessMessage");
             }
         }
+
         return originalLoadingProcessMessage ?
                    originalLoadingProcessMessage(a_menu, a_message) :
                    RE::UI_MESSAGE_RESULTS::kPassOn;
     }
 
+    /**
+     * @brief Advances displayed progress monotonically, with an initial ramp and a 99 percent loading
+     * ceiling.
+     */
     void LoadingProgress::UpdateDisplayedProgress(const Progress& a_progress)
     {
         constexpr std::uint32_t finalLoadingBasisPoints = 9900;
@@ -338,63 +398,71 @@ namespace load_progress
                                           std::clamp(a_progress.fraction * 10000.0, 0.0, 10000.0)) :
                                       0u;
         const auto now = MonotonicMilliseconds();
-        const auto epochStarted = epochStartedMs.load(std::memory_order_relaxed);
+        const auto epochStarted = Atomic::get(epochStartedMs, std::memory_order_relaxed);
         const auto elapsed = epochStarted && now >= epochStarted ? now - epochStarted : 0;
         const auto rampCeiling = static_cast<std::uint32_t>(std::min<std::uint64_t>(
             finalLoadingBasisPoints,
             elapsed * finalLoadingBasisPoints / initialRampMilliseconds));
         const auto candidate = std::min({ rawCandidate, rampCeiling, finalLoadingBasisPoints });
-        auto       displayed = displayedBasisPoints.load(std::memory_order_relaxed);
+        auto       displayed = Atomic::get(displayedBasisPoints, std::memory_order_relaxed);
         // New work can appear after a queue temporarily drains. The initial time ceiling prevents an
         // early completed batch from committing a misleading high value, and LoadingMenu owns the
         // final one percent so the meter cannot report completion while the menu is still visible.
         bool advanced = false;
         while (candidate > displayed) {
-            if (displayedBasisPoints.compare_exchange_weak(
+            if (Atomic::compare_and_set_weak(displayedBasisPoints,
                     displayed, candidate, std::memory_order_release, std::memory_order_relaxed)) {
+
                 advanced = true;
                 break;
             }
         }
         if (advanced && Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            traceLastProgressAdvanceMs.store(MonotonicMilliseconds(), std::memory_order_relaxed);
+            Atomic::set(traceLastProgressAdvanceMs, MonotonicMilliseconds(), std::memory_order_relaxed);
         }
+
         if (!Settings::GetSingleton().IsVerboseQueueLoggingEnabled()) {
             return;
         }
+
         if (a_progress.total == lastLogged.total && a_progress.completed == lastLogged.completed &&
             a_progress.remaining == lastLogged.remaining) {
             return;
         }
+
         if (Settings::GetSingleton().IsVerboseQueueLoggingEnabled()) {
             logger::info("load progress completed={} remaining={} total={} percent={:.1f}",
                 a_progress.completed, a_progress.remaining, a_progress.total,
                 a_progress.fraction * 100.0);
         }
+
         lastLogged = a_progress;
     }
 
-    // Writes a low-frequency timeline sample even when no queue mutation changes the meter. This
-    // distinguishes untracked work from a stalled LoadingMenu update callback in test logs.
+    /**
+     * @brief Writes a low-frequency timeline sample even when no queue mutation changes the meter. This
+     * distinguishes untracked work from a stalled LoadingMenu update callback in test logs.
+     */
     void LoadingProgress::LogProgressTrace(const Progress& a_progress, float a_interval)
     {
         if (!Settings::GetSingleton().IsVerboseQueueLoggingEnabled() ||
-            !epochActive.load(std::memory_order_acquire)) {
+            !Atomic::get(epochActive)) {
             return;
         }
 
         constexpr std::uint64_t samplePeriodMs = 250;
         const auto now = MonotonicMilliseconds();
-        const auto previousSample = traceLastSampleMs.load(std::memory_order_relaxed);
+        const auto previousSample = Atomic::get(traceLastSampleMs, std::memory_order_relaxed);
         if (previousSample != 0 && now - previousSample < samplePeriodMs) {
             return;
         }
-        traceLastSampleMs.store(now, std::memory_order_relaxed);
 
-        const auto epochStarted = epochStartedMs.load(std::memory_order_relaxed);
-        const auto queueActivity = traceLastQueueActivityMs.load(std::memory_order_relaxed);
-        const auto progressAdvance = traceLastProgressAdvanceMs.load(std::memory_order_relaxed);
-        const auto displayed = displayedBasisPoints.load(std::memory_order_acquire);
+        Atomic::set(traceLastSampleMs, now, std::memory_order_relaxed);
+
+        const auto epochStarted = Atomic::get(epochStartedMs, std::memory_order_relaxed);
+        const auto queueActivity = Atomic::get(traceLastQueueActivityMs, std::memory_order_relaxed);
+        const auto progressAdvance = Atomic::get(traceLastProgressAdvanceMs, std::memory_order_relaxed);
+        const auto displayed = Atomic::get(displayedBasisPoints);
         const auto rawBasisPoints = a_progress.total ?
                                         static_cast<std::uint32_t>(
                                             std::clamp(a_progress.fraction * 10000.0, 0.0, 10000.0)) :
@@ -402,7 +470,7 @@ namespace load_progress
 
         std::array<std::uint64_t, queueCount> live{};
         for (std::size_t i = 0; i < queueCount; ++i) {
-            live[i] = liveRemaining[i].load(std::memory_order_relaxed);
+            live[i] = Atomic::get(liveRemaining[i], std::memory_order_relaxed);
         }
 
         logger::info(
@@ -413,33 +481,38 @@ namespace load_progress
             now - queueActivity, live[0], live[1], live[2], live[3], live[4], live[5]);
     }
 
-    // Disables plugin behavior while leaving every installed hook as a pass-through.
-    // Coordinates with the transition compositor so a progress-side failure cannot leave a
-    // suppressed FaderMenu or retained-frame compositor owning the screen.
+    /**
+     * @brief Disables plugin behavior while leaving every installed hook as a pass-through. Coordinates
+     * with the transition compositor so a progress-side failure cannot leave a suppressed FaderMenu
+     * or retained-frame compositor owning the screen.
+     */
     void LoadingProgress::DisableHooks(std::string_view a_reason) noexcept
     {
         DisablePlugin(a_reason);
     }
 
-    // Fail-closed shutdown shared by LoadingProgress and CellTransitioner catch paths.
+    /**
+     * @brief Disables progress and transition behavior and restores suppressed presentation state.
+     */
     void DisablePlugin(std::string_view a_reason) noexcept
     {
         static std::atomic_bool disabling{ false };
-        if (disabling.exchange(true, std::memory_order_acq_rel)) {
+        if (Atomic::get_and_set(disabling, true)) {
             return;
         }
 
-        LoadingProgress::hooksEnabled.store(false, std::memory_order_release);
-        LoadingProgress::epochActive.store(false, std::memory_order_release);
-        LoadingProgress::loadedEntryCaptureActive.store(false, std::memory_order_release);
+        Atomic::set(LoadingProgress::hooksEnabled, false);
+        Atomic::set(LoadingProgress::epochActive, false);
+        Atomic::set(LoadingProgress::loadedEntryCaptureActive, false);
 
         CellTransitioner::ResetOnDisable();
 
         const bool loggedProgress =
-            LoadingProgress::failureLogged.exchange(true, std::memory_order_acq_rel);
+            Atomic::get_and_set(LoadingProgress::failureLogged, true);
         const bool loggedTransition =
-            CellTransitioner::failureLogged.exchange(true, std::memory_order_acq_rel);
+            Atomic::get_and_set(CellTransitioner::failureLogged, true);
         if (!loggedProgress && !loggedTransition) {
+
             try {
                 logger::critical("Skyrim Load Progress disabled: {}", a_reason);
             } catch (...) {
@@ -448,73 +521,119 @@ namespace load_progress
         }
     }
 
-    // Records a direct queue increment without locking or logging on the engine worker thread.
+    /**
+     * @brief Records a direct queue increment without locking or logging on the engine worker thread.
+     */
     void LoadingProgress::OnEnqueue(Queue a_queue) noexcept
     {
         const auto index = static_cast<std::size_t>(a_queue);
-        if (index >= queueCount || !hooksEnabled.load(std::memory_order_relaxed)) {
+        if (index >= queueCount || !Atomic::get(hooksEnabled, std::memory_order_relaxed)) {
             return;
         }
 
-        liveRemaining[index].fetch_add(1, std::memory_order_relaxed);
-        if (epochActive.load(std::memory_order_relaxed)) {
+        Atomic::get_and_add(liveRemaining[index], 1, std::memory_order_relaxed);
+        if (Atomic::get(epochActive, std::memory_order_relaxed)) {
+
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                traceLastQueueActivityMs.store(MonotonicMilliseconds(), std::memory_order_relaxed);
+                Atomic::set(traceLastQueueActivityMs, MonotonicMilliseconds(), std::memory_order_relaxed);
             }
-            pendingEnqueued[index].fetch_add(1, std::memory_order_relaxed);
+
+            Atomic::get_and_add(pendingEnqueued[index], 1, std::memory_order_relaxed);
         }
     }
 
-    // Records a direct queue decrement without locking or logging on the engine worker thread.
+    /**
+     * @brief Records a direct queue decrement without locking or logging on the engine worker thread.
+     */
     void LoadingProgress::OnComplete(Queue a_queue) noexcept
     {
         const auto index = static_cast<std::size_t>(a_queue);
-        if (index >= queueCount || !hooksEnabled.load(std::memory_order_relaxed)) {
+        if (index >= queueCount || !Atomic::get(hooksEnabled, std::memory_order_relaxed)) {
             return;
         }
 
         auto& live = liveRemaining[index];
-        auto  value = live.load(std::memory_order_relaxed);
+        auto  value = Atomic::get(live, std::memory_order_relaxed);
         // Saturate at zero because the plugin may begin observing after Skyrim queued the work.
-        while (value != 0 && !live.compare_exchange_weak(value, value - 1, std::memory_order_relaxed)) {}
-        if (epochActive.load(std::memory_order_relaxed)) {
+        while (value != 0 && !Atomic::compare_and_set_weak(live, value, value - 1, std::memory_order_relaxed)) {}
+        if (Atomic::get(epochActive, std::memory_order_relaxed)) {
+
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                traceLastQueueActivityMs.store(MonotonicMilliseconds(), std::memory_order_relaxed);
+                Atomic::set(traceLastQueueActivityMs, MonotonicMilliseconds(), std::memory_order_relaxed);
             }
-            pendingCompleted[index].fetch_add(1, std::memory_order_relaxed);
+
+            Atomic::get_and_add(pendingCompleted[index], 1, std::memory_order_relaxed);
         }
     }
 
-    // Context-hook adapters identify which engine queue changed.
+    /**
+     * @brief Records a critical-reference queue increment from an engine context hook.
+     */
     void LoadingProgress::CriticalEnqueue(CONTEXT&) noexcept { OnEnqueue(Queue::criticalReferences); }
+    /**
+     * @brief Records a critical-reference queue decrement from an engine context hook.
+     */
     void LoadingProgress::CriticalComplete(CONTEXT&) noexcept { OnComplete(Queue::criticalReferences); }
+    /**
+     * @brief Records a reference queue increment from an engine context hook.
+     */
     void LoadingProgress::ReferenceEnqueue(CONTEXT&) noexcept { OnEnqueue(Queue::references); }
+    /**
+     * @brief Records a reference queue decrement from an engine context hook.
+     */
     void LoadingProgress::ReferenceComplete(CONTEXT&) noexcept { OnComplete(Queue::references); }
+    /**
+     * @brief Records a distant-reference queue increment from an engine context hook.
+     */
     void LoadingProgress::DistantEnqueue(CONTEXT&) noexcept { OnEnqueue(Queue::distantReferences); }
+    /**
+     * @brief Records a distant-reference queue decrement from an engine context hook.
+     */
     void LoadingProgress::DistantComplete(CONTEXT&) noexcept { OnComplete(Queue::distantReferences); }
+    /**
+     * @brief Records a background-processing queue increment from an engine context hook.
+     */
     void LoadingProgress::BackgroundEnqueue(CONTEXT&) noexcept { OnEnqueue(Queue::backgroundProcessing); }
+    /**
+     * @brief Records a background-processing queue decrement from an engine context hook.
+     */
     void LoadingProgress::BackgroundComplete(CONTEXT&) noexcept { OnComplete(Queue::backgroundProcessing); }
+    /**
+     * @brief Chains the native enqueue operation and records added IO task work.
+     */
     void LoadingProgress::IOTaskEnqueue(RE::IOManager* a_manager) noexcept
     {
         if (originalIOTaskEnqueue) {
             originalIOTaskEnqueue(a_manager);
         }
+
         OnEnqueue(Queue::tasks);
     }
 
+    /**
+     * @brief Chains the native completion operation and records completed IO task work.
+     */
     void LoadingProgress::IOTaskComplete(RE::IOManager* a_manager) noexcept
     {
         if (originalIOTaskComplete) {
             originalIOTaskComplete(a_manager);
         }
+
         OnComplete(Queue::tasks);
     }
 
+    /**
+     * @brief Chains the native enqueue operation and records added post-processing work.
+     */
     void LoadingProgress::PostProcessingEnqueue(void* a_queue) noexcept
     {
         if (originalPostProcessingEnqueue) {
             originalPostProcessingEnqueue(a_queue);
         }
+
+        // This vtable callback also runs for other queues of the same concrete type. Read
+        // IOManager's designated post-processing queue pointer and count only that instance.
+        // +0xE0 is the manager's pointer field; +0x14 in the signature is the queue's counter.
         const auto* manager = RE::IOManager::GetSingleton();
         const auto* postProcessing = manager ?
                                          *reinterpret_cast<void* const*>(
@@ -525,11 +644,17 @@ namespace load_progress
         }
     }
 
+    /**
+     * @brief Chains the native completion operation and records completed post-processing work.
+     */
     void LoadingProgress::PostProcessingComplete(void* a_queue) noexcept
     {
         if (originalPostProcessingComplete) {
             originalPostProcessingComplete(a_queue);
         }
+
+        // Apply the same instance filter as enqueue after running the original queue method.
+        // The hook observes the native mutation; it does not replace Skyrim's queue bookkeeping.
         const auto* manager = RE::IOManager::GetSingleton();
         const auto* postProcessing = manager ?
                                          *reinterpret_cast<void* const*>(
@@ -553,6 +678,9 @@ namespace load_progress
 
         struct MutationHookDefinition
         {
+            // A definition describes the expected site, not an installed patch: Address Library
+            // ID selects the function, RuntimeOffset selects the instruction within it, signature
+            // validates that instruction, and callback records the observed queue mutation.
             REL::RelocationID id;
             RuntimeOffset     offset;
             ContextCallback   callback;
@@ -562,6 +690,8 @@ namespace load_progress
 
         struct ResolvedMutationHook
         {
+            // Resolution turns a definition into a validated address and overwrite length.
+            // The pointer borrows the definition array, which remains alive through installation.
             const MutationHookDefinition* definition;
             std::uintptr_t                 address;
             std::size_t                    patchSize;
@@ -569,6 +699,9 @@ namespace load_progress
 
         struct LoadedEntryHookDefinition
         {
+            // These optional diagnostics hook a CALL in its higher-level caller, where registers
+            // still identify the reference being queued. Counter mutations alone reveal counts,
+            // but cannot distinguish ordinary references from references transferred between cells.
             REL::RelocationID caller;
             REL::RelocationID callee;
             ContextCallback   callback;
@@ -589,24 +722,38 @@ namespace load_progress
             CounterOperation a_operation, const Xbyak::Reg64& a_owner, std::int32_t a_counterOffset)
         {
             Xbyak::CodeGenerator assembler;
+            // dword selects a 32-bit memory operand; a_owner is the register holding its object.
+            // For example, owner=RAX and offset=0x16C describes DWORD PTR [RAX + 0x16C].
+            // This offset is a field within the object, not an offset within executable code.
             const auto           counter = assembler.dword[a_owner + a_counterOffset];
 
             // LOCK is required because several loading workers can mutate the same counter.
+            // Xbyak emits x86-64 machine bytes, including the LOCK prefix, addressing mode,
+            // displacement, and INC/DEC opcode. Using the assembler avoids hand-maintaining
+            // different encodings when the owner register or displacement size changes.
             assembler.lock();
             if (a_operation == CounterOperation::increment) {
                 assembler.inc(counter);
             } else {
                 assembler.dec(counter);
             }
+
+            // Finalize the assembler buffer before reading it. Copy the bytes into our vector
+            // because the local assembler owns its buffer and will destroy it on return.
+            // This signature is an exact byte sequence, not a wildcard pattern or a generated hook.
             assembler.ready();
 
             const auto* bytes = assembler.getCode();
             return { bytes, bytes + assembler.getSize() };
         }
 
-        // Returns the six queue-counter mutations: enqueue and completion for each observed queue.
+        // Returns eight mutation sites: enqueue/completion for three reference queues and the background worker.
         auto GetMutationHookDefinitions()
         {
+            // Each enqueue/completion pair observes the same engine counter going up/down.
+            // The relocation ID and runtime instruction offset locate the patch; the register
+            // and counter-field offset below independently describe the bytes expected there.
+            // A valid Address Library lookup alone is therefore not enough to authorize a patch.
             using namespace Xbyak::util;
 
             // RAX and RCX are simply the registers holding the counter owner at these decoded sites.
@@ -648,6 +795,9 @@ namespace load_progress
         {
             constexpr std::size_t minimumTrampolineBytes = 8 * 1024;
 
+            // A trampoline is executable memory for the displaced instructions and register-saving
+            // callback stub. The eight-kilobyte threshold is a conservative reserve for this set,
+            // not the five-byte patch length or an exact measurement of one generated stub.
             const auto freeBytes = SKSE::GetTrampoline().free_size();
             if (freeBytes < minimumTrampolineBytes) {
                 throw std::runtime_error(fmt::format(
@@ -666,6 +816,9 @@ namespace load_progress
                 throw std::runtime_error(fmt::format("could not resolve the {} hook", a_hook.name));
             }
 
+            // Add the runtime-specific instruction offset to the relocated function entry.
+            // Validate the entire signature lies in the executable text segment before memcmp;
+            // the short-circuit test also prevents reading an out-of-range candidate address.
             const auto address = functionAddress + offset;
             const auto instructionSize = a_hook.signature.size();
             const auto textEnd = a_text.address() + a_text.size();
@@ -686,9 +839,16 @@ namespace load_progress
             // displacement would not remain valid after relocation.
             std::size_t patchSize = instructionSize;
             while (patchSize < 5) {
+                // x86 instructions have variable lengths. Decode the next complete instruction
+                // instead of taking an arbitrary extra byte that could split an instruction.
+                // The copied bytes will execute from a new address in trampoline storage.
                 hde64s decoded{};
                 const auto length = hde64_disasm(
                     reinterpret_cast<const void*>(address + patchSize), &decoded);
+                // F_RELATIVE rejects control transfers encoded relative to the original instruction.
+                // The ModRM check rejects RIP-relative memory addressing (mod=0, r/m=5); its effective
+                // address would also change if the bytes were replayed elsewhere without relocation.
+                // Fail rather than treating these position-dependent bytes as a safe copy.
                 if (length == 0 || (decoded.flags & F_ERROR) != 0 ||
                     address + patchSize + length > textEnd ||
                     (decoded.flags & F_RELATIVE) != 0 ||
@@ -697,16 +857,20 @@ namespace load_progress
                         "could not safely extend the {} hook to a five-byte patch at {:X}",
                         a_hook.name, address));
                 }
+
                 patchSize += length;
             }
 
             return { std::addressof(a_hook), address, patchSize };
         }
 
-        // Resolves all counter sites first so a bad runtime cannot leave a partially installed set.
+        // Validates all mutation sites before installation starts; a failed validation writes no patches.
         auto ResolveMutationHooks(const std::span<const MutationHookDefinition> a_hooks)
         {
             std::vector<ResolvedMutationHook> resolved;
+            // Complete discovery before installation. A validation failure leaves this mutation
+            // hook set unwritten; resolved entries borrow the still-live definition array.
+            // This does not promise rollback if a later installation step itself fails.
             resolved.reserve(a_hooks.size());
 
             const auto text = REL::Module::get().segment(REL::Segment::textx);
@@ -721,6 +885,10 @@ namespace load_progress
         void InstallMutationHook(const ResolvedMutationHook& a_hook)
         {
             const auto& definition = *a_hook.definition;
+            // The second argument is the overwritten span; the last positive argument copies
+            // that same span BEFORE the callback. Skyrim's original LOCK INC/DEC runs first,
+            // then the observer updates our counters, and execution resumes after the patched span.
+            // CommonLib captures/restores CPU registers and flags around the CONTEXT callback.
             if (!SKSE::stl::install_context_hook(
                     a_hook.address, static_cast<int>(a_hook.patchSize), definition.callback,
                     static_cast<int>(a_hook.patchSize))) {
@@ -752,6 +920,9 @@ namespace load_progress
         {
             using namespace Xbyak::util;
 
+            // These tiny functions are too short for a five-byte inline branch without reaching
+            // past RET into unrelated code. Replace pointers in the virtual-function table instead.
+            // On Windows x64, an ordinary member call supplies this in RCX, hence [RCX + 0x30].
             constexpr std::size_t enqueueIndex = 14;
             constexpr std::size_t completeIndex = 15;
             REL::Relocation<std::uintptr_t> vtable{ RE::VTABLE_IOManager[0] };
@@ -761,6 +932,9 @@ namespace load_progress
                 vtable.address() + completeIndex * sizeof(std::uintptr_t));
             const auto enqueueSignature = BuildCounterSignature(CounterOperation::increment, rcx, 0x30);
             const auto completeSignature = BuildCounterSignature(CounterOperation::decrement, rcx, 0x30);
+            // Require both the expected counter instruction and an immediate RET (opcode 0xC3).
+            // Checking only the first bytes would also accept a longer function whose additional
+            // behavior we have not established. No slot is written until both bodies match.
             if (!enqueue || !complete ||
                 std::memcmp(reinterpret_cast<const void*>(enqueue), enqueueSignature.data(), enqueueSignature.size()) != 0 ||
                 std::memcmp(reinterpret_cast<const void*>(complete), completeSignature.data(), completeSignature.size()) != 0 ||
@@ -769,6 +943,9 @@ namespace load_progress
                 throw std::runtime_error("IOManager task-counter hook bytes did not match this runtime");
             }
 
+            // Save the validated function addresses before publishing our callbacks in the vtable.
+            // The callbacks call these originals first, preserving engine behavior, then record
+            // the mutation; calling through the patched slot would recurse into our own hook.
             LoadingProgress::originalIOTaskEnqueue =
                 reinterpret_cast<LoadingProgress::IOTaskMutation_t>(enqueue);
             LoadingProgress::originalIOTaskComplete =
@@ -790,6 +967,9 @@ namespace load_progress
             const auto count = REL::Relocation<std::uintptr_t>(IDs::PostProcessingCount).address();
             const auto enqueueSignature = BuildCounterSignature(CounterOperation::increment, rcx, 0x14);
             const auto completeSignature = BuildCounterSignature(CounterOperation::decrement, rcx, 0x14);
+            // This third signature is MOV EAX, DWORD PTR [RCX + 0x14]; RET. The count getter
+            // provides an independent check that this is the same queue/counter interface as
+            // the two mutation functions, even though we do not replace the getter.
             constexpr auto countSignature = std::to_array<std::uint8_t>({ 0x8B, 0x41, 0x14, 0xC3 });
             if (!enqueue || !complete || !count ||
                 std::memcmp(reinterpret_cast<const void*>(enqueue), enqueueSignature.data(), enqueueSignature.size()) != 0 ||
@@ -812,11 +992,17 @@ namespace load_progress
                 vtable.address() + completeIndex * sizeof(std::uintptr_t));
             const auto currentCount = *reinterpret_cast<const std::uintptr_t*>(
                 vtable.address() + countIndex * sizeof(std::uintptr_t));
+            // Match the vtable slots to the independently validated Address Library functions.
+            // This detects an unexpected table layout or an already-redirected slot before patching;
+            // we do not assume an arbitrary existing replacement implements the same contract.
             if (currentEnqueue != enqueue || currentComplete != complete || currentCount != count) {
                 throw std::runtime_error(
                     "post-processing vtable did not reference the validated counter methods");
             }
 
+            // The vtable belongs to a shared queue type. Verify the actual IOManager queue at
+            // field +0xE0 uses this table; the callbacks then filter by that instance address
+            // so mutations on other objects with the same vtable do not inflate loading progress.
             auto* manager = RE::IOManager::GetSingleton();
             const auto postProcessing = manager ?
                                             *reinterpret_cast<void**>(
@@ -838,6 +1024,9 @@ namespace load_progress
         // Resolves the original counter callees that semantic hooks must invoke in place of E8 calls.
         void ResolveLoadedEntryCallees(const Settings::LoadedEntryLogging& a_categories)
         {
+            // Unlike direct mutation hooks, these callbacks replace the original CALL rather than
+            // replay it. Resolve its target separately so the callback can invoke it exactly once
+            // and supply the return value expected by the caller.
             LoadingProgress::originalReferenceEnqueue =
                 REL::Relocation<LoadingProgress::ReferenceEnqueue_t>(IDs::ReferencesEnqueue).get();
             LoadingProgress::originalDistantReferenceEnqueue =
@@ -885,6 +1074,9 @@ namespace load_progress
                     continue;
                 }
 
+                // Search the decoded caller for a unique relative call to the expected callee.
+                // The caller/callee relationship identifies the semantic enqueue path without a
+                // hard-coded call-site offset; zero or multiple matches are rejected by the resolver.
                 const auto callSite =
                     CellTransitioner::FindUniqueRelativeCall(hook.caller, hook.callee, hook.name);
                 resolved.push_back({ std::addressof(hook), callSite });
@@ -903,6 +1095,10 @@ namespace load_progress
             constexpr std::size_t relativeCallSize = 5;
             constexpr std::size_t copiedInstructionBytes = 0;
 
+            // includeSize=0 deliberately omits the displaced CALL from replay. The callback
+            // captures numeric reference IDs, invokes the original target, and writes its result
+            // into CONTEXT::Rax before the stub restores registers and resumes after the CALL.
+            // Replaying the CALL as well would enqueue/count the same operation twice.
             const auto& definition = *a_hook.definition;
             if (!SKSE::stl::install_context_hook(
                     a_hook.callSite, relativeCallSize, definition.callback, copiedInstructionBytes)) {
@@ -934,7 +1130,9 @@ namespace load_progress
         }
     }
 
-    // Installs the LoadingMenu message and movie-advance hooks.
+    /**
+     * @brief Installs the LoadingMenu message and movie-advance hooks.
+     */
     void InstallLoadingMenuHook()
     {
         // CommonLib's IMenu vtable maps slot 4 to ProcessMessage and slot 5 to AdvanceMovie.
@@ -957,6 +1155,9 @@ namespace load_progress
             throw std::runtime_error("LoadingMenu had an invalid original vtable function");
         }
 
+        // Save both original virtual functions before redirecting the slots. ProcessMessage
+        // prepares presentation when the menu is shown; AdvanceMovie drains worker observations
+        // and updates Scaleform on its movie-update path while continuing native menu behavior.
         LoadingProgress::originalLoadingProcessMessage =
             reinterpret_cast<LoadingProgress::ProcessMessage_t>(processAddress);
         LoadingProgress::originalAdvanceMovie =
@@ -968,15 +1169,20 @@ namespace load_progress
         logger::info("installed hidden LoadingMenu::AdvanceMovie experiment hook");
     }
 
+    /**
+     * @brief Seeds the aggregator with work already observed in the live queue counters.
+     */
     void LoadingProgress::SeedQueuedWork()
     {
         for (std::size_t i = 0; i < queueCount; ++i) {
-            const auto baseline = liveRemaining[i].load(std::memory_order_relaxed);
+            const auto baseline = Atomic::get(liveRemaining[i], std::memory_order_relaxed);
             aggregator.Enqueue(static_cast<Queue>(i), baseline);
         }
     }
 
-    // Starts aggregation when Skyrim opens LoadingMenu.
+    /**
+     * @brief Starts aggregation when Skyrim opens LoadingMenu.
+     */
     void LoadingProgress::BeginLoadingEpoch()
     {
         std::scoped_lock lock(stateLock);
@@ -985,36 +1191,41 @@ namespace load_progress
         // changes in which the menu-open notification arrives before the show message.
         BeginLoadedEntryCapture();
 
-        displayedBasisPoints.store(0, std::memory_order_release);
+        Atomic::set(displayedBasisPoints, 0);
         const auto now = MonotonicMilliseconds();
-        epochStartedMs.store(now, std::memory_order_relaxed);
+        Atomic::set(epochStartedMs, now, std::memory_order_relaxed);
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-            traceLastSampleMs.store(0, std::memory_order_relaxed);
-            traceLastQueueActivityMs.store(now, std::memory_order_relaxed);
-            traceLastProgressAdvanceMs.store(now, std::memory_order_relaxed);
-        }
-        for (std::size_t i = 0; i < queueCount; ++i) {
-            pendingEnqueued[i].store(0, std::memory_order_relaxed);
-            pendingCompleted[i].store(0, std::memory_order_relaxed);
+
+            Atomic::set(traceLastSampleMs, 0, std::memory_order_relaxed);
+            Atomic::set(traceLastQueueActivityMs, now, std::memory_order_relaxed);
+            Atomic::set(traceLastProgressAdvanceMs, now, std::memory_order_relaxed);
         }
 
+        for (std::size_t i = 0; i < queueCount; ++i) {
+            Atomic::set(pendingEnqueued[i], 0, std::memory_order_relaxed);
+            Atomic::set(pendingCompleted[i], 0, std::memory_order_relaxed);
+        }
+
+        // Aggregator state is serialized by stateLock; worker hooks only update the atomic
+        // counters. A LoadingMenu epoch groups those observations into one progress lifetime.
         aggregator.Begin();
 
         // Publish the epoch before reading liveRemaining so worker completes cannot land in a
         // "seeded but not yet accepting pending" gap. Stabilise by clearing pending and rereading
         // until a quiet sample across all queues; SeedQueuedWork then snapshots liveRemaining.
         // Mutations after that sample remain in pending for the drain below / AdvanceMovie.
-        epochActive.store(true, std::memory_order_release);
+        Atomic::set(epochActive, true);
         constexpr std::uint32_t quietAttempts = 64;
         for (std::uint32_t attempt = 0; attempt < quietAttempts; ++attempt) {
             bool quiet = true;
             for (std::size_t i = 0; i < queueCount; ++i) {
-                pendingEnqueued[i].store(0, std::memory_order_relaxed);
-                pendingCompleted[i].store(0, std::memory_order_relaxed);
+                Atomic::set(pendingEnqueued[i], 0, std::memory_order_relaxed);
+                Atomic::set(pendingCompleted[i], 0, std::memory_order_relaxed);
             }
             for (std::size_t i = 0; i < queueCount; ++i) {
-                if (pendingEnqueued[i].load(std::memory_order_relaxed) != 0 ||
-                    pendingCompleted[i].load(std::memory_order_relaxed) != 0) {
+                if (Atomic::get(pendingEnqueued[i], std::memory_order_relaxed) != 0 ||
+                    Atomic::get(pendingCompleted[i], std::memory_order_relaxed) != 0) {
+
                     quiet = false;
                     break;
                 }
@@ -1025,30 +1236,36 @@ namespace load_progress
         }
         SeedQueuedWork();
         for (std::size_t i = 0; i < queueCount; ++i) {
-            const auto enqueued = pendingEnqueued[i].exchange(0, std::memory_order_acq_rel);
-            const auto completed = pendingCompleted[i].exchange(0, std::memory_order_acq_rel);
+            const auto enqueued = Atomic::get_and_set(pendingEnqueued[i], 0);
+            const auto completed = Atomic::get_and_set(pendingCompleted[i], 0);
             const auto queue = static_cast<Queue>(i);
             if (enqueued != 0) {
                 aggregator.Enqueue(queue, enqueued);
             }
+
             if (completed != 0) {
                 aggregator.Complete(queue, completed);
             }
         }
 
         if (Settings::GetSingleton().IsVerboseQueueLoggingEnabled()) {
+
             lastLogged = {};
         }
+
         CellTransitioner::BeginLoad();
 
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
             logger::info(
                 "loading epoch began: Loading Menu opened; baseline remaining={}", aggregator.Current().remaining);
         }
+
         UpdateDisplayedProgress(aggregator.Current());
     }
 
-    // Ends aggregation and starts the retained-frame transition into gameplay.
+    /**
+     * @brief Ends aggregation and starts the retained-frame transition into gameplay.
+     */
     void LoadingProgress::EndLoadingEpoch()
     {
         std::scoped_lock lock(stateLock);
@@ -1057,22 +1274,25 @@ namespace load_progress
         // corresponding menu-open event established a loading epoch. Treating that notification as a
         // completed load starts CellTransitioner's post-load compositor with a stale retained frame.
         // DA09's scripted same-cell MoveTo sequence exercises this path around its white IMODs.
-        if (!epochActive.exchange(false, std::memory_order_acq_rel)) {
+        if (!Atomic::get_and_clear(epochActive)) {
+
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("ignored Loading Menu close without an active loading epoch");
             }
+
             return;
         }
 
         // Fold any final worker deltas before discarding pending counters so end-of-load logs and
         // the last meter sample reflect work that completed after the previous AdvanceMovie drain.
         for (std::size_t i = 0; i < queueCount; ++i) {
-            const auto enqueued = pendingEnqueued[i].exchange(0, std::memory_order_acq_rel);
-            const auto completed = pendingCompleted[i].exchange(0, std::memory_order_acq_rel);
+            const auto enqueued = Atomic::get_and_set(pendingEnqueued[i], 0);
+            const auto completed = Atomic::get_and_set(pendingCompleted[i], 0);
             const auto queue = static_cast<Queue>(i);
             if (enqueued != 0) {
                 aggregator.Enqueue(queue, enqueued);
             }
+
             if (completed != 0) {
                 aggregator.Complete(queue, completed);
             }
@@ -1081,20 +1301,24 @@ namespace load_progress
         CellTransitioner::EndLoad();
 
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+
             const auto final = aggregator.Current();
             const auto now = MonotonicMilliseconds();
             logger::info(
                 "loading epoch ended: Loading Menu closed; epoch_ms={} progress_idle_ms={} queue_idle_ms={} displayed={:.2f}% completed={} remaining={} total={}",
-                now - epochStartedMs.load(std::memory_order_relaxed),
-                now - traceLastProgressAdvanceMs.load(std::memory_order_relaxed),
-                now - traceLastQueueActivityMs.load(std::memory_order_relaxed),
-                static_cast<double>(displayedBasisPoints.load(std::memory_order_acquire)) / 100.0,
+                now - Atomic::get(epochStartedMs, std::memory_order_relaxed),
+                now - Atomic::get(traceLastProgressAdvanceMs, std::memory_order_relaxed),
+                now - Atomic::get(traceLastQueueActivityMs, std::memory_order_relaxed),
+                static_cast<double>(Atomic::get(displayedBasisPoints)) / 100.0,
                 final.completed, final.remaining, final.total);
         }
+
         aggregator.End();
     }
 
-    // Starts or ends an aggregation epoch with LoadingMenu's lifetime.
+    /**
+     * @brief Starts or ends an aggregation epoch with LoadingMenu's lifetime.
+     */
     RE::BSEventNotifyControl LoadingProgress::ProcessEvent(
         const RE::MenuOpenCloseEvent* a_event,
         RE::BSTEventSource<RE::MenuOpenCloseEvent>*)
@@ -1108,7 +1332,9 @@ namespace load_progress
         }
 
         if (a_event->menuName == RE::HUDMenu::MENU_NAME && a_event->opening) {
-            if (hooksEnabled.load(std::memory_order_acquire)) {
+
+            if (Atomic::get(hooksEnabled)) {
+
                 try {
                     CellTransitioner::ObserveHUDMenuOpening();
                 } catch (const std::exception& error) {
@@ -1117,10 +1343,12 @@ namespace load_progress
                     DisableHooks("unknown exception while hiding a newly opened HUDMenu");
                 }
             }
+
             return RE::BSEventNotifyControl::kContinue;
         }
 
         if (a_event->menuName == RE::SleepWaitMenu::MENU_NAME) {
+
             a_event->opening ?
                 CellTransitioner::ObserveSleepWaitMenuOpening() :
                 CellTransitioner::ObserveSleepWaitMenuClosing();
@@ -1131,7 +1359,7 @@ namespace load_progress
             return RE::BSEventNotifyControl::kContinue;
         }
 
-        if (!hooksEnabled.load(std::memory_order_acquire)) {
+        if (!Atomic::get(hooksEnabled)) {
             return RE::BSEventNotifyControl::kContinue;
         }
 
@@ -1146,24 +1374,27 @@ namespace load_progress
         return RE::BSEventNotifyControl::kContinue;
     }
 
-    // Logs the fully-loaded milestone while a transition is being observed.
+    /**
+     * @brief Logs the fully-loaded milestone while a transition is being observed.
+     */
     RE::BSEventNotifyControl LoadingProgress::ProcessEvent(
         const RE::TESCellFullyLoadedEvent* a_event,
         RE::BSTEventSource<RE::TESCellFullyLoadedEvent>*)
     {
-        if (!Settings::GetSingleton().IsLoadingLoggingEnabled() || !hooksEnabled.load(std::memory_order_acquire)) {
+        if (!Settings::GetSingleton().IsLoadingLoggingEnabled() || !Atomic::get(hooksEnabled)) {
             return RE::BSEventNotifyControl::kContinue;
         }
 
         try {
-            if (CellTransitioner::renderObservationState.load(std::memory_order_acquire) != 0 && a_event &&
+            if (Atomic::get(CellTransitioner::renderObservationState) != 0 && a_event &&
                 a_event->cell) {
+
                 const auto* editorID = a_event->cell->GetFormEditorID();
                 if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                     logger::info(
                         "cell fully loaded: formID={:08X} editorID='{}' menuOpen={} liveRemaining={}",
                         a_event->cell->GetFormID(), editorID ? editorID : "",
-                        epochActive.load(std::memory_order_acquire), GetLiveRemaining());
+                        Atomic::get(epochActive), GetLiveRemaining());
                 }
             }
         } catch (const std::exception& error) {
@@ -1174,7 +1405,9 @@ namespace load_progress
 
         return RE::BSEventNotifyControl::kContinue;
     }
-    // Resets all counters and starts a new loading epoch.
+    /**
+     * @brief Resets all counters and starts a new loading epoch.
+     */
     void LoadingProgress::Aggregator::Begin()
     {
         remaining_.fill(0);
@@ -1183,13 +1416,16 @@ namespace load_progress
         active_ = true;
     }
 
-    // Adds one unit of work to a tracked queue.
+    /**
+     * @brief Adds the requested number of work items to a tracked queue.
+     */
     void LoadingProgress::Aggregator::Enqueue(
         LoadingProgress::Queue a_queue, std::uint64_t a_count)
     {
         if (!active_ || a_count == 0) {
             return;
         }
+
         const auto index = static_cast<std::size_t>(a_queue);
         if (index >= queueCount) {
             return;
@@ -1200,21 +1436,28 @@ namespace load_progress
         if (Settings::GetSingleton().IsVerboseQueueLoggingEnabled()) {
             logger::info("queue '{}' enqueued {} item(s)", queueNames[index], a_count);
         }
+
         Recalculate();
     }
 
-    // Completes one unit of work, including work first seen at completion.
+    /**
+     * @brief Completes the requested number of work items, including work first seen at completion.
+     */
     void LoadingProgress::Aggregator::Complete(
         LoadingProgress::Queue a_queue, std::uint64_t a_count)
     {
         if (!active_ || a_count == 0) {
             return;
         }
+
         const auto index = static_cast<std::size_t>(a_queue);
         if (index >= queueCount) {
             return;
         }
 
+        // A completion can refer to work enqueued before we started tracking. Count that
+        // unobserved work as both total and completed rather than underflowing the queue or
+        // losing the completion from the aggregate.
         const auto observed = std::min(remaining_[index], a_count);
         const auto unobserved = a_count - observed;
         remaining_[index] -= observed;
@@ -1223,6 +1466,7 @@ namespace load_progress
             logger::info("queue '{}' completed {} item(s), including {} unobserved",
                 queueNames[index], a_count, unobserved);
         }
+
         Recalculate();
     }
 
@@ -1241,13 +1485,19 @@ namespace load_progress
                                  0.0;
     }
 
-    // Returns the most recently calculated aggregate progress.
+    /**
+     * @brief Returns the most recently calculated aggregate progress.
+     */
     LoadingProgress::Progress LoadingProgress::Aggregator::Current() const { return progress_; }
 
-    // Stops accepting queue mutations for the current epoch.
+    /**
+     * @brief Stops accepting queue mutations for the current epoch.
+     */
     void LoadingProgress::Aggregator::End() { active_ = false; }
 
-    // Installs loading progress hooks and registers the singleton event sink.
+    /**
+     * @brief Installs loading progress hooks and registers the singleton event sink.
+     */
     void InstallHooks()
     {
         auto& events = LoadingProgress::GetSingleton();
@@ -1268,7 +1518,8 @@ namespace load_progress
         if (diagnostics) {
             eventSources->AddEventSink<RE::TESCellFullyLoadedEvent>(&events);
         }
-        LoadingProgress::hooksEnabled.store(true, std::memory_order_release);
+
+        Atomic::set(LoadingProgress::hooksEnabled, true);
 
         logger::info("installed loading-menu event sink; cell diagnostics={}", diagnostics);
     }

@@ -32,6 +32,9 @@ namespace load_progress
             bool          remapMode;
             std::uint32_t pauseCount;
 
+            /**
+             * @brief Compares every captured control and menu state field for equality.
+             */
             bool operator==(const ControlState&) const = default;
         };
 

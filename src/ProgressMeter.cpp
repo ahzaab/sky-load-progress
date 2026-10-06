@@ -7,7 +7,9 @@
 
 namespace load_progress
 {
-    // Returns the singleton responsible for the Loading Menu's standalone meter.
+    /**
+     * @brief Returns the singleton responsible for the Loading Menu's standalone meter.
+     */
     ProgressMeter& ProgressMeter::GetSingleton()
     {
         static ProgressMeter singleton;
@@ -21,6 +23,8 @@ namespace load_progress
             return;
         }
 
+        // GFxValue is the C++ bridge to ActionScript values inside Scaleform. A member such
+        // as _alpha or _x is stored on the movie clip, rather than in a native C++ UI widget.
         RE::GFxValue value;
         value.SetNumber(a_value);
         a_object.SetMember(a_name, value);
@@ -37,6 +41,7 @@ namespace load_progress
         if (!a_object.GetMember(a_name, &value) || !value.IsNumber()) {
             return false;
         }
+
         a_value = value.GetNumber();
         return true;
     }
@@ -54,9 +59,12 @@ namespace load_progress
         if (!point.IsObject()) {
             return false;
         }
+
         SetNumber(point, "x", a_x);
         SetNumber(point, "y", a_y);
 
+        // ActionScript globalToLocal mutates the supplied point object; its return value is
+        // not the converted coordinate. Read x/y back from that same object after Invoke.
         RE::GFxValue ignored;
         if (!a_parent.Invoke("globalToLocal", &ignored, &point, 1) ||
             !GetNumber(point, "x", a_x) || !GetNumber(point, "y", a_y)) {
@@ -79,6 +87,7 @@ namespace load_progress
         if (!point.IsObject()) {
             return false;
         }
+
         SetNumber(point, "x", a_x);
         SetNumber(point, "y", a_y);
 
@@ -226,6 +235,7 @@ namespace load_progress
         // Bounds_mc is invisible and mirrors the visible frame width, giving layout a stable measurement
         // while Meter_mc changes frames.
         if (globalMeterWidth > safeWidth) {
+
             const auto safeScale = safeWidth / globalMeterWidth;
             frameWidth *= safeScale;
             boundsWidth *= safeScale;
@@ -235,6 +245,7 @@ namespace load_progress
             if (!GetGlobalClipBounds(a_view, a_boundsClip, root, globalBounds)) {
                 return false;
             }
+
             globalMeterWidth = globalBounds[2] - globalBounds[0];
             globalMeterHeight = globalBounds[3] - globalBounds[1];
         }
@@ -245,6 +256,8 @@ namespace load_progress
             CalculateMeterXScale(originalMeterXScale, originalFrameWidth, frameWidth);
         SetNumber(a_meter, "_xscale", meterXScale);
 
+        // Position percentages describe the available travel distance after subtracting the
+        // meter's own size: 0 aligns the left/top edge, 50 centers it, and 100 aligns right/bottom.
         const auto targetGlobalLeft = safeMinimumX +
                                       std::max(0.0, safeWidth - globalMeterWidth) * layout.xPercent / 100.0;
         const auto targetGlobalTop = safeMinimumY +
@@ -265,6 +278,8 @@ namespace load_progress
             return false;
         }
 
+        // Clip origins need not coincide with their visible bounds. Apply the difference
+        // between desired and measured edges to the existing origin, preserving that offset.
         const auto requestedLocalX = currentX + targetLocalLeft - boundsLocalLeft;
         const auto requestedLocalY = currentY + targetLocalTop - boundsLocalTop;
 
@@ -273,14 +288,17 @@ namespace load_progress
         SetNumber(a_layoutClip, "_y", requestedLocalY);
 
         if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+
             if (!GetGlobalClipBounds(a_view, a_boundsClip, root, globalBounds)) {
                 return false;
             }
+
             double appliedX = 0.0;
             double appliedY = 0.0;
             if (!GetNumber(a_layoutClip, "_x", appliedX) || !GetNumber(a_layoutClip, "_y", appliedY)) {
                 return false;
             }
+
             logger::info(
                 "positioned loading meter: x={:.1f}% y={:.1f}% width={:.1f}% "
                 "localPosition=({:.1f}, {:.1f})->({:.1f}, {:.1f}) "
@@ -289,6 +307,7 @@ namespace load_progress
                 safeMinimumX, safeMinimumY, safeMaximumX, safeMaximumY, globalBounds[0], globalBounds[1],
                 globalBounds[2], globalBounds[3]);
         }
+
         return true;
     }
 
@@ -305,10 +324,13 @@ namespace load_progress
         RE::GFxValue nativeMenu;
         if (a_view->GetVariable(&nativeMenu, "_root.Menu_mc") && nativeMenu.IsObject() &&
             GetNumber(nativeMenu, "_alpha", nativeAlpha)) {
+
             SetNumber(a_container, "_alpha", std::clamp(nativeAlpha, 0.0, 100.0));
             return;
         }
 
+        // Scaleform alpha uses 0..100, unlike shader alpha's 0..1. The interval is in seconds;
+        // accumulate it on the clip so fallback fading follows movie updates rather than wall time.
         constexpr double nativeFadeDuration = 20.0 / 30.0;
         double elapsed = 0.0;
         GetNumber(a_container, "_slpFadeElapsed", elapsed);
@@ -332,8 +354,12 @@ namespace load_progress
 
         RE::GFxValue container;
         if (!root.GetMember("SkyrimLoadProgress", &container) || !container.IsObject()) {
+
+            // Movie clips share a depth-ordered display list. Ask ActionScript for a free depth
+            // so the standalone meter does not overwrite another clip created by a menu skin.
             RE::GFxValue depth;
             if (!root.Invoke("getNextHighestDepth", &depth, nullptr, 0) || !depth.IsNumber()) {
+
                 logger::warn("could not obtain a depth for the standalone loading meter");
                 return false;
             }
@@ -343,6 +369,7 @@ namespace load_progress
             createArguments[1] = depth;
             if (!root.Invoke("createEmptyMovieClip", &container, createArguments, 2) ||
                 !container.IsObject()) {
+
                 logger::warn("could not create the standalone loading meter container");
                 return false;
             }
@@ -351,9 +378,13 @@ namespace load_progress
             SetNumber(container, "_alpha", 0.0);
             SetNumber(container, "_slpFadeElapsed", 0.0);
 
+            // loadMovie starts an asynchronous request. Successful Invoke means the request was
+            // accepted, not that Meter_mc is ready. Return false this update and retry from Update
+            // until the external movie has created its children and timeline.
             moviePath.SetString("SkyrimLoadProgress/LoadingProgressMeter.swf");
             RE::GFxValue ignored;
             if (!container.Invoke("loadMovie", &ignored, &moviePath, 1)) {
+
                 logger::warn("could not request the standalone loading meter movie");
                 return false;
             }
@@ -361,6 +392,7 @@ namespace load_progress
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("requested SkyrimLoadProgress/LoadingProgressMeter.swf");
             }
+
             return false;
         }
 
@@ -373,6 +405,8 @@ namespace load_progress
             return false;
         }
 
+        // The cached Empty label is also our initialization marker. GFx handles belong to
+        // this movie instance, so rediscover and initialize them when a new LoadingMenu opens.
         double emptyFrame = 0.0;
         if (GetNumber(progressBar, "_slpEmptyFrame", emptyFrame)) {
             return true;
@@ -383,6 +417,8 @@ namespace load_progress
             return false;
         }
 
+        // Resolve named timeline labels to frame numbers at runtime instead of hard-coding
+        // asset internals. Skin authors can replace the animation and its frame count.
         RE::GFxValue ignored;
         RE::GFxValue frameArgument;
         frameArgument.SetString("Empty");
@@ -390,14 +426,17 @@ namespace load_progress
             !GetNumber(progressBar, "_currentframe", emptyFrame)) {
             return false;
         }
+
         frameArgument.SetString("Full");
         if (!progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1)) {
             return false;
         }
+
         double fullFrame = emptyFrame;
         if (!GetNumber(progressBar, "_currentframe", fullFrame) || fullFrame == emptyFrame) {
             return false;
         }
+
         // Some loading menu skins place Full before Empty on the timeline.
         SetNumber(progressBar, "_slpEmptyFrame", emptyFrame);
         SetNumber(progressBar, "_slpFullFrame", fullFrame);
@@ -407,7 +446,9 @@ namespace load_progress
         if (!progressBar.Invoke("gotoAndStop", &ignored, &frameArgument, 1)) {
             return false;
         }
+
         if (!ApplyLayout(a_view, root, container, progressBar, meterFrame, layoutBounds)) {
+
             logger::warn("could not position the standalone loading meter");
             return false;
         }
@@ -416,6 +457,7 @@ namespace load_progress
             logger::info("initialized standalone loading meter; frames empty={:.0f} full={:.0f}",
                 emptyFrame, fullFrame);
         }
+
         return true;
     }
 
@@ -429,6 +471,9 @@ namespace load_progress
             return false;
         }
 
+        // Interpolate between the asset's Empty and Full frames and stop on that frame. This
+        // works even if the labels are reversed; the clip is a progress indicator, not a freely
+        // playing animation whose elapsed playback time should determine the displayed value.
         const auto   percent = std::clamp(a_percent, 0.0, 100.0);
         const auto   frame = std::floor(emptyFrame + (fullFrame - emptyFrame) * percent / 100.0);
         RE::GFxValue ignored;
@@ -437,7 +482,9 @@ namespace load_progress
         return a_meter.Invoke("gotoAndStop", &ignored, &argument, 1);
     }
 
-    // Shows or hides a meter already attached to this LoadingMenu movie.
+    /**
+     * @brief Shows or hides a meter already attached to this LoadingMenu movie.
+     */
     void ProgressMeter::SetVisible(RE::IMenu* a_menu, bool a_visible)
     {
         if (!a_menu || !a_menu->uiMovie) {
@@ -448,13 +495,16 @@ namespace load_progress
         if (a_menu->uiMovie->GetVariable(
                 &container, "_root.SkyrimLoadProgress") &&
             container.IsObject()) {
+
             RE::GFxValue visible;
             visible.SetBoolean(a_visible);
             container.SetMember("_visible", visible);
         }
     }
 
-    // Creates the progress meter on demand and applies the supplied aggregate percentage.
+    /**
+     * @brief Creates the progress meter on demand and applies the supplied aggregate percentage.
+     */
     void ProgressMeter::Update(RE::IMenu* a_menu, double a_percent, float a_interval)
     {
         // Keep queue tracking active, but do not create the external movie when its UI is disabled.
@@ -468,9 +518,11 @@ namespace load_progress
         if (!a_menu->uiMovie->GetVariable(
                 &progressBar, "_root.SkyrimLoadProgress.Meter_mc") ||
             !progressBar.IsObject()) {
+
             if (!Create(a_menu->uiMovie.get())) {
                 return;
             }
+
             if (!a_menu->uiMovie->GetVariable(
                     &progressBar, "_root.SkyrimLoadProgress.Meter_mc") ||
                 !progressBar.IsObject()) {
@@ -488,6 +540,7 @@ namespace load_progress
         if (a_menu->uiMovie->GetVariable(
                 &container, "_root.SkyrimLoadProgress") &&
             container.IsObject()) {
+
             RE::GFxValue visible;
             visible.SetBoolean(true);
             container.SetMember("_visible", visible);
@@ -495,8 +548,10 @@ namespace load_progress
         }
 
         if (!SetPercent(progressBar, a_percent)) {
+
             static bool warned = false;
             if (!warned) {
+
                 logger::warn("external loading meter has invalid Empty/Full frame labels");
                 warned = true;
             }

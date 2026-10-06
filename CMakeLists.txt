@@ -26,6 +26,7 @@ add_commonlibsse_plugin(${PROJECT_NAME}
     VERSION ${PROJECT_VERSION}
     USE_ADDRESS_LIBRARY
     SOURCES
+        include/Atomic.h
         include/CellTransitioner.h
         include/IdsAndOffsets.h
         include/LoadingProgress.h

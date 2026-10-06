@@ -17,6 +17,9 @@ namespace load_progress
             std::array<ID3D11ClassInstance*, D3D11_SHADER_MAX_INTERFACES> instances{};
             UINT count = static_cast<UINT>(instances.size());
 
+            /**
+             * @brief Releases the class-instance references captured for this shader stage.
+             */
             ~ShaderBinding()
             {
                 for (UINT i = 0; i < count; ++i) {
@@ -28,8 +31,16 @@ namespace load_progress
         };
 
     public:
+        /**
+         * @brief Captures bindings changed by SpriteBatch and disables inherited geometry, hull, and
+         * domain shaders.
+         */
         explicit ScopedSpritePipelineState(ID3D11DeviceContext* a_context) noexcept : context(a_context)
         {
+            // Direct3D state is split into stages: IA assembles vertices, VS transforms them,
+            // PS colors pixels, RS rasterizes triangles, and OM blends them into render targets.
+            // SpriteBatch changes bindings across those stages. Get calls below retain COM references
+            // so saved objects remain alive until this guard restores the original engine state.
             context->OMGetBlendState(blend.GetAddressOf(), blendFactor.data(), &sampleMask);
             context->OMGetDepthStencilState(depth.GetAddressOf(), &stencilRef);
             context->RSGetState(rasterizer.GetAddressOf());
@@ -37,6 +48,9 @@ namespace load_progress
             context->IAGetInputLayout(layout.GetAddressOf());
             context->IAGetVertexBuffers(0, 1, vertexBuffer.GetAddressOf(), &vertexStride, &vertexOffset);
             context->IAGetIndexBuffer(indexBuffer.GetAddressOf(), &indexFormat, &indexOffset);
+            // Also preserve optional GS/HS/DS stages (geometry, hull, and domain shaders) and their
+            // dynamic class instances. A previous world draw can leave these stages active; our
+            // plain screen-space sprite must not accidentally run through that world shader chain.
             context->VSGetShader(vertex.shader.GetAddressOf(), vertex.instances.data(), &vertex.count);
             context->PSGetShader(pixel.shader.GetAddressOf(), pixel.instances.data(), &pixel.count);
             context->GSGetShader(geometry.shader.GetAddressOf(), geometry.instances.data(), &geometry.count);
@@ -53,8 +67,14 @@ namespace load_progress
             context->DSSetShader(nullptr, nullptr, 0);
         }
 
+        /**
+         * @brief Restores the pipeline bindings captured before SpriteBatch rendering.
+         */
         ~ScopedSpritePipelineState() noexcept
         {
+            // SpriteBatch::End submits drawing but does not undo its bindings. This destructor
+            // restores them before Skyrim/Scaleform continues, including values such as blend factors
+            // and vertex offsets that the engine may assume still match its own cached state.
             context->OMSetBlendState(blend.Get(), blendFactor.data(), sampleMask);
             context->OMSetDepthStencilState(depth.Get(), stencilRef);
             context->RSSetState(rasterizer.Get());

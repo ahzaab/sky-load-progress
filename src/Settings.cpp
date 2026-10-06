@@ -6,16 +6,22 @@
 
 namespace load_progress
 {
-    // Returns the settings instance loaded before the transition hooks are installed.
+    /**
+     * @brief Returns the settings instance loaded before the transition hooks are installed.
+     */
     Settings& Settings::GetSingleton()
     {
         static Settings singleton;
         return singleton;
     }
 
-    // Loads the user configuration, retaining safe defaults when the file or a value is invalid.
+    /**
+     * @brief Loads the user configuration, retaining safe defaults when the file or a value is invalid.
+     */
     void Settings::Load()
     {
+        // Start each load from a complete default configuration. Missing tables leave those
+        // defaults intact; a parse failure below resets partially applied values as well.
         warmTransition = {};
         defaultColdTransition = {};
         cellRules.clear();
@@ -35,10 +41,13 @@ namespace load_progress
         std::error_code pathError;
         const bool      fileExists = std::filesystem::exists(path, pathError);
         if (pathError) {
+
             logger::error("could not inspect settings path {}: {}; using defaults", path.string(), pathError.message());
             return;
         }
+
         if (!fileExists) {
+
             logger::warn("settings file not found at {}; using defaults", path.string());
             return;
         }
@@ -49,6 +58,7 @@ namespace load_progress
             // Prefer the dedicated debugging table; accept older configurations.
             const auto diagnosticTable = document.contains("debugging") ? "debugging" : "logging";
             if (document.contains(diagnosticTable)) {
+
                 const auto& logging = toml::find(document, diagnosticTable);
                 loadingLoggingEnabled =
                     toml::find_or<bool>(logging, "loading", loadingLoggingEnabled);
@@ -58,6 +68,7 @@ namespace load_progress
                     toml::find_or<bool>(logging, "verbose_queues", verboseQueueLoggingEnabled);
 
                 if (logging.contains("loaded_entries")) {
+
                     const auto& entries = toml::find(logging, "loaded_entries");
                     loadedEntryLogging.objectReferences = toml::find_or<bool>(
                         entries, "object_references", loadedEntryLogging.objectReferences);
@@ -69,6 +80,7 @@ namespace load_progress
             }
 
             if (document.contains("blur")) {
+
                 const auto& blur = toml::find(document, "blur");
                 blurEnabled = toml::find_or<bool>(blur, "enabled", blurEnabled);
                 blurAmount = std::clamp(
@@ -76,8 +88,10 @@ namespace load_progress
             }
 
             if (document.contains("progress_bar")) {
+
                 const auto& meter = toml::find(document, "progress_bar");
                 if (meter.contains("mode")) {
+
                     const auto mode = ToLower(toml::find<std::string>(meter, "mode"));
                     if (mode == "all") {
                         progressBar.mode = ProgressBar::Mode::all;
@@ -86,15 +100,18 @@ namespace load_progress
                     } else if (mode == "disabled") {
                         progressBar.mode = ProgressBar::Mode::disabled;
                     } else {
+
                         progressBar.mode = ProgressBar::Mode::all;
                         logger::warn("unknown progress bar mode '{}'; using 'all'", mode);
                     }
                 } else {
+
                     const bool legacyEnabled = toml::find_or<bool>(meter, "enabled", true);
                     progressBar.mode = legacyEnabled ?
                                            ProgressBar::Mode::all :
                                            ProgressBar::Mode::disabled;
                 }
+
                 progressBar.xPercent = ReadPercent(meter, "x_percent", progressBar.xPercent);
                 progressBar.yPercent = ReadPercent(meter, "y_percent", progressBar.yPercent);
                 progressBar.widthPercent = std::max(1.0,
@@ -102,6 +119,7 @@ namespace load_progress
             }
 
             if (document.contains("interface")) {
+
                 const auto& interfaceTable = toml::find(document, "interface");
                 showHUDDuringLoading =
                     toml::find_or<bool>(interfaceTable, "show_hud_during_loading", showHUDDuringLoading);
@@ -110,6 +128,7 @@ namespace load_progress
             }
 
             if (document.contains("transitions")) {
+
                 const auto& transitions = toml::find(document, "transitions");
                 transitionsForFastTravel = toml::find_or<bool>(
                     transitions, "fast_travel", transitionsForFastTravel);
@@ -118,6 +137,7 @@ namespace load_progress
             }
 
             if (document.contains("warm")) {
+
                 const auto& warm = toml::find(document, "warm");
                 warmTransition.holdAfterLoad =
                     ReadDuration(warm, "hold_after_load_ms", warmTransition.holdAfterLoad);
@@ -167,27 +187,37 @@ namespace load_progress
         }
     }
 
-    // Returns the global timing used for resident-cell transitions.
+    /**
+     * @brief Returns the global timing used for resident-cell transitions.
+     */
     const Settings::WarmTransition& Settings::GetWarmTransition() const
     {
         return warmTransition;
     }
 
-    // Returns the fallback used by cold cells that do not match a rule.
+    /**
+     * @brief Returns the fallback used by cold cells that do not match a rule.
+     */
     const Settings::ColdTransition& Settings::GetDefaultColdTransition() const
     {
         return defaultColdTransition;
     }
 
-    // Returns the first cold transition rule matching the destination editor ID.
+    /**
+     * @brief Returns the first rule matching the destination editor ID, or the default cold transition.
+     */
     const Settings::ColdTransition& Settings::GetColdTransition(std::string_view a_editorID) const
     {
+        // Rule order is significant: the first matching pattern wins, allowing a specific
+        // cell rule to precede a broad wildcard fallback.
         for (const auto& rule : cellRules) {
             if (MatchesPattern(a_editorID, rule.pattern)) {
+
                 if (IsLoadingLoggingEnabled()) {
                     logger::info(
                         "cell transition rule matched: editorID='{}' pattern='{}'", a_editorID, rule.pattern);
                 }
+
                 return rule.transition;
             }
         }
@@ -195,72 +225,99 @@ namespace load_progress
         return defaultColdTransition;
     }
 
-    // Returns whether captured frames should pass through the blur shader.
+    /**
+     * @brief Returns whether captured frames should pass through the blur shader.
+     */
     bool Settings::IsBlurEnabled() const
     {
         return blurEnabled && blurAmount > 0.0F;
     }
 
-    // Returns the configured shader sample radius in render-target pixels.
+    /**
+     * @brief Returns the configured shader sample radius in render-target pixels.
+     */
     float Settings::GetBlurAmount() const
     {
         return blurAmount;
     }
 
-    // Returns the safe-zone placement and active-skin width scale for the loading meter.
+    /**
+     * @brief Returns the safe-zone placement and active-skin width scale for the loading meter.
+     */
     const Settings::ProgressBar& Settings::GetProgressBar() const
     {
         return progressBar;
     }
 
-    // Returns whether HUDMenu remains visible above the custom loading presentation.
+    /**
+     * @brief Returns whether HUDMenu remains visible above the custom loading presentation.
+     */
     bool Settings::ShowHUDDuringLoading() const
     {
         return showHUDDuringLoading;
     }
 
-    // Returns how long custom cold LoadingMenu Scaleform takes to fade from transparent to opaque.
+    /**
+     * @brief Returns how long custom cold LoadingMenu Scaleform takes to fade from transparent to opaque.
+     */
     std::chrono::milliseconds Settings::GetLoadingMenuFadeIn() const
     {
         return loadingMenuFadeIn;
     }
 
-    // Returns whether fast travel uses the retained-frame transition instead of Skyrim's native presentation.
+    /**
+     * @brief Returns whether fast travel uses the retained-frame transition instead of Skyrim's native
+     * presentation.
+     */
     bool Settings::UseTransitionsForFastTravel() const
     {
         return transitionsForFastTravel;
     }
 
-    // Returns whether loading a save uses the retained-frame transition instead of Skyrim's native presentation.
+    /**
+     * @brief Returns whether loading a save uses the retained-frame transition instead of Skyrim's native
+     * presentation.
+     */
     bool Settings::UseTransitionsForSaveLoads() const
     {
         return transitionsForSaveLoads;
     }
 
-    // Returns whether per-load summaries and transition diagnostics may be written.
+    /**
+     * @brief Returns whether per-load summaries and transition diagnostics may be written.
+     */
     bool Settings::IsLoadingLoggingEnabled() const
     {
         return loadingLoggingEnabled;
     }
 
+    /**
+     * @brief Returns whether both loading diagnostics and GPU texture capture are enabled.
+     */
     bool Settings::IsTransitionTextureCaptureEnabled() const
     {
         return loadingLoggingEnabled && transitionTextureCaptureEnabled;
     }
 
-    // Verbose queue samples require both logging switches to avoid accidental file spam.
+    /**
+     * @brief Verbose queue samples require both logging switches to avoid accidental file spam.
+     */
     bool Settings::IsVerboseQueueLoggingEnabled() const
     {
         return loadingLoggingEnabled && verboseQueueLoggingEnabled;
     }
 
-    // Returns the individual reference categories selected for diagnostic output.
+    /**
+     * @brief Returns the individual reference categories selected for diagnostic output.
+     */
     const Settings::LoadedEntryLogging& Settings::GetLoadedEntryLogging() const
     {
         return loadedEntryLogging;
     }
 
-    // Loaded-entry diagnostics also honor the master loading-log switch.
+    /**
+     * @brief Loaded-entry diagnostics also honor the master loading-log switch.
+     */
     bool Settings::IsLoadedEntryLoggingEnabled() const
     {
         return loadingLoggingEnabled &&
@@ -302,9 +359,11 @@ namespace load_progress
 
         const auto color = toml::find_or<std::string>(a_table, "color", "");
         if (!color.empty()) {
+
             if (ToLower(color) == "dominant") {
                 a_default.colorSource = ColorSource::dominant;
             } else {
+
                 a_default.colorSource = ColorSource::fixed;
                 a_default.color = ReadColor(color);
             }
@@ -328,6 +387,7 @@ namespace load_progress
         if (!a_value.empty() && a_value.front() == '#') {
             a_value.remove_prefix(1);
         }
+
         if (a_value.size() != 6 || !std::ranges::all_of(a_value, [](char character) {
                 return std::isxdigit(static_cast<unsigned char>(character)) != 0;
             })) {
@@ -339,6 +399,7 @@ namespace load_progress
         if (error != std::errc{} || end != a_value.data() + a_value.size()) {
             throw std::runtime_error(fmt::format("invalid transition color '{}'", a_value));
         }
+
         return color;
     }
 
@@ -361,12 +422,15 @@ namespace load_progress
         while (textIndex < a_text.size()) {
             if (patternIndex < a_pattern.size() &&
                 (a_pattern[patternIndex] == '?' || ToLower(a_pattern[patternIndex]) == ToLower(a_text[textIndex]))) {
+
                 ++textIndex;
                 ++patternIndex;
             } else if (patternIndex < a_pattern.size() && a_pattern[patternIndex] == '*') {
+
                 starIndex = patternIndex++;
                 starTextIndex = textIndex;
             } else if (starIndex != std::string_view::npos) {
+
                 patternIndex = starIndex + 1;
                 textIndex = ++starTextIndex;
             } else {
