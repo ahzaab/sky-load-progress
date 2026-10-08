@@ -8,6 +8,7 @@
 #include "LoadingProgress.h"
 #include "ScopedSpritePipelineState.h"
 #include "TransitionUiOverlay.h"
+#include "StartupBlackCover.h"
 #include "RetainedHdrConversion.h"
 #include "FrozenFrameShader.h"
 
@@ -1017,6 +1018,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
      */
     CellTransitioner::Presentation CellTransitioner::ChoosePresentation()
     {
+        const bool continuingMainMenuLoad = Atomic::get(mainMenuLoadActive) &&
+                                            Atomic::get(preLoadDoorTransitionActive);
         Atomic::set(mainMenuLoadActive, false);
         Atomic::set(fastTravelBlackActive, false);
 
@@ -1041,7 +1044,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
 
         auto*      ui = RE::UI::GetSingleton();
-        const bool fromMainMenu = Atomic::get_and_clear(mainMenuLoadPending) ||
+        const bool fromMainMenu = Atomic::get_and_clear(mainMenuLoadPending) || continuingMainMenuLoad ||
                                   (ui && ui->IsMenuOpen(RE::MainMenu::MENU_NAME));
         const bool pendingVanilla =
             Atomic::get_and_clear(vanillaLoadPending);
@@ -1852,6 +1855,14 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             return;
         }
 
+        // Startup has no gameplay photograph. The solid-color shader still needs
+        // a SpriteBatch SRV, including on loading frames before world rendering
+        // resumes. Initialize it here rather than waiting for the destination.
+        if (Atomic::get(mainMenuLoadActive) && !frozenFrameView &&
+            !PrepareFrozenFrame(RE::BSGraphics::Renderer::GetDevice(), a_desc)) {
+            return;
+        }
+
         // epochActive is the main loading gate. postLoadFadeStart handles the short tail after it closes.
         const bool loading = Atomic::get(preLoadDoorTransitionActive) ||
                              Atomic::get(epochActive);
@@ -2146,7 +2157,14 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
             }
         }
 
+        HRESULT startupCoverResult = S_FALSE;
         try {
+            const bool startupPending = Atomic::get(mainMenuLoadActive) &&
+                (Atomic::get(epochActive) || Atomic::get(preLoadDoorTransitionActive) ||
+                    Atomic::get(postLoadFadePending));
+            startupCoverResult = CoverPendingStartupScene(
+                reinterpret_cast<ID3D11DeviceContext*>(a_context), overlayBinding, startupPending,
+                reinterpret_cast<ID3D11Texture2D*>(communityShadersHdrTarget));
             PrepareHdrUiForTransition(a_context, _ReturnAddress());
         } catch (const std::exception& error) {
             logger::warn("CS UI preparation failed; continuing native HDR dispatch: {}", error.what());
@@ -2255,7 +2273,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     overlayOwnsImage ? 3U : 0U;
                 logger::info("HDR frame trace: frame={} phase={} insidePresent={} insideChain={} captureEligible={} "
                     "captureResult={:08X} hold={} applyResult={:08X} expectedScene={:X} nativeScene={:X} "
-                    "capturedScene={:X} cb={:X} cbBytes={} compatible={} init={:08X} output={:X} ui={:X} snapshot={:08X}",
+                    "capturedScene={:X} cb={:X} cbBytes={} compatible={} init={:08X} output={:X} ui={:X} snapshot={:08X} startupCover={:08X}",
                     transitionFrameDiagnostics.frame, phase, transitionFrameDiagnostics.insidePresent,
                     transitionFrameDiagnostics.insideChain, captureHdrConversionThisPresent,
                     static_cast<std::uint32_t>(conversionCaptureResult), holdingImage,
@@ -2265,7 +2283,8 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     reinterpret_cast<std::uintptr_t>(state.capturedSource),
                     reinterpret_cast<std::uintptr_t>(observed.constants.Get()), state.constantBytes, state.compatible,
                     static_cast<std::uint32_t>(state.initialization), reinterpret_cast<std::uintptr_t>(observed.texture.Get()),
-                    reinterpret_cast<std::uintptr_t>(observed.ui.Get()), static_cast<std::uint32_t>(overlayResult));
+                    reinterpret_cast<std::uintptr_t>(observed.ui.Get()), static_cast<std::uint32_t>(overlayResult),
+                    static_cast<std::uint32_t>(startupCoverResult));
                 if (reportRolling) ++rollingDiagnosticReports;
                 if (overlayOwnsImage) {
 
@@ -3334,30 +3353,39 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                                 desc.width, desc.height, std::to_underlying(desc.format));
                         }
 
-                        if (freshWorld && !loading && postLoadTransition && !MatchesFrozenFrame(desc)) {
+                        // Main-menu black uses no captured pixels. Prepare its binding at
+                        // the first valid loading OR destination target, before that frame
+                        // can be converted for display and frame-generation UI.
+                        if (Atomic::get(mainMenuLoadActive) && (loading || postLoadTransition) &&
+                            !MatchesFrozenFrame(desc) && PrepareFrozenFrame(device, desc)) {
 
-                            if (Atomic::get(mainMenuLoadActive) &&
-                                Atomic::get(transitionType) == Settings::TransitionType::color &&
-                                Atomic::get(colorSource) == Settings::ColorSource::fixed &&
-                                PrepareFrozenFrame(device, desc)) {
-
-                                // Startup has no pre-load world photograph. Allocate the binding resource
-                                // for the fixed-black shader, which does not sample this destination copy.
-                                context->CopyResource(frozenFrame, targetTexture.Get());
-                                if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
-                                    logger::info("initialized main-menu fixed-color transition on the first rendered world frame");
-                                }
-                            } else {
-
-                                logger::warn(
-                                    "no compatible retained scene after loading (source={}x{} format={}, target={}x{} format={}); releasing presentation",
-                                    frozenFrameDesc.width, frozenFrameDesc.height, std::to_underlying(frozenFrameDesc.format),
-                                    desc.width, desc.height, std::to_underlying(desc.format));
-                                FinishPostLoadPresentation();
-                            }
+                            context->CopyResource(frozenFrame, targetTexture.Get());
                         }
 
-                        if (freshWorld && !Atomic::get(frozenFrameLocked) &&
+                        if (freshWorld && !loading && postLoadTransition && !MatchesFrozenFrame(desc)) {
+
+                            logger::warn(
+                                "no compatible retained scene after loading (source={}x{} format={}, target={}x{} format={}); releasing presentation",
+                                frozenFrameDesc.width, frozenFrameDesc.height, std::to_underlying(frozenFrameDesc.format),
+                                desc.width, desc.height, std::to_underlying(desc.format));
+                            FinishPostLoadPresentation();
+                        }
+
+                        // Paused CS menus can produce an SDR scene even when gameplay
+                        // uses HDR. Replacing the retained HDR photograph here also drops
+                        // its conversion state; the next save load then aborts its fade
+                        // on the SDR/HDR mismatch. Keep the last completed gameplay image.
+                        auto* ui = RE::UI::GetSingleton();
+                        const bool menuSdrFrame = compositeAfterPostProcessing && frozenFrame &&
+                            frozenFrameDesc.format == REX::W32::DXGI_FORMAT_R16G16B16A16_FLOAT &&
+                            desc.format != REX::W32::DXGI_FORMAT_R16G16B16A16_FLOAT &&
+                            ui && (ui->GameIsPaused() || ui->IsMenuOpen(RE::Console::MENU_NAME));
+                        if (menuSdrFrame) {
+                            // The photograph did not change, so its HDR encoding
+                            // constants must not be recaptured from this menu frame.
+                            Atomic::set(completedHdrSceneSincePresent, false);
+                        }
+                        if (freshWorld && !menuSdrFrame && !Atomic::get(frozenFrameLocked) &&
                             PrepareFrozenFrame(device, desc)) {
 
                             context->CopyResource(frozenFrame, targetTexture.Get());
@@ -3622,15 +3650,15 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                         if (!activeEpoch && !postLoadTransition) {
 
                             Atomic::set(preLoadOwnedFader, true);
-                            if (nativeLoadPath == NativeLoadPath::door) {
+                            if (nativeLoadPath == NativeLoadPath::door ||
+                                nativeLoadPath == NativeLoadPath::loadSave) {
 
                                 bool expected = false;
                                 if (Atomic::compare_and_set(preLoadDoorCaptureLocked, expected, true)) {
 
-                                    // The door callback can detach or disable a carried/dynamic light
-                                    // before LoadingMenu opens. Retain the last fully presented frame
-                                    // while the light is still visible, rather than locking several
-                                    // frames later during LoadingMenu construction.
+                                    // Doors and save loads must lock the last completed world
+                                    // image before their native callback changes the world or
+                                    // menu render path, rather than at LoadingMenu construction.
                                     Atomic::set(frozenFrameLocked, true);
                                     Atomic::set(presentation, ChoosePresentation());
                                     Atomic::set(preLoadDoorTransitionActive, true);
