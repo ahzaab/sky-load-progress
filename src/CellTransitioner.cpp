@@ -165,6 +165,9 @@ namespace load_progress
         Atomic::set(frozenFrameLocked, false);
         Atomic::set(preLoadDoorCaptureLocked, false);
         Atomic::set(preLoadDoorTransitionActive, false);
+        Atomic::set(preLoadDoorFadePending, false);
+        Atomic::set(preLoadDoorArrivalSignaled, false);
+        Atomic::set(preLoadDoorRecoveryDeadline, 0);
         Atomic::set(preLoadOwnedFader, false);
         Atomic::set(vanillaLoadPending, false);
         Atomic::set(fastTravelBlackPending, false);
@@ -388,6 +391,11 @@ namespace load_progress
      */
     CellTransitioner::Presentation CellTransitioner::PrepareForLoad(RE::IMenu* a_menu)
     {
+        // From this point the LoadingMenu owns the capture, even before the open event.
+        Atomic::set(preLoadDoorFadePending, false);
+        Atomic::set(preLoadDoorArrivalSignaled, false);
+        Atomic::set(preLoadDoorRecoveryDeadline, 0);
+
         const auto selected = ChoosePresentation();
         Atomic::set(presentation, selected);
         Atomic::set(postLoadReleasePending, false);
@@ -2674,6 +2682,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 }
 
                 ObserveControlRestore();
+                QueuePreLoadDoorRecovery();
                 const auto recoveryDeadline = Atomic::get(postLoadRecoveryDeadline);
                 if (!Atomic::get(epochActive) &&
                     !Atomic::get(preLoadDoorTransitionActive) &&
@@ -3552,6 +3561,74 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         a_menu->uiMovie->SetVisible(Atomic::get(faderWasVisible));
     }
 
+    void CellTransitioner::ObserveLoadingMenuCloseWithoutEpoch() noexcept
+    {
+        // A same-cell door queues the native loading-menu hide even though it never opened one.
+        // This also occurs on scripted moves, so require an initiating native door fade.
+        if (Atomic::get(preLoadDoorFadePending) && !Atomic::get(epochActive)) {
+            Atomic::set(preLoadDoorArrivalSignaled, true);
+        }
+    }
+
+    void CellTransitioner::BeginDoorArrivalCrossfade()
+    {
+        Atomic::set(preLoadDoorFadePending, false);
+        Atomic::set(preLoadDoorRecoveryDeadline, 0);
+        Atomic::set(preLoadDoorCaptureLocked, false);
+        Atomic::set(preLoadOwnedFader, false);
+        Atomic::set(loadOwnedFader, true);
+
+        // A resident teleport needs no loading-menu hold. Let the compositor wait for the
+        // first fresh destination frame and blend using the configured warm fade duration.
+        const auto now = CurrentTimeMilliseconds();
+        const auto duration = Settings::GetSingleton().GetWarmTransition().fadeOut.count();
+        Atomic::set(holdAfterLoad, 0);
+        Atomic::set(fadeOutDuration, duration);
+        Atomic::set(postLoadRecoveryDeadline, now + duration + 5000);
+        Atomic::set(postProcessingPassesSincePresent, 0);
+        Atomic::set(worldRenderedSincePresent, false);
+        Atomic::set(postLoadFadeStart, compositeAfterPostProcessing ? 0 : now);
+        Atomic::set(postLoadFadePending, compositeAfterPostProcessing);
+        Atomic::set(preLoadDoorTransitionActive, false);
+
+        if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+            logger::info("door arrived without LoadingMenu; armed {}ms retained-frame crossfade", duration);
+        }
+    }
+
+    void CellTransitioner::QueuePreLoadDoorRecovery()
+    {
+        const auto deadline = Atomic::get(preLoadDoorRecoveryDeadline);
+        if (deadline == 0 || CurrentTimeMilliseconds() < deadline) {
+            return;
+        }
+
+        auto* tasks = SKSE::GetTaskInterface();
+        if (!tasks || Atomic::get_and_set(preLoadDoorRecoveryQueued, true)) {
+            return;
+        }
+
+        tasks->AddUITask([deadline]() {
+            Atomic::set(preLoadDoorRecoveryQueued, false);
+            if (!Atomic::get(hooksEnabled) || Atomic::get(epochActive) ||
+                Atomic::get(preLoadDoorRecoveryDeadline) != deadline ||
+                !Atomic::get_and_clear(preLoadDoorFadePending)) {
+                return;
+            }
+
+            Atomic::set(preLoadDoorRecoveryDeadline, 0);
+            Atomic::set(preLoadDoorArrivalSignaled, false);
+            Atomic::set(preLoadDoorTransitionActive, false);
+            Atomic::set(preLoadDoorCaptureLocked, false);
+            Atomic::set(frozenFrameLocked, false);
+            RestoreHUDVisibility();
+
+            if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
+                logger::info("released door transition after native fader closed without LoadingMenu");
+            }
+        });
+    }
+
     /**
      * @brief Observes native fade requests, protecting only our internal rolling capture while Skyrim
      * fades out. The original FaderData and menu behavior remain untouched for script-driven fades
@@ -3634,7 +3711,16 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                     Atomic::set(loadFaderCloseQueued, false);
                 }
 
-                if (Atomic::get(newGameTransitionActive)) {
+                // Pair the no-epoch hide with Skyrim's non-pausing return fade. A plain
+                // scripted fade or a fader hide on its own does not prove the player arrived.
+                const bool doorArrivalFade = !activeEpoch && !postLoadTransition &&
+                    !preserveSleepFader && !mapMenuFade && !Atomic::get(newGameTransitionActive) &&
+                    Atomic::get(preLoadDoorFadePending) && !data->unk10 && data->isBlack &&
+                    data->isFadingOut && !data->pausesGame &&
+                    Atomic::get_and_clear(preLoadDoorArrivalSignaled);
+                if (doorArrivalFade) {
+                    BeginDoorArrivalCrossfade();
+                } else if (Atomic::get(newGameTransitionActive)) {
                     if (!data->isFadingOut && data->isBlack && data->fadeDuration > 0.0F) {
                         Atomic::set(newGameFadeRequestSeen, true);
                     }
@@ -3653,6 +3739,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                             if (nativeLoadPath == NativeLoadPath::door ||
                                 nativeLoadPath == NativeLoadPath::loadSave) {
 
+                                Atomic::set(preLoadDoorRecoveryDeadline, 0);
+                                Atomic::set(preLoadDoorArrivalSignaled, false);
+                                Atomic::set(preLoadDoorFadePending, nativeLoadPath == NativeLoadPath::door);
                                 bool expected = false;
                                 if (Atomic::compare_and_set(preLoadDoorCaptureLocked, expected, true)) {
 
@@ -3696,8 +3785,19 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
                 // outside the load-suppression window (or for explicitly preserved native flows).
                 restorePresentation = preserveSleepFader || mapMenuFade || vanillaLoadFade ||
                                       Atomic::get(newGameTransitionActive) ||
-                                      (!activeEpoch && !postLoadTransition && !nativeLoadFade);
-            } else if (a_message.type == RE::UI_MESSAGE_TYPE::kHide) {
+                                      (!activeEpoch && !postLoadTransition && !nativeLoadFade && !doorArrivalFade);
+            } else if (a_message.type == RE::UI_MESSAGE_TYPE::kHide ||
+                       a_message.type == RE::UI_MESSAGE_TYPE::kForceHide) {
+
+                if (!activeEpoch && Atomic::get(preLoadDoorFadePending)) {
+                    // The initiating fader can close just before LoadingMenu opens. Give that
+                    // handoff time to claim the retained image before recovering a no-menu door.
+                    constexpr auto doorLoadingMenuGraceMs = 250;
+                    std::int64_t expected = 0;
+                    Atomic::compare_and_set(preLoadDoorRecoveryDeadline, expected,
+                        CurrentTimeMilliseconds() + doorLoadingMenuGraceMs);
+                    restorePresentation = true;
+                }
 
                 Atomic::set(sleepFadeRequestDeadline, 0);
                 Atomic::set(sleepFaderActive, false);

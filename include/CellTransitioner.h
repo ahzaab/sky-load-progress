@@ -58,6 +58,7 @@ namespace load_progress
         static Presentation      PrepareForLoad(RE::IMenu* a_menu);
         static void              BeginLoad();
         static void              EndLoad();
+        static void              ObserveLoadingMenuCloseWithoutEpoch() noexcept;
         static void              BeginNewGameTransition();
         static void              CancelNewGameTransition();
         static void              ObserveMainMenuOpening();
@@ -132,6 +133,8 @@ namespace load_progress
         static void                   FastTravelFadeCallbackRun(void*);
         static void                   SaveLoadFadeCallbackRun(void*);
         static void                   RestoreFaderPresentation(RE::IMenu*);
+        static void                   QueuePreLoadDoorRecovery();
+        static void                   BeginDoorArrivalCrossfade();
         static RE::UI_MESSAGE_RESULTS FaderMenuProcessMessage(RE::IMenu*, RE::UIMessage&);
         static void                   FaderMenuAdvanceMovie(RE::IMenu*, float, std::uint32_t);
         static void                   MistMenuPostDisplay(RE::IMenu*);
@@ -156,6 +159,11 @@ namespace load_progress
         inline static std::atomic_bool                      frozenFrameLocked{ false };
         inline static std::atomic_bool                      preLoadDoorCaptureLocked{ false };
         inline static std::atomic_bool                      preLoadDoorTransitionActive{ false };
+        // Fader and LoadingMenu hooks own the door request. Present only schedules its recovery.
+        inline static std::atomic_bool                      preLoadDoorFadePending{ false };
+        inline static std::atomic_bool                      preLoadDoorArrivalSignaled{ false };
+        inline static std::atomic_int64_t                    preLoadDoorRecoveryDeadline{};
+        inline static std::atomic_bool                       preLoadDoorRecoveryQueued{ false };
         inline static std::atomic_int64_t                   postLoadFadeStart{};
         inline static std::atomic_bool                      postLoadFadePending{};
         // Keep scene/UI ownership through CS's final conversion and proxy Present.

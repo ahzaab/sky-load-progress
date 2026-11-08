@@ -1275,6 +1275,7 @@ namespace load_progress
         // completed load starts CellTransitioner's post-load compositor with a stale retained frame.
         // DA09's scripted same-cell MoveTo sequence exercises this path around its white IMODs.
         if (!Atomic::get_and_clear(epochActive)) {
+            CellTransitioner::ObserveLoadingMenuCloseWithoutEpoch();
 
             if (Settings::GetSingleton().IsLoadingLoggingEnabled()) {
                 logger::info("ignored Loading Menu close without an active loading epoch");
