@@ -3561,6 +3561,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         a_menu->uiMovie->SetVisible(Atomic::get(faderWasVisible));
     }
 
+    /**
+     * @brief Latches a possible door arrival for the next native fader request to confirm.
+     */
     void CellTransitioner::ObserveLoadingMenuCloseWithoutEpoch() noexcept
     {
         // A same-cell door queues the native loading-menu hide even though it never opened one.
@@ -3570,6 +3573,9 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
     }
 
+    /**
+     * @brief Transfers the retained door image to the normal post-load compositor without a loading epoch.
+     */
     void CellTransitioner::BeginDoorArrivalCrossfade()
     {
         Atomic::set(preLoadDoorFadePending, false);
@@ -3596,6 +3602,10 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
         }
     }
 
+    /**
+     * @brief Schedules release of an unclaimed door capture from Present.
+     * @details UI state is restored on the game UI thread, after rechecking ownership.
+     */
     void CellTransitioner::QueuePreLoadDoorRecovery()
     {
         const auto deadline = Atomic::get(preLoadDoorRecoveryDeadline);
@@ -3610,6 +3620,7 @@ float4 main(float4 color : COLOR0, float2 textureCoordinate : TEXCOORD0) : SV_Ta
 
         tasks->AddUITask([deadline]() {
             Atomic::set(preLoadDoorRecoveryQueued, false);
+            // A loading epoch or a later door may take ownership while this task is queued.
             if (!Atomic::get(hooksEnabled) || Atomic::get(epochActive) ||
                 Atomic::get(preLoadDoorRecoveryDeadline) != deadline ||
                 !Atomic::get_and_clear(preLoadDoorFadePending)) {
